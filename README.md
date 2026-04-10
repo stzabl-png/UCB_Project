@@ -34,7 +34,7 @@ Learning where to grasp objects by combining human contact priors with robot sim
 ### 1. Install
 
 ```bash
-git clone https://github.com/<your-org>/Affordance2Grasp.git
+git clone https://github.com/stzabl-png/UCB_Project.git
 cd Affordance2Grasp
 pip install -r requirements.txt
 ```
