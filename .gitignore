@@ -1,0 +1,45 @@
+# Data & outputs (go to HuggingFace, not GitHub)
+output/
+data_hub/
+_DATA/
+# Binary files
+*.pth
+*.ckpt
+*.pt
+*.hdf5
+*.h5
+*.obj
+*.stl
+*.ply
+*.usd
+*.usda
+*.usdc
+*.npz
+*.tar.gz
+*.zip
+# Images
+*.png
+*.jpg
+*.jpeg
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+# Environment
+.env
+.venv/
+# IDE
+.vscode/
+.idea/
+*.swp
+.gemini/
+# System
+.DS_Store
+Thumbs.db
+*.log
+*.tif
+assets/scene/
+sim/assets_scene/

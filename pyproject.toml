@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "affordance2grasp"
+version = "1.0.0"
+description = "From human contact priors to robotic grasping via affordance learning"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "h5py>=3.8",
+    "trimesh>=3.20",
+    "torch>=2.0",
+    "matplotlib>=3.7",
+    "huggingface-hub",
+]
+
+[project.optional-dependencies]
+vis = ["open3d>=0.17", "plotly>=5.0", "termcolor"]
+dev = ["pytest", "black", "ruff"]
+
+[tool.setuptools.packages.find]
+include = ["model*", "data*", "inference*", "sim*", "tools*", "analysis*"]
