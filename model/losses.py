@@ -22,7 +22,9 @@ class FocalLoss(nn.Module):
 
     def forward(self, pred, target):
         # pred: (B*N, 2), target: (B*N,)
-        ce = F.cross_entropy(pred, target, reduction='none')
+        # Weight: ~250:1 imbalance → use class weights
+        weight = torch.tensor([1.0, 50.0], device=pred.device)
+        ce = F.cross_entropy(pred, target, weight=weight, reduction='none')
         pt = torch.exp(-ce)
         alpha_t = torch.where(target == 1, self.alpha, 1 - self.alpha)
         loss = alpha_t * (1 - pt) ** self.gamma * ce

@@ -202,8 +202,8 @@ class PointNet2Seg(nn.Module):
         x = l0_points.permute(0, 2, 1)
         x = self.drop1(F.relu(self.bn1(self.conv1(x))))
         x = self.conv2(x)
-        # (B, 1, N)
-        seg_logits = torch.sigmoid(x.permute(0, 2, 1)).squeeze(-1)  # (B, N)
+        # (B, num_classes, N) → (B, N, num_classes)
+        seg_logits = x.permute(0, 2, 1)  # raw logits, no activation
 
 
         if self.predict_force_center:

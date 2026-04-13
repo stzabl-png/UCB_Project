@@ -131,10 +131,12 @@ class MultiTaskDataset(Dataset):
 
         # 7 通道: xyz(3) + normals(3) + human_prior(1)
         features = np.concatenate([pts, nrm, hp.reshape(-1, 1)], axis=-1)
+        # Binarize continuous labels: threshold at 0.5
+        lbl_binary = (lbl > 0.5).astype(np.int64)
         return (
             torch.from_numpy(pts),
             torch.from_numpy(features),
-            torch.from_numpy(lbl).long(),
+            torch.from_numpy(lbl_binary),
             torch.from_numpy(fc).float(),
         )
 
@@ -353,8 +355,8 @@ def main():
     train_dataset.force_centers = np.concatenate([train_dataset.force_centers, train_from_val.force_centers])
     train_dataset.num_samples = len(train_dataset.points)
 
-    contact_ratio_train = train_dataset.labels.sum() / train_dataset.labels.size * 100
-    contact_ratio_val = val_dataset.labels.sum() / val_dataset.labels.size * 100
+    contact_ratio_train = (train_dataset.labels > 0.5).sum() / train_dataset.labels.size * 100
+    contact_ratio_val = (val_dataset.labels > 0.5).sum() / val_dataset.labels.size * 100
     fc_valid_train = (np.linalg.norm(train_dataset.force_centers, axis=1) > 0.001).sum()
     fc_valid_val = (np.linalg.norm(val_dataset.force_centers, axis=1) > 0.001).sum()
 
