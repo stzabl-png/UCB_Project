@@ -66,7 +66,9 @@ CONTACT_VIS_DIR = os.path.join(OUTPUT_DIR, "contact_region_vis")
 
 # SAM3D mesh reconstruction
 SAM3D_DIR = os.environ.get("SAM3D_DIR", "")
-SAM3D_CACHE = os.path.join(OUTPUT_DIR, "sam3d_mesh_cache")
+SAM3D_CACHE = os.path.join(OUTPUT_DIR, "sam3d_obj_cache")   # triangle mesh .obj files
+SAM3D_PLY_CACHE = os.path.join(OUTPUT_DIR, "sam3d_mesh_cache")  # raw Gaussian Splat .ply files
+
 
 # ============================================================
 # Default Parameters
