@@ -228,10 +228,8 @@ python tools/batch_obj_pose.py --dataset ho3d_v3
 ```bash
 conda activate bundlesdf
 
-# ── DexYCB（3D 距离法 + 深度归一化）
+# ── DexYCB + HO3D v3（统一使用 3D 距离法 + 深度归一化）
 python data/batch_align_mano_fp.py --dataset dexycb
-
-# ── HO3D v3（2D 投影法）
 python data/batch_align_mano_fp.py --dataset ho3d_v3
 ```
 

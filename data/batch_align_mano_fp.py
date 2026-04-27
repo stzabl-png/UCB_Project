@@ -433,9 +433,11 @@ def process_object(ds, obj_ds, obj_name, seqs, mesh_path, threshold, redo=False)
         if K_params:
             tqdm.write(f"    [K] fx={K_params[0]:.0f} for {seq_id}")
 
-        # DexYCB: FP + HaPTIC share same Depth Pro K → same metric space → 3D distance
-        # ARCTIC/others: Depth Pro K biased (fx ~46% overestimate) → 2D projection
-        contact_mode = '3d' if ds == 'dexycb' else '2d'
+        # 3D 距离法适用条件: FP + HaPTIC 都用同一 Depth Pro K (two-pass 校准后同米制空间)
+        # DexYCB: RealSense D415, fx 误差 < 1% → 3D 距离
+        # HO3D v3: 同款相机, two-pass 后 fx 误差 -1.5% → 3D 距离
+        # ARCTIC/其他: Depth Pro K 偏差 ~44%, 尺度不一致 → 2D 投影兜底
+        contact_mode = '3d' if ds in ('dexycb', 'ho3d_v3') else '2d'
 
         cnt, n_ok, n_div = accumulate_contacts_sequence(
             mesh_verts, fp_poses, mano_frames, threshold,
