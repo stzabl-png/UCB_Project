@@ -67,6 +67,15 @@ OBJECT_ORIENTATION = [0.0, 0.0, 0.0]
 APPROACH_HEIGHT = 0.15  # 物体上方 15cm
 LIFT_HEIGHT = 0.15      # 提起 15cm (Franka workspace 限制)
 
+# 每物体旋转覆盖 (object_rotation_overrides.json)
+_OVERRIDE_FILE = os.path.join(os.path.dirname(__file__), 'object_rotation_overrides.json')
+try:
+    import json as _json
+    with open(_OVERRIDE_FILE) as _f:
+        OBJECT_ROTATION_OVERRIDES = _json.load(_f)
+    OBJECT_ROTATION_OVERRIDES = {k: v for k, v in OBJECT_ROTATION_OVERRIDES.items() if not k.startswith('_')}
+except Exception:
+    OBJECT_ROTATION_OVERRIDES = {}
 
 # ============================================================
 # Scene Setup
@@ -131,7 +140,19 @@ def setup_scene(obj_id, object_scale):
         cprint(f"   先运行: sim45 sim/convert_batch_usd.py", "yellow")
         return None
 
-    obj_z_offset = 0.075 * object_scale
+    # 读取每物体覆盖
+    _override = OBJECT_ROTATION_OVERRIDES.get(obj_id, None)
+    if isinstance(_override, dict):
+        obj_z_offset = _override.get('z_offset', 0.075 * object_scale)
+        obj_orientation = _override.get('rotation', list(OBJECT_ORIENTATION))
+        if 'z_offset' in _override:
+            cprint(f"   z_offset 覆盖: {obj_id} → {obj_z_offset*100:.1f}cm", "cyan")
+        if 'rotation' in _override:
+            cprint(f"   ⮻ 朝向覆盖: {obj_id} → {obj_orientation}°", "cyan")
+    else:
+        obj_z_offset = 0.075 * object_scale
+        obj_orientation = list(OBJECT_ORIENTATION)
+
     obj_pos = list(OBJECT_POSITION)
     obj_pos[2] += obj_z_offset
 
@@ -141,8 +162,8 @@ def setup_scene(obj_id, object_scale):
 
     obj = RigidObject(
         world, usd_path=usd_path,
-        pos=np.array(obj_pos), ori=np.array(OBJECT_ORIENTATION),
-        scale=np.array([object_scale] * 3), mass=0.05,  # 空瓶 ~50g
+        pos=np.array(obj_pos), ori=np.array(obj_orientation),
+        scale=np.array([object_scale] * 3), mass=0.05,
     )
 
     # 碰撞 + 摩擦力设置
@@ -380,8 +401,13 @@ def execute_trajectory(franka, world, traj):
 # ============================================================
 # Main Grasp Execution
 # ============================================================
-def execute_grasp(scene, grasp_pos_obj, grasp_rot_obj, gripper_width, object_scale):
-    """完整抓取流程."""
+def execute_grasp(scene, grasp_pos_obj, grasp_rot_obj, gripper_width, object_scale,
+                  is_manual=False, mesh_prerotation_euler=None):
+    """完整抓取流程.
+    is_manual: 手动标注时 position=指尖中心 → sim 里减 TCP偏移
+               自动生成时 position=panda_hand 已含偏移 → 不再减 (防双重)
+    mesh_prerotation_euler: 生成抓取时预旋转角 (degrees)。除去 T_world_obj 中的对应旋转
+    """
     global _CUROBO_MG
 
     franka = scene["franka"]
@@ -393,7 +419,16 @@ def execute_grasp(scene, grasp_pos_obj, grasp_rot_obj, gripper_width, object_sca
 
     # scale 影响: OBJ 坐标中的位置需要乘以 scale
     grasp_pos_scaled = grasp_pos_obj * object_scale
-    pos_world, rot_world = transform_grasp_to_world(grasp_pos_scaled, grasp_rot_obj, T_world_obj)
+
+    # 如果 grasp 在预旋转 mesh 上生成, 除去 T_world_obj 中的预旋转防双重旋转
+    if mesh_prerotation_euler and any(abs(e) > 0.5 for e in mesh_prerotation_euler):
+        _Rp = Rotation.from_euler('xyz', mesh_prerotation_euler, degrees=True).as_matrix()
+        T_eff = T_world_obj.copy()
+        T_eff[:3, :3] = T_world_obj[:3, :3] @ _Rp.T
+    else:
+        T_eff = T_world_obj
+
+    pos_world, rot_world = transform_grasp_to_world(grasp_pos_scaled, grasp_rot_obj, T_eff)
 
     # ⭐ 关键: 坐标系约定转换
     # 我们的抓取坐标系:     x = 夹爪开合,  y = 沿瓶身(竖直),  z = 接近
@@ -407,15 +442,15 @@ def execute_grasp(scene, grasp_pos_obj, grasp_rot_obj, gripper_width, object_sca
     rot_world = rot_world @ R_adapt
 
     # TCP 偏移处理
-    # ⭐ 手动标注的 position = 指尖夹持中心, 需要在 sim 内减去 TCP 偏移
-    # ⭐ 自动生成的 position = panda_hand 位置, 已包含 TCP 偏移
-    TCP_OFFSET = 0.105
-    approach_dir = rot_world[:, 2]  # 接近方向 = 旋转矩阵第3列
-    pos_world = pos_world - approach_dir * TCP_OFFSET
+    # 手动标注: position = 指尖夹持中心 → 减 TCP 偏移得到 panda_hand 位置
+    # 自动生成: position = panda_hand 已包含 TCP 偏移 → 不再减 (防双重)
+    if is_manual:
+        TCP_OFFSET = 0.105
+        approach_dir = rot_world[:, 2]
+        pos_world = pos_world - approach_dir * TCP_OFFSET
 
-    # Z 安全限制 — 侧面抓取时手臂关节比夹爪低, 需要间距
-    # 桌面 z=0.80, 最低抓取 z=0.88 (+8cm)
-    MIN_GRASP_Z = TABLE_TOP_Z + 0.08
+    # Z 安全限制 — 只拦截明显低于桌面的情况
+    MIN_GRASP_Z = TABLE_TOP_Z + 0.02
     if pos_world[2] < MIN_GRASP_Z:
         cprint(f"   ⚠️ Z={pos_world[2]:.3f} 太低 (需 >{MIN_GRASP_Z:.3f}), clamp up", "yellow")
         pos_world[2] = MIN_GRASP_Z
@@ -494,10 +529,9 @@ def execute_grasp(scene, grasp_pos_obj, grasp_rot_obj, gripper_width, object_sca
             for _ in range(3):
                 world.step(render=True)
     else:
-        # 如果规划失败, 用简单线性插值
-        cprint(f"   → Final approach 规划失败, 用线性插值...", "yellow")
-        current_joints = franka.get_joint_positions()[:7]
-        # 保持当前位置, 不额外推进
+        # Final approach 失败 → 提前返回失败, 不在预抓取点闭拢夹爪
+        cprint(f"   → Final approach 规划失败, 判定为失败 (不在空中闭拢)", "red")
+        return {'success': False, 'contact_points_local': None, 'finger_width_actual': None}
 
 
     # ---- Phase 4: 闭合夹爪 + 力传感器 ----
@@ -654,6 +688,9 @@ def main():
         if "candidates" in f:
             # v2 自动生成: candidates/candidate_N
             n_cand = f["candidates"].attrs["n_candidates"]
+            # 读取 mesh 预旋转 (默认无)
+            _meta = f.get("metadata", None)
+            mesh_prerot = list(_meta.attrs.get("mesh_prerotation_euler", [0.0, 0.0, 0.0])) if _meta else [0.0, 0.0, 0.0]
             for i in range(n_cand):
                 ci = f[f"candidates/candidate_{i}"]
                 grasp_candidates.append({
@@ -663,8 +700,10 @@ def main():
                     "rotation": ci["rotation"][:],
                     "gripper_width": ci.attrs["gripper_width"],
                     "approach_type": ci.attrs.get("approach_type", "raycast"),
+                    "is_manual": False,          # 自动生成: position=panda_hand, 不减 TCP 偏移
+                    "mesh_prerotation_euler": mesh_prerot,
                 })
-            cprint(f"  Candidates: {n_cand} (v2 multi-candidate)", "cyan")
+            cprint(f"  Candidates: {n_cand} (v2 auto, prerot={mesh_prerot})", "cyan")
 
         elif "candidate_0" in f:
             # 手动标注格式: candidate_N 在根目录
@@ -678,10 +717,12 @@ def main():
                     "score": ci.attrs.get("score", 80.0),
                     "position": ci["position"][:],
                     "rotation": ci["rotation"][:],
-                    "gripper_width": ci.attrs["gripper_width"],
+                    "gripper_width": ci["gripper_width"],
                     "approach_type": ci.attrs.get("approach_type", "horizontal"),
+                    "is_manual": True,           # 手动标注: position=指尖中心, 需减 TCP 偏移
+                    "mesh_prerotation_euler": [0.0, 0.0, 0.0],
                 })
-            cprint(f"  Candidates: {len(grasp_candidates)} (manual annotation)", "cyan")
+            cprint(f"  Candidates: {len(grasp_candidates)} (manual annotation, is_manual=True)", "cyan")
 
         else:
             # v1 兼容: 只有一个位姿
@@ -734,12 +775,17 @@ def main():
         cprint(f"{'='*40}", "yellow")
 
         try:
+            # 自动生成 (is_manual=False): position=panda_hand, 不减 TCP
+            # 手动标注 (is_manual=True):  position=指尖中心, 减 TCP
+            is_manual = cand.get("is_manual", True)  # 默认 True (安全: 背景兼容)
             grasp_result = execute_grasp(
                 scene,
                 cand["position"],
                 cand["rotation"],
                 cand["gripper_width"],
-                args.object_scale
+                args.object_scale,
+                is_manual=is_manual,
+                mesh_prerotation_euler=cand.get("mesh_prerotation_euler", None)
             )
             success = grasp_result['success']
         except Exception as e:
@@ -769,16 +815,28 @@ def main():
         # 每次尝试后都重置场景 (最后一个除外)
         if attempt < len(grasp_candidates) - 1:
             cprint(f"  → 重置场景, 尝试下一个候选...", "yellow")
-            # 重置物体位置+朝向 (竖直)
-            obj_z_offset = 0.075 * args.object_scale
+            # 读取每物体朝向+高度覆盖 (和 setup_scene 保持一致)
+            _ovr = OBJECT_ROTATION_OVERRIDES.get(obj_id, None)
+            if isinstance(_ovr, dict):
+                reset_z_offset = _ovr.get('z_offset', 0.075 * args.object_scale)
+                reset_ori = _ovr.get('rotation', list(OBJECT_ORIENTATION))
+            else:
+                reset_z_offset = 0.075 * args.object_scale
+                reset_ori = list(OBJECT_ORIENTATION)
             reset_pos = list(OBJECT_POSITION)
-            reset_pos[2] += obj_z_offset
-            scene["obj"].set_obj_pose(np.array(reset_pos), ori=np.array([0.0, 0.0, 0.0]))
-            # 机械臂直接回 home 关节角 (Franka 默认)
+            reset_pos[2] += reset_z_offset
+            # 设定位姿并清零速度
+            scene["obj"].set_obj_pose(np.array(reset_pos), ori=np.array(reset_ori))
+            try:
+                scene["obj"].rigid.set_linear_velocity(np.zeros(3))
+                scene["obj"].rigid.set_angular_velocity(np.zeros(3))
+            except Exception:
+                pass
+            # 机械臂回 home
             home_joints = np.array([0, -0.785, 0, -2.356, 0, 1.571, 0.785, 0.04, 0.04])
             scene["franka"].set_joint_positions(home_joints)
-            # 等物理稳定
-            for _ in range(80):
+            # 等物理稳定 (多等几步确保鼠标落稳)
+            for _ in range(150):
                 scene["world"].step(render=True)
 
     # ---- 保存 Robot GT 结果 (所有成功的都保存) ----

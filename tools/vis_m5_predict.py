@@ -19,13 +19,18 @@ from pointnet2 import PointNet2Seg
 PROJ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MESH_DIR = os.path.join(PROJ, 'data_hub', 'meshes', 'v1')
 HP_DIR = os.path.join(PROJ, 'data_hub', 'human_prior')
-CKPT = os.path.join(PROJ, 'output', 'checkpoints_m5', 'best_m5_model.pth')
+HP_INFER_DIR = os.path.join(PROJ, 'data_hub', 'human_prior_infer')
+CKPT_DEFAULT = os.path.join(PROJ, 'output', 'checkpoints_m5', 'best_m5_model.pth')
 N_POINTS = 4096
 
 
 def load_human_prior(obj_id):
-    for name in [f'{obj_id}.hdf5', f'grab_{obj_id}.hdf5']:
-        path = os.path.join(HP_DIR, name)
+    # 先找 infer 第，再找旧版
+    for path in [
+        os.path.join(HP_INFER_DIR, f'oakink_{obj_id}.hdf5'),
+        os.path.join(HP_DIR, f'{obj_id}.hdf5'),
+        os.path.join(HP_DIR, f'grab_{obj_id}.hdf5'),
+    ]:
         if os.path.exists(path):
             with h5py.File(path, 'r') as f:
                 return f['point_cloud'][()].astype(np.float32), \
@@ -59,20 +64,25 @@ def predict(obj_id):
         hp = np.zeros(N_POINTS, dtype=np.float32)
         print(f"📂 从 mesh 采样点云")
 
-    # 加载模型
+    # 加载模型 (v5 multi-task)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model = PointNet2Seg(num_classes=1, in_channel=7).to(device)
-    ckpt = torch.load(CKPT, map_location=device)
+    model = PointNet2Seg(num_classes=2, in_channel=7, predict_force_center=True).to(device)
+    ckpt = torch.load(args.ckpt, map_location=device)
     model.load_state_dict(ckpt['model_state_dict'])
     model.eval()
-    print(f"✅ 模型加载: epoch={ckpt['epoch']}, val_loss={ckpt['val_loss']:.4f}")
+    epoch = ckpt.get('epoch', '?')
+    f1    = ckpt.get('val_f1', ckpt.get('val_loss', '?'))
+    print(f"✅ 模型加载: epoch={epoch}, val_f1={f1}")
 
     # 推理 (4096 点)
     pts_t = torch.from_numpy(pc).unsqueeze(0).to(device)
     features = np.concatenate([pc, normals, hp.reshape(-1, 1)], axis=-1)
     feat_t = torch.from_numpy(features).unsqueeze(0).to(device)
     with torch.no_grad():
-        pred_sparse = model(pts_t, feat_t).squeeze(0).cpu().numpy()
+        seg_pred, fc_pred = model(pts_t, feat_t)   # v5 returns tuple
+        # seg_pred: (1, N, 2) → softmax → class-1 prob
+        probs = torch.softmax(seg_pred[0], dim=-1)[:, 1].cpu().numpy()  # (N,)
+    pred_sparse = probs
 
     # 密集采样 30K 点用于可视化
     N_DENSE = 30000
@@ -113,6 +123,8 @@ def predict(obj_id):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--obj', required=True, help='物体 ID')
+    parser.add_argument('--obj',  required=True, help='物体 ID')
+    parser.add_argument('--ckpt', default=CKPT_DEFAULT, help='checkpoint 路径')
+    parser.add_argument('--save', default=None, help='保存图片路径 (不开窗口)')
     args = parser.parse_args()
     predict(args.obj)

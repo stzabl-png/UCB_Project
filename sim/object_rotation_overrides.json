@@ -1,0 +1,4 @@
+{
+  "__comment__": "per-object placement overrides. rotation=[roll,pitch,yaw] degrees. z_offset=meters above table (default 0.075*scale)",
+  "C51001": {"rotation": [90, 0, 0], "z_offset": 0.025}
+}

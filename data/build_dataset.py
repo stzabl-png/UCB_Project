@@ -91,7 +91,17 @@ def main():
     parser.add_argument("--augment", type=int, default=3, help="Number of augmented samples per frame")
     parser.add_argument("--intent", type=str, default=None, help="Filter by intent (hold/use/liftup)")
     parser.add_argument("--output_dir", type=str, default=None, help="Output dir (default: dataset/)")
+    parser.add_argument("--infer", action="store_true",
+                        help="GT-free 模式: 使用 human_prior_infer/ + robot_gt_infer/ 作为训练数据")
+    parser.add_argument("--infer-only", action="store_true", dest="infer_only",
+                        help="纯 GT-free: 跳过 NPZ 和 training_m5，只用 human_prior_infer + robot_gt_infer")
+    parser.add_argument("--infer-prior-dir", type=str, default=None, dest="infer_prior_dir",
+                        help="GT-free human_prior 目录 (default: data_hub/human_prior_infer)")
+    parser.add_argument("--infer-robot-dir", type=str, default=None, dest="infer_robot_dir",
+                        help="GT-free robot_gt 目录 (default: output/robot_gt_infer)")
     args = parser.parse_args()
+    if args.infer_only:
+        args.infer = True   # infer-only 隐含 infer
 
     output_dir = args.output_dir or DATASET_DIR
     os.makedirs(output_dir, exist_ok=True)
@@ -197,7 +207,7 @@ def main():
     # ============================================================
     m5_dir = getattr(config, 'TRAINING_M5_DIR', None)
     m5_count = 0
-    if m5_dir and os.path.isdir(m5_dir):
+    if m5_dir and os.path.isdir(m5_dir) and not args.infer_only:
         m5_files = sorted(glob.glob(os.path.join(m5_dir, "*.hdf5")))
         print(f"\n  Found {len(m5_files)} training_m5 HDF5 files")
 
@@ -248,6 +258,99 @@ def main():
         print(f"  Ingested {m5_count} m5 files → {m5_count * args.augment} samples")
     else:
         print(f"\n  No training_m5 directory found (skipping)")
+
+    # ============================================================
+    # GT-free: 读取 human_prior_infer/ + robot_gt_infer/ (仅有成功对象)
+    # ============================================================
+    if args.infer:
+        hp_infer_dir  = args.infer_prior_dir or os.path.join(config.DATA_HUB, 'human_prior_infer')
+        rgt_infer_dir = args.infer_robot_dir or os.path.join(config.OUTPUT_DIR, 'robot_gt_infer')
+        infer_files   = sorted(glob.glob(os.path.join(hp_infer_dir, 'oakink_*.hdf5')))
+        print(f"\n  [GT-free] Found {len(infer_files)} human_prior_infer files")
+
+        infer_count = infer_skip = 0
+        for hp_path in infer_files:
+            obj_id   = os.path.splitext(os.path.basename(hp_path))[0].replace('oakink_', '')
+            rgt_path = os.path.join(rgt_infer_dir, f'{obj_id}_robot_gt.hdf5')
+
+            # 过滤: 必须有 sim 成功的拊取
+            n_ok = 0
+            if os.path.exists(rgt_path):
+                try:
+                    with h5py.File(rgt_path, 'r') as rf:
+                        n_ok = int(rf.attrs.get('n_successful', 0))
+                except Exception:
+                    pass
+            if n_ok == 0:
+                infer_skip += 1
+                continue
+
+            try:
+                with h5py.File(hp_path, 'r') as f:
+                    pc  = f['point_cloud'][()].astype(np.float32)  # (N, 3)
+                    nrm = f['normals'][()].astype(np.float32)       # (N, 3)
+                    hp  = f['human_prior'][()].astype(np.float32)  # (N,)
+                    fc  = f['force_center'][()] if 'force_center' in f \
+                          else np.zeros(3, dtype=np.float32)
+            except Exception as e:
+                print(f"    ⚠️  Failed to load {hp_path}: {e}")
+                infer_skip += 1
+                continue
+
+            # ── 从成功抓取的 grasp_point + finger_dir + gripper_width 生成接触点 ──
+            # grasp_point 在物体 local frame (与 pc 同坐标系)
+            # contact_points_local 是世界坐标，不适用
+            contact_pts_list = []
+            try:
+                with h5py.File(rgt_path, 'r') as rf:
+                    sg = rf.get('successful_grasps', {})
+                    for gkey in sg.keys():
+                        g = sg[gkey]
+                        if 'grasp_point' in g and 'finger_dir' in g:
+                            gp  = g['grasp_point'][()]    # (3,) object local
+                            fd  = g['finger_dir'][()]     # (3,) 夹爪开合方向
+                            gw  = float(g.attrs.get('finger_width_actual',
+                                        g.attrs.get('gripper_width', 0.05)))
+                            # 左右指尖接触点 (object local frame)
+                            left  = gp + fd * (gw / 2)
+                            right = gp - fd * (gw / 2)
+                            contact_pts_list.append(left[None])
+                            contact_pts_list.append(right[None])
+            except Exception as e:
+                print(f"    ⚠️  {obj_id} grasp_point read error: {e}")
+
+            if contact_pts_list:
+                contact_pts = np.vstack(contact_pts_list)  # (M*2, 3)
+                tree = cKDTree(contact_pts)
+                dists, _ = tree.query(pc)
+                robot_gt = (dists < args.contact_radius).astype(np.float32)
+            else:
+                robot_gt = hp  # fallback
+
+            n_rgt = int((robot_gt > 0.5).sum())
+            print(f"    {obj_id}: hp={int(hp.sum())} rgt={n_rgt} finger_pts={len(contact_pts_list)*2}")
+
+            # Resample 到 num_points
+            n_pts = len(pc)
+            if n_pts != args.num_points:
+                idx = np.random.choice(n_pts, args.num_points,
+                                       replace=(n_pts < args.num_points))
+                pc, nrm, hp, robot_gt = pc[idx], nrm[idx], hp[idx], robot_gt[idx]
+
+            for _ in range(args.augment):
+                all_points.append(pc)
+                all_normals.append(nrm)
+                all_human_priors.append(hp)
+                all_labels.append(robot_gt)     # ← 真实 sim 指尖接触标签
+                all_force_centers.append(fc.astype(np.float32))
+                all_obj_ids.append(obj_id)
+                all_categories.append('oakink_infer')
+                all_intents.append('grasp')
+
+            infer_count += 1
+
+        print(f"  [GT-free] Ingested {infer_count} objects, skipped {infer_skip} (无 sim GT)")
+        print(f"  [GT-free] Added {infer_count * args.augment} samples")
 
     total_samples = len(all_points)
     print(f"\n  Grand total: {total_samples} samples")
@@ -323,7 +426,7 @@ def main():
     }
     info_path = os.path.join(output_dir, "dataset_info.json")
     with open(info_path, 'w') as f:
-        json.dump(info, f, indent=2)
+        json.dump(info, f, indent=2, default=lambda x: float(x) if hasattr(x, '__float__') else str(x))
 
     print(f"\n{'=' * 60}")
     print(f"DONE in {time.time() - total_start:.1f}s")

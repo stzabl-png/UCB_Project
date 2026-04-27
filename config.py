@@ -25,7 +25,7 @@ GRASP_MESH_DIR = os.path.join(DATA_HUB, "meshes", "grasp_collection")
 SEQUENCES_V1_DIR = os.path.join(DATA_HUB, "sequences", "v1")
 TRAINING_M5_DIR = os.path.join(DATA_HUB, "training_m5")
 
-HUMAN_PRIOR_DIR = os.path.join(DATA_HUB, "human_prior")
+HUMAN_PRIOR_DIR = os.path.join(DATA_HUB, "HumanPrior")
 ROBOT_GT_DIR = os.path.join(DATA_HUB, "robot_gt")
 TRAINING_DIR = os.path.join(DATA_HUB, "training")
 REGISTRY_PATH = os.path.join(DATA_HUB, "registry.json")
@@ -47,8 +47,8 @@ GRASPS_DIR = os.path.join(OUTPUT_DIR, "grasps")
 # Only needed for upstream data generation, NOT for training/inference.
 # ============================================================
 ISAAC_SIM_PATH = os.environ.get("ISAAC_SIM_PATH", "")
-HAWOR_DIR = os.environ.get("HAWOR_DIR", "")
-HAPTIC_DIR = os.environ.get("HAPTIC_DIR", "")
+HAWOR_DIR  = os.environ.get("HAWOR_DIR",  "/home/lyh/Project/Video2MANO&Mesh/hawor")
+HAPTIC_DIR = os.environ.get("HAPTIC_DIR", "/home/lyh/Project/haptic")
 ARCTIC_ROOT = os.environ.get("ARCTIC_ROOT", "")
 MANO_MODELS = os.path.join(ARCTIC_ROOT, "mano_v1_2", "models") if ARCTIC_ROOT else ""
 
@@ -68,6 +68,11 @@ CONTACT_VIS_DIR = os.path.join(OUTPUT_DIR, "contact_region_vis")
 SAM3D_DIR = os.environ.get("SAM3D_DIR", "")
 SAM3D_CACHE = os.path.join(OUTPUT_DIR, "sam3d_obj_cache")   # triangle mesh .obj files
 SAM3D_PLY_CACHE = os.path.join(OUTPUT_DIR, "sam3d_mesh_cache")  # raw Gaussian Splat .ply files
+
+# MegaSAM camera tracking (focal + per-frame poses + depth)
+MEGASAM_DIR = os.path.join(PROJECT_DIR, "mega-sam")
+MEGASAM_OUTPUT = os.path.join(MEGASAM_DIR, "outputs")        # {scene}_droid.npz
+MEGASAM_RECON = os.path.join(MEGASAM_DIR, "reconstructions")  # {scene}/intrinsics.npy
 
 
 # ============================================================

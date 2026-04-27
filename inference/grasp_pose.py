@@ -275,11 +275,16 @@ def generate_grasp_candidates(contact_pts, mesh, force_center=None):
         v = v / (np.linalg.norm(v) + 1e-8)
         best_width = 1e10
         best_dir = u.copy()
-        for angle_deg in range(0, 180, 15):
+        # ── 只用 gp 所在切片（±1cm）内的顶点计算局部截面宽度 ──
+        slice_t    = 0.015  # 切片半厚
+        proj_along = (verts - gp) @ approach
+        slice_mask = np.abs(proj_along) < slice_t
+        local_verts = verts[slice_mask] if slice_mask.sum() > 5 else verts
+        for angle_deg in range(0, 180, 10):
             angle = np.radians(angle_deg)
             finger_dir = np.cos(angle) * u + np.sin(angle) * v
             finger_dir = finger_dir / (np.linalg.norm(finger_dir) + 1e-8)
-            offsets = (verts - gp) @ finger_dir
+            offsets = (local_verts - gp) @ finger_dir
             w = offsets.max() - offsets.min()
             if w < best_width:
                 best_width = w
@@ -308,7 +313,7 @@ def generate_grasp_candidates(contact_pts, mesh, force_center=None):
             pa_min, pa_max = proj_vals.min(), proj_vals.max()
             cur_h = np.dot(grasp_point, principal_axis)
             best_w, best_off = width, 0.0
-            for off in np.linspace(-0.05, 0.05, 11):
+            for off in np.linspace(-0.12, 0.12, 25):  # ±12cm, 25 steps
                 h = cur_h + off
                 if h < pa_min or h > pa_max:
                     continue
@@ -434,6 +439,11 @@ def main():
                         help="Affordance 接触阈值")
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--output", type=str, default=None, help="输出 HDF5 路径 (默认自动)")
+    parser.add_argument("--ckpt", type=str, default=None, help="Checkpoint 路径 (默认自动选择)")
+    parser.add_argument("--mesh-euler", nargs=3, type=float, default=None,
+                        metavar=('ROLL', 'PITCH', 'YAW'),
+                        help="生成抓取前预旋转 mesh (degrees, ZYX Z-up)。"
+                             "用于 Sim 里有旋转覆盖的物体 (如 C51001 鼠标)")
     args = parser.parse_args()
 
     config.ensure_dirs()
@@ -458,7 +468,7 @@ def main():
 
     # ---- Step 2: Affordance 预测 ----
     print(f"\n  [2/4] Running Affordance prediction...")
-    predictor = AffordancePredictor(device=args.device, num_points=args.num_points)
+    predictor = AffordancePredictor(checkpoint=args.ckpt, device=args.device, num_points=args.num_points)
     points, normals, contact_prob, force_center = predictor.predict(args.mesh, args.num_points)
     if force_center is not None:
         print(f"         Force center (predicted): [{force_center[0]:.4f}, {force_center[1]:.4f}, {force_center[2]:.4f}]")
@@ -476,6 +486,21 @@ def main():
         print(f"         New threshold: {args.threshold:.3f}, contact points: {n_contact}")
 
     contact_pts = points[contact_mask]
+
+    # ---- 预旋转: 将 mesh 和 contact_pts 旋转到与 Sim 一致的方向 ----
+    # e.g. C51001 (鼠标) Z是头尾方向, 预旋转 [90,0,0] 后 Y 变高度轴 (Z-up)
+    mesh_euler = args.mesh_euler  # None or [roll, pitch, yaw]
+    Rp = np.eye(3)  # 预旋转矩阵默认为单位阵
+    if mesh_euler is not None:
+        from scipy.spatial.transform import Rotation as _ScipyRot
+        Rp = _ScipyRot.from_euler('xyz', mesh_euler, degrees=True).as_matrix()
+        Rp_4x4 = np.eye(4)
+        Rp_4x4[:3, :3] = Rp
+        mesh.apply_transform(Rp_4x4)          # 旋转 mesh 顶点和法线
+        contact_pts = (Rp @ contact_pts.T).T  # 旋转接触点
+        if force_center is not None:
+            force_center = Rp @ force_center  # 旋转力心
+        print(f"         ⭕ Mesh 预旋转 {mesh_euler}° (contact_pts 已同步)")
 
     # ---- Step 3: 生成多候选抓取位姿 ----
     print(f"\n  [3/4] Generating grasp candidates from {n_contact} contact points...")
@@ -544,7 +569,8 @@ def main():
         m.attrs["obj_id"] = obj_name
         m.attrs["mesh_path"] = os.path.abspath(args.mesh)
         m.attrs["num_points"] = args.num_points
-        m.attrs["coordinate_system"] = "OBJ_local"
+        m.attrs["coordinate_system"] = "OBJ_local_prerotated" if mesh_euler else "OBJ_local"
+        m.attrs["mesh_prerotation_euler"] = mesh_euler if mesh_euler else [0.0, 0.0, 0.0]
         m.attrs["version"] = "2.0_multi_candidate"
 
     print(f"\n  [4/4] ✅ Saved: {h5_path}")

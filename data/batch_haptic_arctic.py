@@ -17,12 +17,14 @@ from scipy.spatial.transform import Rotation
 # Project config
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import config
+from data.megasam_utils import load_megasam_K, K_as_haptic_intrinsics
 
 sys.path.insert(0, config.HAPTIC_DIR)
 
 ARCTIC_ROOT = config.ARCTIC_ROOT
 CROPPED_DIR = os.path.join(ARCTIC_ROOT, "arctic_data/data/cropped_images")
-MANUAL_JSON = os.path.join(config.OUTPUT_DIR, "arctic_manual_grasp_frames.json")
+# Auto-detected grasp onset for ~300 sequences (clip_start/clip_end fields)
+GRASP_ONSET_JSON = os.path.join(config.OUTPUT_DIR, "arctic_grasp_onset.json")
 CACHE_DIR = config.HAPTIC_CACHE
 RESULT_JSON = os.path.join(config.OUTPUT_DIR, "haptic_arctic_iou_results.json")
 
@@ -65,16 +67,46 @@ def load_haptic_model():
     return model, cfg
 
 
-def run_haptic_on_images(model, model_cfg, img_paths):
-    """Run HaPTIC on a folder of images, return dict of frame_idx -> (778,3) verts."""
+def run_haptic_on_images(model, model_cfg, img_paths, scene_name=None,
+                         precomputed_K=None):
+    """Run HaPTIC on a folder of images, return dict of frame_idx -> (778,3) verts.
+
+    Args:
+        model: loaded HaPTIC model.
+        model_cfg: HaPTIC OmegaConf config.
+        img_paths: list of absolute image paths.
+        scene_name: optional sequence name used to look up MegaSAM intrinsics.
+            When provided and MegaSAM output exists, the estimated K is passed
+            to HaPTIC's ``parse_det_seq`` instead of the default heuristic
+            (sqrt(W²+H²) focal + cx=W/2, cy=H/2).
+        precomputed_K: optional 9-element list (row-major 3×3 K) to pass directly
+            to HaPTIC, bypassing both MegaSAM lookup and the heuristic.
+            Depth Pro K should be passed here for metric consistency.
+    """
     from haptic.datasets.seq2clip import split_to_list_dl
     from nnutils.hand_utils import ManopthWrapper
     from nnutils import model_utils, geom_utils, mesh_utils
     from nnutils.det_utils import parse_det_seq
     from haptic.utils.renderer import cam_crop_to_full_w_depth, cam_crop_to_full_w_pp
-    
+
     hand_wrapper = ManopthWrapper().to(device)
     overlap = 1 if model_cfg.MODEL.NUM_FRAMES > 1 else 0
+
+    # --- Intrinsics priority: precomputed_K > MegaSAM > HaPTIC heuristic ------
+    if precomputed_K is not None:
+        haptic_intrinsics = precomputed_K   # already 9-element list
+        print(f"  [K] Using precomputed intrinsics (Depth Pro)")
+    else:
+        megasam_K = load_megasam_K(scene_name) if scene_name else None
+        if megasam_K is not None:
+            haptic_intrinsics = K_as_haptic_intrinsics(megasam_K)
+            print(f"  [MegaSAM] HaPTIC using K=[[{megasam_K[0,0]:.1f},0,{megasam_K[0,2]:.1f}],"
+                  f"[0,{megasam_K[1,1]:.1f},{megasam_K[1,2]:.1f}],[0,0,1]] for {scene_name}")
+        else:
+            haptic_intrinsics = None  # HaPTIC uses its sqrt(W²+H²) heuristic
+            if scene_name:
+                print(f"  [MegaSAM] No intrinsics for {scene_name}, HaPTIC using default focal")
+    # --------------------------------------------------------------------------
     
     tmp_dir = tempfile.mkdtemp(prefix="haptic_arctic_")
     try:
@@ -88,7 +120,8 @@ def run_haptic_on_images(model, model_cfg, img_paths):
         class DemoCfg:
             box_mode = "box_size_same"
         
-        seq_list = parse_det_seq(DataCfg(), DemoCfg(), skip=False)
+        seq_list = parse_det_seq(DataCfg(), DemoCfg(), skip=False,
+                                  intrinsics=haptic_intrinsics)
         if not seq_list:
             return None
         
@@ -226,22 +259,22 @@ def evaluate_contact_haptic(subj, seq, start, end, verts_dict, cam_id):
 
 def main():
     os.chdir(config.HAPTIC_DIR)
-    manual = json.load(open(MANUAL_JSON))
-    print(f"📝 Manual annotations: {len(manual)}")
+    grasp_onset = json.load(open(GRASP_ONSET_JSON))
+    print(f"📝 Grasp onset sequences: {len(grasp_onset)}")
     
     print("Loading HaPTIC model...")
     model, model_cfg = load_haptic_model()
     print("✅ Model loaded")
     
-    # Use cam 1 as default third-person camera (or try best of several)
+    # Use cam 1 as default third-person camera
     CAM_ID = 1
     
     results = {}
     all_ious = []
     
-    for key, ann in tqdm(sorted(manual.items()), desc="Processing"):
-        subj, seq = key.split('__')
-        start, end = ann['start'], ann['end']
+    for key, ann in tqdm(sorted(grasp_onset.items()), desc="Processing"):
+        subj, seq = ann['subject'], ann['sequence']
+        start, end = ann['clip_start'], ann['clip_end']
         
         cache_path = os.path.join(CACHE_DIR, f'{key}_cam{CAM_ID}.npz')
         
@@ -266,7 +299,10 @@ def main():
                     continue
                 
                 # Run HaPTIC
-                verts_dict = run_haptic_on_images(model, model_cfg, img_paths)
+                verts_dict = run_haptic_on_images(
+                    model, model_cfg, img_paths,
+                    scene_name=seq,  # enables MegaSAM K lookup
+                )
                 
                 if verts_dict is None or len(verts_dict) == 0:
                     tqdm.write(f"  {subj}/{seq}: no hand detected")

@@ -101,10 +101,10 @@ def load_hawor_caches(object_name):
         data = dict(np.load(os.path.join(cache_dir, fn), allow_pickle=True))
 
         # Get frame range from onset annotations
-        key = f"{subject}/{seq_name}"
+        key = f"{subject}__{seq_name}"
         if key in onset:
-            start = onset[key].get('start', 0)
-            end = onset[key].get('end', -1)
+            start = onset[key].get('clip_start', onset[key].get('start', 0))
+            end = onset[key].get('clip_end', onset[key].get('end', -1))
         else:
             start = 0
             end = -1
@@ -167,17 +167,18 @@ def load_haptic_caches(object_name):
 
         data = dict(np.load(os.path.join(cache_dir, fn), allow_pickle=True))
 
-        key = f"{subject}/{rest.rsplit('_cam', 1)[0]}"  # Remove _camN suffix
+        key = f"{subject}__{rest.rsplit('_cam', 1)[0]}"  # Remove _camN suffix
 
         if key in onset:
-            start = onset[key].get('start', 0)
-            end = onset[key].get('end', -1)
+            start = onset[key].get('clip_start', onset[key].get('start', 0))
+            end = onset[key].get('clip_end', onset[key].get('end', -1))
         else:
             start = 0
             end = -1
 
         # HaPTIC may store as verts_dict (dict[int→(778,3)]) or hand_verts/right_verts
         verts = None
+        is_clip_relative = False  # True when verts are 0-indexed within clip window
         if 'verts_dict' in data:
             vd = data['verts_dict'].item() if data['verts_dict'].ndim == 0 else data['verts_dict']
             if isinstance(vd, dict):
@@ -189,6 +190,7 @@ def load_haptic_caches(object_name):
                     # skip missing frames
                 if frames:
                     verts = np.stack(frames, axis=0)  # (N, 778, 3)
+                    is_clip_relative = True  # keys 0..N-1 are clip-relative
         elif 'hand_verts' in data:
             verts = data['hand_verts']
         elif 'right_verts' in data:
@@ -199,10 +201,14 @@ def load_haptic_caches(object_name):
         if verts.ndim != 3:
             continue
 
-        if end == -1:
-            end = len(verts) - 1
-        sl = slice(max(0, start), min(end + 1, len(verts)))
-        all_hand_verts.append(verts[sl])
+        if is_clip_relative:
+            # verts already spans the contact window; use all frames
+            all_hand_verts.append(verts)
+        else:
+            if end == -1:
+                end = len(verts) - 1
+            sl = slice(max(0, start), min(end + 1, len(verts)))
+            all_hand_verts.append(verts[sl])
 
     return all_hand_verts
 
@@ -361,7 +367,7 @@ def accumulate_contact_labels(mesh_verts_m, mesh_faces, hand_verts_list,
                   and gt_mano_data[seq_idx] is not None)
 
         for frame_idx in range(len(hand_verts)):
-            hand_v = hand_verts[frame_idx]  # (778, 3) in predicted camera space
+            hand_v = hand_verts[frame_idx]  # (778, 3) in camera space
 
             # GT frame index for object pose and camera extrinsics
             fi_gt = offset + frame_idx
@@ -515,8 +521,8 @@ def process_object(object_name, source, mesh_provider, pred_threshold):
                 continue
 
             # Get onset start for this sequence
-            key = f"{subject}/{seq_name}"
-            clip_start = onset[key].get('start', 0) if key in onset else 0
+            key = f"{subject}__{seq_name}"
+            clip_start = onset[key].get('clip_start', onset[key].get('start', 0)) if key in onset else 0
 
             # HaWoR produces 2 entries per file (right + left), each with same offset
             data = dict(np.load(os.path.join(cache_dir, fn), allow_pickle=True))
@@ -545,8 +551,8 @@ def process_object(object_name, source, mesh_provider, pred_threshold):
             seq_name = rest.rsplit('_cam', 1)[0]
 
             # Get onset start
-            key = f"{subject}/{seq_name}"
-            clip_start = onset[key].get('start', 0) if key in onset else 0
+            key = f"{subject}__{seq_name}"
+            clip_start = onset[key].get('clip_start', onset[key].get('start', 0)) if key in onset else 0
 
             # Extract cam_id from _camN suffix
             cam_id = 1  # default

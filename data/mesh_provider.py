@@ -77,7 +77,12 @@ class ARCTICMeshProvider(MeshProvider):
         obj_dir = os.path.join(self.mesh_dir, object_name)
         if not os.path.isdir(obj_dir):
             return None
-        for fn in sorted(os.listdir(obj_dir)):
+        # Prefer 'mesh.obj' (complete mesh) over partial meshes like bottom.obj/top.obj
+        candidates = sorted(os.listdir(obj_dir))
+        for preferred in ('mesh.obj', 'mesh_tex.obj'):
+            if preferred in candidates:
+                return os.path.join(obj_dir, preferred)
+        for fn in candidates:
             if fn.endswith(('.obj', '.ply', '.stl')):
                 return os.path.join(obj_dir, fn)
         return None

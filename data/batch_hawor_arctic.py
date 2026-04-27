@@ -29,8 +29,10 @@ from tqdm import tqdm
 # Project config
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import config
+from data.megasam_utils import load_megasam_K, load_megasam_K_fx
 
 sys.path.insert(0, config.HAWOR_DIR)
+sys.path.insert(0, os.path.join(config.HAWOR_DIR, 'thirdparty', 'DROID-SLAM', 'droid_slam'))
 
 from scripts.scripts_test_video.detect_track_video import detect_track_video
 from scripts.scripts_test_video.hawor_video import hawor_motion_estimation, hawor_infiller
@@ -43,6 +45,14 @@ VIDEO_DIR = os.path.join(ARCTIC_ROOT, "arctic_egocam_videos")
 CACHE_DIR = config.HAWOR_CACHE
 os.makedirs(CACHE_DIR, exist_ok=True)
 
+# Sequences where DROID-SLAM scale estimation permanently fails
+# (no valid hand-keyframe pairs found → "not enough values to unpack").
+# These are data-level limitations; skip them rather than error each run.
+SLAM_SKIP_LIST = {
+    ("s09", "scissors_use_01"),
+    ("s10", "scissors_use_02"),
+}
+
 
 def process_sequence(video_path, subject, seq_name):
     """Run full HaWoR pipeline on one ARCTIC egocam video."""
@@ -52,6 +62,10 @@ def process_sequence(video_path, subject, seq_name):
     if os.path.exists(cache_path):
         return "skip"
 
+    if (subject, seq_name) in SLAM_SKIP_LIST:
+        print(f"  ⚠️  Skipping {subject}/{seq_name} (known SLAM failure)")
+        return "skip"
+
     try:
         # Create args namespace
         class Args:
@@ -59,44 +73,61 @@ def process_sequence(video_path, subject, seq_name):
         args = Args()
         args.video_path = video_path
         args.input_type = 'file'
-        args.img_focal = None
+        # Use MegaSAM focal length if available; falls back to HaWoR self-estimate (None).
+        megasam_K = load_megasam_K(seq_name)
+        args.img_focal = load_megasam_K_fx(seq_name)
+        if args.img_focal is not None:
+            print(f"  [MegaSAM] Using focal={args.img_focal:.1f}px for {seq_name}")
+        else:
+            print(f"  [MegaSAM] No intrinsics found for {seq_name}, using HaWoR self-estimate")
         args.checkpoint = os.path.join(config.HAWOR_DIR, 'weights/hawor/checkpoints/hawor.ckpt')
         args.infiller_weight = os.path.join(config.HAWOR_DIR, 'weights/hawor/checkpoints/infiller.pt')
         args.vis_mode = 'cam'
 
-        # Step 1: Detect and track hands
-        start_idx, end_idx, seq_folder, imgfiles = detect_track_video(args)
+        # ALL HaWoR pipeline steps use relative paths (weights, MANO models, etc.)
+        # that only resolve when CWD == HAWOR_DIR.  Wrap everything in one chdir.
+        _orig_cwd = os.getcwd()
+        os.chdir(config.HAWOR_DIR)
+        try:
+            # Step 1: Detect and track hands
+            start_idx, end_idx, seq_folder, imgfiles = detect_track_video(args)
 
-        # Step 2: HaWoR motion estimation
-        frame_chunks_all, img_focal = hawor_motion_estimation(args, start_idx, end_idx, seq_folder)
+            # Step 2: HaWoR motion estimation
+            frame_chunks_all, img_focal = hawor_motion_estimation(args, start_idx, end_idx, seq_folder)
 
-        # Step 3: SLAM
-        slam_path = os.path.join(seq_folder, f"SLAM/hawor_slam_w_scale_{start_idx}_{end_idx}.npz")
-        if not os.path.exists(slam_path):
-            hawor_slam(args, start_idx, end_idx)
-        R_w2c_sla_all, t_w2c_sla_all, R_c2w_sla_all, t_c2w_sla_all = load_slam_cam(slam_path)
+            # Step 3: SLAM
+            slam_path = os.path.join(seq_folder, f"SLAM/hawor_slam_w_scale_{start_idx}_{end_idx}.npz")
+            if not os.path.exists(slam_path):
+                # Fallback: find any existing SLAM file (end_idx may differ from video length)
+                existing_slams = natsorted(glob(os.path.join(seq_folder, "SLAM/hawor_slam_w_scale_*.npz")))
+                if existing_slams:
+                    slam_path = existing_slams[-1]
+                    print(f"  [SLAM] Using existing file: {os.path.basename(slam_path)}")
+                else:
+                    hawor_slam(args, start_idx, end_idx)
+            R_w2c_sla_all, t_w2c_sla_all, R_c2w_sla_all, t_c2w_sla_all = load_slam_cam(slam_path)
 
-        # Step 4: Infiller
-        pred_trans, pred_rot, pred_hand_pose, pred_betas, pred_valid = hawor_infiller(
-            args, start_idx, end_idx, frame_chunks_all
-        )
+            # Step 4: Infiller
+            pred_trans, pred_rot, pred_hand_pose, pred_betas, pred_valid = hawor_infiller(
+                args, start_idx, end_idx, frame_chunks_all
+            )
 
-        N = pred_trans.shape[1]
+            N = pred_trans.shape[1]
 
-        # Step 5: Get MANO vertices
-        # Right hand (index 1)
-        pred_glob_r = run_mano(
-            pred_trans[1:2, :N], pred_rot[1:2, :N],
-            pred_hand_pose[1:2, :N], betas=pred_betas[1:2, :N]
-        )
-        right_verts = pred_glob_r['vertices'][0].cpu().numpy()  # (N, 778, 3)
+            # Step 5: Get MANO vertices
+            pred_glob_r = run_mano(
+                pred_trans[1:2, :N], pred_rot[1:2, :N],
+                pred_hand_pose[1:2, :N], betas=pred_betas[1:2, :N]
+            )
+            right_verts = pred_glob_r['vertices'][0].cpu().numpy()  # (N, 778, 3)
 
-        # Left hand (index 0)
-        pred_glob_l = run_mano_left(
-            pred_trans[0:1, :N], pred_rot[0:1, :N],
-            pred_hand_pose[0:1, :N], betas=pred_betas[0:1, :N]
-        )
-        left_verts = pred_glob_l['vertices'][0].cpu().numpy()  # (N, 778, 3)
+            pred_glob_l = run_mano_left(
+                pred_trans[0:1, :N], pred_rot[0:1, :N],
+                pred_hand_pose[0:1, :N], betas=pred_betas[0:1, :N]
+            )
+            left_verts = pred_glob_l['vertices'][0].cpu().numpy()  # (N, 778, 3)
+        finally:
+            os.chdir(_orig_cwd)
 
         # Apply R_x coordinate transform (same as demo.py)
         R_x = np.array([[1, 0, 0], [0, -1, 0], [0, 0, -1]], dtype=np.float32)
@@ -111,8 +142,7 @@ def process_sequence(video_path, subject, seq_name):
         t_w2c_np = -np.einsum('nij,nj->ni', R_w2c_np, t_c2w_np)
 
         # Save cache
-        np.savez_compressed(
-            cache_path,
+        save_kwargs = dict(
             right_verts=right_verts,
             left_verts=left_verts,
             R_w2c=R_w2c_np[:N],
@@ -123,6 +153,10 @@ def process_sequence(video_path, subject, seq_name):
             pred_hand_pose=pred_hand_pose.cpu().numpy(),
             pred_betas=pred_betas.cpu().numpy(),
         )
+        # Also persist MegaSAM K so downstream scripts can reproject consistently
+        if megasam_K is not None:
+            save_kwargs['megasam_K'] = megasam_K
+        np.savez_compressed(cache_path, **save_kwargs)
         return "ok"
 
     except Exception as e:

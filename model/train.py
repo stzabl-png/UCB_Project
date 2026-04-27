@@ -279,13 +279,18 @@ def main():
                         help="受力中心回归 loss 权重 (default: 10.0)")
     parser.add_argument("--val_ratio", type=float, default=0.2)
     parser.add_argument("--save_dir", type=str, default=None)
+    parser.add_argument("--dataset_dir", type=str, default=None,
+                        help="训练数据目录 (default: output/dataset)")
     args = parser.parse_args()
 
     # 数据目录
-    dataset_dir = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        "output", "dataset"
-    )
+    if args.dataset_dir:
+        dataset_dir = args.dataset_dir
+    else:
+        dataset_dir = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "output", "dataset"
+        )
 
     if args.save_dir is None:
         args.save_dir = os.path.join(

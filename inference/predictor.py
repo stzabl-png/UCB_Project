@@ -112,6 +112,7 @@ class AffordancePredictor:
         # 尝试从 human_prior 里找对应的数据
         obj_name = os.path.splitext(os.path.basename(mesh_path))[0]
         hp_candidates = [
+            os.path.join("data_hub", "human_prior_infer", f"oakink_{obj_name}.hdf5"),
             os.path.join("data_hub", "human_prior", f"{obj_name}.hdf5"),
             os.path.join("data_hub", "human_prior", f"grab_{obj_name}.hdf5"),
         ]
@@ -156,6 +157,7 @@ class AffordancePredictor:
 
         obj_name = os.path.splitext(os.path.basename(mesh_path))[0]
         hp_candidates = [
+            os.path.join("data_hub", "human_prior_infer", f"oakink_{obj_name}.hdf5"),
             os.path.join("data_hub", "human_prior", f"{obj_name}.hdf5"),
             os.path.join("data_hub", "human_prior", f"grab_{obj_name}.hdf5"),
         ]

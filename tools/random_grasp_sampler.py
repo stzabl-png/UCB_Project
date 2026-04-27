@@ -3,15 +3,17 @@
 M2 Random Grasp Sampler v2
 ==========================
 内部采样 + ±XYZ 6方向 + Raycast 居中 + 评分系统 + HP引导
+采样策略: 50% Human-Prior 引导 + 50% 纯随机
 
 迭代生成: 每批20点×6方向 → 评分 → 不够20个>60分 → 再来一批
 最终输出: top 20 高质量候选 (分数>60)
 
 用法:
     # Run from project root
-    python3 tools/random_grasp_sampler.py --obj A01001           # 单个物体
-    python3 tools/random_grasp_sampler.py --obj A01001 --vis     # 生成 + 可视化
-    python3 tools/random_grasp_sampler.py --all                  # 全部物体
+    python3 tools/random_grasp_sampler.py --obj A01001           # OakInk 单个物体
+    python3 tools/random_grasp_sampler.py --all                  # OakInk 全部物体
+    python3 tools/random_grasp_sampler.py --arctic               # ARCTIC 全部 10 个物体
+    python3 tools/random_grasp_sampler.py --arctic --obj scissors # ARCTIC 单个物体
 """
 import os, sys, glob, argparse
 import numpy as np
@@ -20,15 +22,34 @@ import h5py
 from scipy.spatial.transform import Rotation
 
 PROJ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-MESH_DIR = os.path.join(PROJ, 'data_hub', 'meshes', 'v1')
-HP_DIR = os.path.join(PROJ, 'data_hub', 'human_prior')
-OUTPUT_DIR = os.path.join(PROJ, 'output', 'grasps_random')
+MESH_DIR      = os.path.join(PROJ, 'data_hub', 'meshes', 'v1')
+HP_DIR        = os.path.join(PROJ, 'data_hub', 'human_prior')
+INFER_HP_DIR  = os.path.join(PROJ, 'data_hub', 'human_prior_infer')  # 纯推理集
+OUTPUT_DIR    = os.path.join(PROJ, 'output', 'grasps_random')
+INFER_OUT_DIR = os.path.join(PROJ, 'output', 'grasps_infer')         # 纯推理输出
+
+# ARCTIC 物体列表 & mesh 路径（单位 mm，加载后需 /1000）
+ARCTIC_ROOT = '/home/lyh/Project/arctic/unpack'
+ARCTIC_OBJS = ('box capsulemachine espressomachine ketchup microwave '
+               'mixer notebook phone scissors waffleiron').split()
+ARCTIC_MESH_DIR = os.path.join(ARCTIC_ROOT, 'meta', 'object_vtemplates')
 MAX_GRIPPER_OPEN = 0.08
+
+# 与 convert_arctic_to_usd.py 保持一致的规范化旋转
+# Key = orig arctic obj name, Value = 3×3 R, applied as: verts = (R @ verts.T).T
+ARCTIC_CANONICAL_ROT = {
+    'ketchup': np.array([[ 0, 0,-1],
+                          [ 0, 1, 0],
+                          [ 1, 0, 0]], dtype=np.float64),  # 长轴 X→Z, 竖立
+    'phone':   np.array([[ 0, 0,-1],
+                          [ 0, 1, 0],
+                          [ 1, 0, 0]], dtype=np.float64),  # 长轴 X→Z, 竖立
+}
 MIN_GRIPPER_WIDTH = 0.005
 N_POINTS_PER_BATCH = 20     # 每批采样点数
 TARGET_HIGH_QUALITY = 20     # 目标高质量候选数
 SCORE_THRESHOLD = 60.0       # 高质量门槛 (80分反而降低sim成功率)
-MAX_BATCHES = 100            # 最大迭代批次 (防止死循环)
+MAX_BATCHES = 20             # 最大迭代批次（超大物体快速失败）
 
 # 6 个固定接近方向
 APPROACH_DIRS = [
@@ -41,9 +62,17 @@ APPROACH_DIRS = [
 ]
 
 
-def load_human_prior(obj_id):
-    for name in [f'{obj_id}.hdf5', f'grab_{obj_id}.hdf5']:
-        path = os.path.join(HP_DIR, name)
+def load_human_prior(obj_id, hp_dir=None):
+    """支持 oakink_{id} / arctic_{id} 等前缀命名."""
+    if hp_dir is None:
+        hp_dir = HP_DIR
+    for name in [
+        f'{obj_id}.hdf5',           # 原始: scissors.hdf5
+        f'oakink_{obj_id}.hdf5',    # OakInk 推理: oakink_A01001.hdf5
+        f'arctic_{obj_id}.hdf5',    # ARCTIC 推理: arctic_scissors.hdf5
+        f'grab_{obj_id}.hdf5',      # GRAB legacy
+    ]:
+        path = os.path.join(hp_dir, name)
         if os.path.exists(path):
             with h5py.File(path, 'r') as f:
                 return f['point_cloud'][()].astype(np.float32), f['human_prior'][()].astype(np.float32)
@@ -51,13 +80,43 @@ def load_human_prior(obj_id):
 
 
 def sample_points(mesh, hp_pc, hp_labels, n_total, has_hp):
-    """100% 随机采样物体内部点 (不依赖 HP)."""
-    bbox_min, bbox_max = mesh.bounds[0], mesh.bounds[1]
+    """50% Human-Prior-guided + 50% 纯随机采样.
+    
+    HP-guided: 在 human_prior > 0.3 的顶点附近 ±5mm jitter, 找 mesh 内部点.
+    随机:      在 bbox 内均匀随机采样, 取 mesh 内部点.
+    """
     points = []
-    all_pts = np.random.uniform(bbox_min, bbox_max, size=(n_total * 20, 3))
-    inside = mesh.contains(all_pts)
-    for p in all_pts[inside][:n_total]:
-        points.append(p.astype(np.float32))
+
+    # ── 50% HP-guided ──────────────────────────────────────────
+    n_hp = n_total // 2 if has_hp else 0
+    if n_hp > 0 and hp_pc is not None and hp_labels is not None:
+        high_mask = hp_labels > 0.3
+        if high_mask.sum() > 0:
+            hp_pts = hp_pc[high_mask]
+            weights = hp_labels[high_mask]
+            weights = weights / (weights.sum() + 1e-8)
+            # 按 prior 概率加权采样 HP 顶点 (允许重复)
+            chosen_idx = np.random.choice(len(hp_pts), size=n_hp * 10, replace=True, p=weights)
+            chosen = hp_pts[chosen_idx]
+            # 加 ±5mm jitter
+            jitter = np.random.randn(*chosen.shape) * 0.005
+            candidates = chosen + jitter
+            # 只保留在 mesh 内部的点
+            inside = mesh.contains(candidates)
+            for p in candidates[inside][:n_hp]:
+                points.append(p.astype(np.float32))
+
+    n_hp_got = len(points)
+
+    # ── 50% 纯随机 (补足至 n_total) ────────────────────────────
+    n_rand = n_total - n_hp_got
+    if n_rand > 0:
+        bbox_min, bbox_max = mesh.bounds[0], mesh.bounds[1]
+        all_pts = np.random.uniform(bbox_min, bbox_max, size=(n_rand * 20, 3))
+        inside = mesh.contains(all_pts)
+        for p in all_pts[inside][:n_rand]:
+            points.append(p.astype(np.float32))
+
     return points
 
 
@@ -201,11 +260,18 @@ def generate_one_batch(mesh, points, z_min, z_max):
     return candidates
 
 
-def generate_candidates_iterative(mesh, obj_id):
+def generate_candidates_iterative(mesh, obj_id, hp_dir=None):
     """迭代生成候选, 直到有 TARGET_HIGH_QUALITY 个分数 > SCORE_THRESHOLD."""
-    hp_pc, hp_labels = load_human_prior(obj_id)
+    hp_pc, hp_labels = load_human_prior(obj_id, hp_dir=hp_dir)
     has_hp = hp_pc is not None and np.any(hp_labels > 0.5)
-    
+
+    # 尺寸预检: 物体最小边 > 2× 夹持器开口 → 极难抓, 快速跳过
+    extents = mesh.bounding_box.extents
+    min_ext = extents.min()
+    if min_ext > 2 * MAX_GRIPPER_OPEN:
+        print(f"  [SKIP LARGE] 最小边 {min_ext*100:.1f}cm > {2*MAX_GRIPPER_OPEN*100:.0f}cm, 跳过")
+        return []
+
     z_min, z_max = mesh.bounds[0][2], mesh.bounds[1][2]
     all_candidates = []
     
@@ -216,9 +282,9 @@ def generate_candidates_iterative(mesh, obj_id):
         
         # 统计高质量候选
         high_quality = [c for c in all_candidates if c['score'] >= SCORE_THRESHOLD]
-        hp_tag = f"({len(pts)} pts: {'HP+rnd' if has_hp else 'rnd'})"
+        hp_ratio = "50%HP+50%rnd" if has_hp else "100%rnd"
         print(f"    batch {batch+1}: +{len(new_cands)} 候选, "
-              f"高质量≥{SCORE_THRESHOLD:.0f}分: {len(high_quality)}/{TARGET_HIGH_QUALITY} {hp_tag}")
+              f"高质量≥{SCORE_THRESHOLD:.0f}分: {len(high_quality)}/{TARGET_HIGH_QUALITY} ({hp_ratio})")
         
         if len(high_quality) >= TARGET_HIGH_QUALITY:
             break
@@ -341,63 +407,98 @@ def visualize_candidates(mesh, candidates, obj_id):
 
 def main():
     parser = argparse.ArgumentParser(description='Grasp Sampler v2 (Scored + Iterative)')
-    parser.add_argument('--obj', help='单个物体 ID')
-    parser.add_argument('--all', action='store_true')
-    parser.add_argument('--force', action='store_true')
-    parser.add_argument('--vis', action='store_true')
-    parser.add_argument('--output-dir', default=OUTPUT_DIR)
+    parser.add_argument('--obj',    help='单个物体 ID')
+    parser.add_argument('--all',    action='store_true', help='OakInk 全部物体')
+    parser.add_argument('--arctic',  action='store_true', help='ARCTIC 10个物体 (mm→m 自动缩放)')
+    parser.add_argument('--infer',   action='store_true', help='纯推理模式: 从 human_prior_infer/ 读取, 输出到 grasps_infer/')
+    parser.add_argument('--force',   action='store_true', help='强制重新生成（覆盖已有）')
+    parser.add_argument('--vis',     action='store_true')
+    parser.add_argument('--output-dir', default=None)
     args = parser.parse_args()
-    
-    if args.obj:
-        obj_list = [(args.obj, os.path.join(MESH_DIR, f'{args.obj}.obj'))]
+
+    # 推理模式：切换目录
+    _hp_dir  = INFER_HP_DIR if args.infer else HP_DIR
+    _out_dir = args.output_dir or (INFER_OUT_DIR if args.infer else OUTPUT_DIR)
+    os.makedirs(_out_dir, exist_ok=True)
+
+    # ── 构建 (obj_id, mesh_path, scale) 列表 ─────────────────
+    obj_list = []   # [(obj_id, mesh_path, mesh_scale)]
+
+    if args.arctic:
+        # ARCTIC 模式：mesh 单位 mm，需 /1000 → m
+        # obj_id 加 arctic_ 前缀，与 OakInk 同名物体区分（如 scissors）
+        objs = [args.obj] if args.obj else ARCTIC_OBJS
+        for obj in objs:
+            mp = os.path.join(ARCTIC_MESH_DIR, obj, 'mesh_tex.obj')
+            arctic_id = f'arctic_{obj}'   # e.g. arctic_scissors
+            obj_list.append((arctic_id, mp, 1.0 / 1000.0, obj))  # 4th: hp_lookup_name
+    elif args.obj:
+        obj_list = [(args.obj, os.path.join(MESH_DIR, f'{args.obj}.obj'), 1.0, args.obj)]
     elif args.all:
         all_meshes = sorted(glob.glob(os.path.join(MESH_DIR, '*.obj')))
-        obj_list = [(os.path.splitext(os.path.basename(m))[0], m) for m in all_meshes]
+        obj_list = [(os.path.splitext(os.path.basename(m))[0], m, 1.0,
+                     os.path.splitext(os.path.basename(m))[0]) for m in all_meshes]
     else:
-        print("用法: python3 tools/random_grasp_sampler.py --obj A01001 [--vis]")
+        print("用法:")
+        print("  python3 tools/random_grasp_sampler.py --all           # OakInk 全部")
+        print("  python3 tools/random_grasp_sampler.py --arctic        # ARCTIC 全部")
+        print("  python3 tools/random_grasp_sampler.py --arctic --obj scissors")
         return
-    
+
+    mode = 'ARCTIC' if args.arctic else 'OakInk'
     print("=" * 60)
-    print("  Grasp Sampler v2 (Raycast + Scored + Iterative)")
+    print(f"  Grasp Sampler v2 [{mode}] (50%HP + 50%rnd)")
     print(f"  Target: {TARGET_HIGH_QUALITY} candidates ≥ {SCORE_THRESHOLD} pts")
     print("=" * 60)
-    
+
     generated = 0
-    for idx, (obj_id, mesh_path) in enumerate(obj_list):
+    for idx, (obj_id, mesh_path, scale, hp_name) in enumerate(obj_list):
         print(f"\n[{idx+1}/{len(obj_list)}] {obj_id}")
-        
+
         if not args.force:
-            out_path = os.path.join(args.output_dir, f'{obj_id}_grasp.hdf5')
+            out_path = os.path.join(_out_dir, f'{obj_id}_grasp.hdf5')
             if os.path.exists(out_path):
                 print(" ⏭️ (已生成)")
                 continue
-        
+
         if not os.path.exists(mesh_path):
-            print(f" ❌ mesh 不存在")
+            print(f" ❌ mesh 不存在: {mesh_path}")
             continue
-        
+
         mesh = trimesh.load(mesh_path, force='mesh')
-        ext = mesh.bounding_box.extents * 100
-        print(f"  尺寸: {ext[0]:.1f}×{ext[1]:.1f}×{ext[2]:.1f} cm")
-        
+        if scale != 1.0:
+            mesh.vertices *= scale          # mm → m
+
+        # ARCTIC: 应用规范化旋转（与 convert_arctic_to_usd.py 一致）
+        if args.arctic:
+            obj_bare = obj_id.replace('arctic_', '')  # e.g. 'ketchup'
+            R = ARCTIC_CANONICAL_ROT.get(obj_bare)
+            if R is not None:
+                mesh.vertices = (R @ mesh.vertices.T).T
+                print(f"     [canonical rot applied: {obj_bare}]")
+
         if not mesh.is_watertight:
             trimesh.repair.fill_holes(mesh)
             trimesh.repair.fix_normals(mesh)
-        
-        candidates = generate_candidates_iterative(mesh, obj_id)
-        
+
+        ext = mesh.bounding_box.extents * 100
+        print(f"  尺寸: {ext[0]:.1f}×{ext[1]:.1f}×{ext[2]:.1f} cm  ({'arctic mm→m' if scale!=1.0 else 'OakInk'}"  ")")
+
+        # HP lookup: infer 模式从 human_prior_infer/ 读; 否则从 human_prior/
+        candidates = generate_candidates_iterative(mesh, hp_name, hp_dir=_hp_dir)
+
         if candidates:
-            path = save_candidates_hdf5(candidates, obj_id, mesh_path, args.output_dir)
+            path = save_candidates_hdf5(candidates, obj_id, mesh_path, _out_dir)
             print(f"  ✅ → {os.path.basename(path)} ({len(candidates)} 候选)")
             generated += 1
-            
             if args.vis:
                 visualize_candidates(mesh, candidates, obj_id)
         else:
             print(f"  ⚠️ 无有效候选")
-    
+
     print(f"\n{'='*60}")
-    print(f"  完成! 生成 {generated} 个物体的候选")
+    print(f"  完成! 生成 {generated}/{len(obj_list)} 个物体的候选")
+    print(f"  输出: {_out_dir}")
     print(f"{'='*60}")
 
 

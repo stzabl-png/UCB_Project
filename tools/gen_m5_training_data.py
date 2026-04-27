@@ -195,7 +195,21 @@ def main():
         oi2_meshes = sorted(glob.glob(os.path.join(oi2_mesh_dir, '*.obj')))
         all_meshes.extend(oi2_meshes)
         print(f"  发现 {len(oi2_meshes)} 个 OakInk2 物体")
-    skip = {'body', 'cubelarge', 'eyeglasses', 'teapot'}
+    # ARCTIC meshes
+    arctic_mesh_dir = '/home/lyh/Project/arctic/unpack/meta/object_vtemplates'
+    if os.path.isdir(arctic_mesh_dir):
+        arctic_objs = 'box capsulemachine espressomachine ketchup microwave mixer notebook phone scissors waffleiron'.split()
+        # 与 convert_arctic_to_usd.py 一致的规范化旋转
+        ARCTIC_ROT = {
+            'ketchup': np.array([[ 0, 0,-1],[ 0, 1, 0],[ 1, 0, 0]], dtype=np.float64),
+            'phone':   np.array([[ 0, 0,-1],[ 0, 1, 0],[ 1, 0, 0]], dtype=np.float64),
+        }
+        for aobj in arctic_objs:
+            src = os.path.join(arctic_mesh_dir, aobj, 'mesh_tex.obj')
+            if os.path.exists(src):
+                all_meshes.append((f'arctic_{aobj}', src, 1.0/1000.0, ARCTIC_ROT.get(aobj)))
+        print(f"  发现 {len(arctic_objs)} 个 ARCTIC 物体")
+
 
     total = 0
     has_hp = 0
