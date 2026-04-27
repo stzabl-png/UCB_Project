@@ -1,150 +1,302 @@
-# Affordance2Grasp
+# Affordance2Grasp — 数据生成 Pipeline
 
-Learning where to grasp objects by combining human contact priors with robot simulation.
+从视频生成手-物接触标签，用于机器人抓取模型训练。
 
-**Pipeline**: Video → Hand Reconstruction → Contact Map → Affordance Model → Grasp Pose → Sim Execution
+> **本文档面向公司协作人员**，说明如何跑完数据生成的全流程：
+> `视频原始数据 → 内参+深度 → MANO手部估计 → 物体位姿 → 接触标签`
 
-## Architecture
+---
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│  Upstream: Human Prior Generation                           │
-│  Video → HaWoR/HaPTIC → MANO hand vertices                 │
-│  Object mesh + GT pose → Spatial alignment                  │
-│  KDTree proximity → ContactMap (human_prior)                │
-└──────────────────────────┬──────────────────────────────────┘
-                           ↓
-┌─────────────────────────────────────────────────────────────┐
-│  Downstream: Robot GT via Simulation                        │
-│  Human prior → Sample grasp candidates                      │
-│  Isaac Sim → Physics-based grasp evaluation                 │
-│  Successful grasps → Contact region → robot_gt labels       │
-└──────────────────────────┬──────────────────────────────────┘
-                           ↓
-┌─────────────────────────────────────────────────────────────┐
-│  Affordance Model (PointNet++ Multi-Task)                   │
-│  Input:  point_cloud (N,3) + normals (N,3) + human_prior    │
-│  Output: contact segmentation (N,) + force center (3,)      │
-│  Loss:   Focal+Tversky + λ·MSE                             │
-└─────────────────────────────────────────────────────────────┘
-```
+## 目标数据集
 
-## Quick Start
+| 数据集 | 物体 | 序列数 | 总帧数 |
+|---|---|---|---|
+| **DexYCB** | 20 种 YCB 物体 | ~600 条 | ~43,200 帧 |
+| **HO3D v3** | 8 种 YCB 物体 | 68 条 | ~90,000 帧 |
 
-### 1. Install
+两个数据集用**完全相同的脚本**处理，流程一致。
+
+---
+
+## 一、 环境准备
+
+### 1.1 克隆代码
 
 ```bash
-git clone https://github.com/stzabl-png/UCB_Project.git
-cd UCB_Project
-pip install -r requirements.txt
+git clone https://github.com/stzabl-png/UCB_Project.git Affordance2Grasp
+cd Affordance2Grasp
 ```
 
-### 2. Download Data & Checkpoints
+### 1.2 创建 Conda 环境
+
+需要两个独立环境：
 
 ```bash
-pip install huggingface-hub
-python download_data.py
+# ── 环境 A: Depth Pro ──────────────────────────────────────────
+conda create -n depth-pro python=3.9 -y
+conda activate depth-pro
+pip install git+https://github.com/apple/ml-depth-pro.git
+pip install natsort tqdm h5py numpy pillow
+
+# ── 环境 B: FoundationPose + HaPTIC + 对齐 ────────────────────
+conda create -n bundlesdf python=3.9 -y
+conda activate bundlesdf
+pip install trimesh scipy h5py opencv-python natsort tqdm fast_simplification torch
+# HaPTIC: 按 HaPTIC 官方 README 安装
+# FoundationPose: pip install -e /path/to/FoundationPose
 ```
 
-This downloads from [UCBProject/Affordance2Grasp-Data](https://huggingface.co/datasets/UCBProject/Affordance2Grasp-Data):
-- `data_hub/` — meshes, human priors, training data
-- `output/dataset/` — preprocessed HDF5 train/val splits
-- `output/checkpoints/` — trained model weights
+### 1.3 修改 `config.py`
 
-### 3. Train
+```python
+DATA_HUB   = "/your/path/to/data_hub"        # 数据根目录
+HAPTIC_DIR = "/your/path/to/HaPTIC"
+FP_ROOT    = "/your/path/to/FoundationPose"
+```
+
+---
+
+## 二、 下载数据
+
+### 2.1 下载原始视频
+
+| 数据集 | 官网 | 放置路径 |
+|---|---|---|
+| DexYCB | https://dex-ycb.github.io | `data_hub/RawData/ThirdPersonRawData/dexycb/` |
+| HO3D v3 | https://www.tugraz.at/institute/icg/research/team-lepetit/research-projects/hand-object-3d-pose-annotation | `data_hub/RawData/ThirdPersonRawData/ho3d_v3/` |
+
+目录结构：
+```
+dexycb/
+  20200709-subject-01/
+    20200709_141754/
+      841412060263/          ← 相机序列号
+        color_000000.jpg
+        ...
+ho3d_v3/
+  train/
+    ABF10/
+      rgb/
+        0000.jpg
+        ...
+  evaluation/
+    ...
+```
+
+### 2.2 下载预处理文件（HuggingFace）
 
 ```bash
-# Full training (200 epochs)
-python run.py --train --epochs 200
+pip install huggingface_hub
 
-# Or directly:
-python -m model.train --epochs 200 --batch_size 16
+python - << 'EOF'
+from huggingface_hub import snapshot_download
+snapshot_download(
+    repo_id="StZaBL/Affordance2Grasp-ProcessedData",
+    repo_type="dataset",
+    local_dir="data_hub/ProcessedData",
+)
+EOF
 ```
 
-### 4. Inference
+包含内容：
+
+| 文件夹 | 说明 |
+|---|---|
+| `obj_meshes/ycb/` | 所有 YCB 物体网格 + `scale.json` |
+| `obj_recon_input/ycb/` | FoundationPose 初始化 mask |
+
+---
+
+## 三、 运行 Pipeline
+
+> 每个步骤**先跑 DexYCB，再跑 HO3D v3**，命令完全对称。
+
+---
+
+### Step 1：Depth Pro — 估计内参 + 深度图
+
+**环境：`depth-pro`**
 
 ```bash
-# Generate grasp pose for an object
-python run.py --mesh data_hub/meshes/grasp_collection/A16013.obj --no-sim
+conda activate depth-pro
+cd /path/to/Affordance2Grasp
+
+# ── DexYCB（只用最优相机，自动两阶段校准）
+python data/batch_depth_pro.py \
+    --dataset dexycb \
+    --cam 841412060263 \
+    --two-pass \
+    --max-frames 150
+
+# ── HO3D v3（全部 68 条序列，自动两阶段校准）
+python data/batch_depth_pro.py \
+    --dataset ho3d_v3 \
+    --two-pass \
+    --max-frames 150
 ```
 
-### 5. Simulation (requires Isaac Sim)
+**`--two-pass` 说明**（两阶段自校准，无需 GT 内参）：
+1. Pass 1：每条序列取 30 帧，快速估计各自 fx
+2. 自动计算全局中位数 fx（收敛误差 < 2%）
+3. Pass 2：以全局 fx 固定内参，重跑完整深度图
+
+输出：`data_hub/ProcessedData/third_depth/{dataset}/{seq_id}/`
+- `K.txt` — 3×3 内参矩阵
+- `depths.npz` — 深度图 (N, H, W) float32，单位：米
+- `frame_ids.txt` — 帧文件名
+
+预计时间（RTX 4080 SUPER）：
+
+| 数据集 | Pass 1 | Pass 2 | 合计 |
+|---|---|---|---|
+| DexYCB 600条 | ~30 min | ~3 h | ~3.5 h |
+| HO3D v3 68条 | ~10 min | ~1.5 h | ~1.7 h |
+
+---
+
+### Step 2：HaPTIC — MANO 手部估计（第三人称）
+
+**环境：`bundlesdf`**（含 HaPTIC）
 
 ```bash
-# Set Isaac Sim path
-export ISAAC_SIM_PATH=/path/to/isaac-sim
+conda activate bundlesdf
 
-# Full pipeline: inference + sim
-python run.py --mesh path/to/object.obj
+# ── DexYCB
+python data/batch_haptic.py \
+    --dataset dexycb \
+    --only-with-depth-k
+
+# ── HO3D v3
+python data/batch_haptic.py \
+    --dataset ho3d_v3 \
+    --only-with-depth-k
 ```
 
-## Project Structure
+`--only-with-depth-k`：只处理 Step 1 已完成的序列（保证内参已就绪）。
 
-```
-Affordance2Grasp/
-├── run.py                  # Unified CLI entry point
-├── config.py               # Global configuration (paths + params)
-├── download_data.py        # HuggingFace data downloader
-│
-├── model/                  # PointNet++ model
-│   ├── pointnet2.py        #   Architecture (multi-task seg + force center)
-│   ├── train.py            #   Training script
-│   ├── losses.py           #   Focal + Tversky loss
-│   └── metrics.py          #   Evaluation metrics + visualization
-│
-├── inference/              # Inference + grasp pose generation
-│   ├── predictor.py        #   AffordancePredictor API
-│   └── grasp_pose.py       #   Mesh → grasp pose HDF5
-│
-├── data/                   # Data processing pipeline
-│   ├── build_dataset.py    #   Build HDF5 training dataset
-│   ├── aggregate_prior.py  #   Multi-sequence contact aggregation
-│   ├── aggregate_robot_gt.py  # Sim results → robot GT labels
-│   └── video_to_training_data.py  # Video → training data bridge
-│
-├── sim/                    # Isaac Sim execution
-│   ├── run_grasp.py        #   Franka + cuRobo grasping
-│   └── env_config/         #   Simulation environment setup
-│
-├── tools/                  # Auxiliary tools
-│   ├── gen_m5_training_data.py  # Generate M5 training data
-│   └── random_grasp_sampler.py  # Random grasp candidate sampling
-│
-├── data_hub/               # Data center (from HuggingFace)
-│   ├── meshes/             #   Object meshes (v1, v2, grasp_collection)
-│   ├── human_prior/        #   Human contact priors (HDF5)
-│   ├── training/           #   Training data (human_prior + robot_gt)
-│   └── registry.json       #   Object registry
-│
-└── output/                 # Generated outputs
-    ├── dataset/            #   HDF5 train/val splits
-    ├── checkpoints/        #   Model weights
-    └── grasps/             #   Generated grasp poses
-```
+输出：`data_hub/ProcessedData/third_mano/{dataset}/{seq_id}.npz`
+- `verts_dict`：每帧的 MANO 手部顶点 (778, 3)，相机坐标系
 
-## Training Data Format
+预计时间：
 
-Each training sample (HDF5):
+| 数据集 | 时间 |
+|---|---|
+| DexYCB 600条 | ~8 h |
+| HO3D v3 68条 | ~1 h |
 
-| Field | Shape | Description |
-|-------|-------|-------------|
-| `point_cloud` | (N, 3) | Sampled surface points |
-| `normals` | (N, 3) | Surface normals |
-| `human_prior` | (N,) | Human contact probability [0,1] — model input |
-| `robot_gt` | (N,) | Robot grasp success label [0,1] — supervision |
-| `force_center` | (3,) | Grasp force center coordinate |
+---
 
-## Configuration
+### Step 3：FoundationPose — 物体 6D 位姿跟踪
 
-All paths auto-detect from the project root. External tools (only needed for data generation, not training) use environment variables:
+**环境：`bundlesdf`**
 
 ```bash
-# Optional: copy and edit
-cp .env.example .env
+conda activate bundlesdf
+
+# ── DexYCB
+python tools/batch_obj_pose.py --dataset dexycb
+
+# ── HO3D v3
+python tools/batch_obj_pose.py --dataset ho3d_v3
 ```
 
-See [.env.example](.env.example) for available options.
+脚本自动：
+- 根据序列名识别 YCB 物体
+- 载入 `obj_recon_input/ycb/` 的初始 mask
+- 用 FP 跑完整序列 6D 跟踪
 
-## License
+输出：`data_hub/ProcessedData/obj_poses/{dataset}/{seq_id}/ob_in_cam/{frame}.txt`
+- 每帧一个 4×4 变换矩阵（相机坐标系）
 
-MIT
+预计时间：
+
+| 数据集 | 时间 |
+|---|---|
+| DexYCB 600条 | ~1.3 h |
+| HO3D v3 68条 | ~15 min |
+
+---
+
+### Step 4：接触标签生成
+
+**环境：`bundlesdf`**
+
+```bash
+conda activate bundlesdf
+
+# ── DexYCB（3D 距离法 + 深度归一化）
+python data/batch_align_mano_fp.py --dataset dexycb
+
+# ── HO3D v3（2D 投影法）
+python data/batch_align_mano_fp.py --dataset ho3d_v3
+```
+
+输出：
+- `data_hub/ProcessedData/training_fp/{dataset}/{obj}.hdf5` — 训练数据
+- `data_hub/ProcessedData/human_prior_fp/{dataset}/` — 逐顶点接触先验
+
+**Step 4 < 5 分钟（CPU）**
+
+---
+
+## 四、 验证
+
+```bash
+conda activate bundlesdf
+
+python - << 'EOF'
+import h5py, os, glob
+for ds in ['dexycb', 'ho3d_v3']:
+    h5files = glob.glob(f"data_hub/ProcessedData/training_fp/{ds}/*.hdf5")
+    for f in h5files:
+        with h5py.File(f) as h:
+            hp = h['human_prior'][:]
+            print(f"{ds}/{os.path.basename(f)}: max={hp.max():.4f}  >0.05: {(hp>0.05).mean():.1%}")
+EOF
+```
+
+正常输出示例：
+```
+dexycb/ycb_dex_02.hdf5: max=0.0942  >0.05: 3.2%
+```
+
+---
+
+## 五、 预期总时间
+
+| 步骤 | DexYCB | HO3D v3 | 合计 |
+|---|---|---|---|
+| Step 1 Depth Pro | ~3.5 h | ~1.7 h | ~5.2 h |
+| Step 2 HaPTIC | ~8 h | ~1 h | ~9 h |
+| Step 3 FP | ~1.3 h | ~15 min | ~1.6 h |
+| Step 4 对齐 | <5 min | <5 min | <10 min |
+| **合计** | **~13 h** | **~3 h** | **~16 h** |
+
+> **并行建议**：Step 1 和 Step 2 都用同一台 GPU，串行跑。Step 3 可在 Step 1 完成后立刻开始跑已完成的序列。
+
+---
+
+## 六、 已验证配置
+
+| 配置 | 结果 |
+|---|---|
+| DexYCB + cam `841412060263` + ycb_dex_02 | coverage=100%, diverged=0 |
+| Depth Pro fx 偏差 (DexYCB) | **+0.2%** |
+| Depth Pro fx 偏差 (HO3D v3, two-pass) | **-1.5%** |
+| FP 跟踪成功率 | **100%** |
+
+---
+
+## 七、 常见问题
+
+**Q：DexYCB 要跑哪台相机？**
+A：默认只跑最优相机 `841412060263`（Depth Pro 误差 +0.2%）。已在 `dexycb_camera_config.json` 配置好，无需额外操作。
+
+**Q：HO3D v3 为什么要 `--two-pass`？**
+A：单条序列 Depth Pro fx 估计误差可达 ±20%，多序列全局中位数可收敛到 -1.5%。`--two-pass` 自动完成这个校准，无需 GT 内参。
+
+**Q：HO3D 没有发散（diverged）怎么界定？**
+A：Step 4 输出中 `diverged=0` 表示全部帧的 FP 位姿有效。
+
+**Q：联系方式**
+A：如遇问题请联系 lyh。
