@@ -121,14 +121,18 @@ EOF
 conda activate depth-pro
 cd /path/to/Affordance2Grasp
 
-# ── DexYCB（只用最优相机，自动两阶段校准）
-python data/batch_depth_pro.py \
-    --dataset dexycb \
-    --cam 841412060263 \
-    --two-pass \
-    --max-frames 150
+# ── DexYCB：每台相机单独跑 --two-pass（各自校准 fx）
+# 共 6 台相机（排除最差的两台），每台约 600 条序列
+for CAM in 841412060263 840412060917 932122060857 836212060125 932122061900 932122062010; do
+    echo "=== 处理相机 $CAM ==="
+    python data/batch_depth_pro.py \
+        --dataset dexycb \
+        --cam $CAM \
+        --two-pass \
+        --max-frames 150
+done
 
-# ── HO3D v3（全部 68 条序列，自动两阶段校准）
+# ── HO3D v3：全部 68 条序列，自动两阶段校准
 python data/batch_depth_pro.py \
     --dataset ho3d_v3 \
     --two-pass \
@@ -149,7 +153,7 @@ python data/batch_depth_pro.py \
 
 | 数据集 | Pass 1 | Pass 2 | 合计 |
 |---|---|---|---|
-| DexYCB 600条 | ~30 min | ~3 h | ~3.5 h |
+| DexYCB 6台相机 × 600条 | ~3 h | ~18 h | ~21 h |
 | HO3D v3 68条 | ~10 min | ~1.5 h | ~1.7 h |
 
 ---
@@ -266,13 +270,14 @@ dexycb/ycb_dex_02.hdf5: max=0.0942  >0.05: 3.2%
 
 | 步骤 | DexYCB | HO3D v3 | 合计 |
 |---|---|---|---|
-| Step 1 Depth Pro | ~3.5 h | ~1.7 h | ~5.2 h |
-| Step 2 HaPTIC | ~8 h | ~1 h | ~9 h |
-| Step 3 FP | ~1.3 h | ~15 min | ~1.6 h |
+| Step 1 Depth Pro (6 cams) | ~21 h | ~1.7 h | ~23 h |
+| Step 2 HaPTIC | ~48 h | ~1 h | ~49 h |
+| Step 3 FP | ~8 h | ~15 min | ~8.5 h |
 | Step 4 对齐 | <5 min | <5 min | <10 min |
-| **合计** | **~13 h** | **~3 h** | **~16 h** |
+| **合计** | **~77 h** | **~3 h** | **~80 h** |
 
-> **并行建议**：Step 1 和 Step 2 都用同一台 GPU，串行跑。Step 3 可在 Step 1 完成后立刻开始跑已完成的序列。
+> **并行建议**：6 台相机的 Depth Pro 可以分发到不同 GPU 同时跑。Step 2 HaPTIC 是最大瓶颈（~2天），建议多并行。
+> > 若只用单台最优相机 `841412060263`：DexYCB 总计约 **13 h**。
 
 ---
 
