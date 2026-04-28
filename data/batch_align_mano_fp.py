@@ -101,7 +101,8 @@ def _dexycb_sessions(subj: str):
         if os.path.isdir(subj_dir):
             _dexycb_session_cache[subj] = natsorted(
                 [d for d in os.listdir(subj_dir)
-                 if os.path.isdir(os.path.join(subj_dir, d))]
+                 if os.path.isdir(os.path.join(subj_dir, d))
+                 and not d.startswith('.')]   # BUG-04: 过滤 .cache 等隐藏目录
             )
         else:
             _dexycb_session_cache[subj] = []
@@ -235,15 +236,14 @@ def load_mano_verts(ds, seq_id):
 # ── Depth Pro K 加载 ─────────────────────────────────────────────────────────
 def load_depth_K(ds, seq_id):
     """Load Depth Pro camera intrinsics K (3x3) for a sequence.
-    Returns (fx, cx, cy) or None. Both FP (K×480/W) and HaPTIC (full K)
-    project to the SAME pixel coordinates when we use K at the full-res scale.
+    Returns (fx, fy, cx, cy) or None.
     """
     k_path = os.path.join(DEPTH_BASE, ds, seq_id, "K.txt")
     if not os.path.exists(k_path):
         return None
     try:
         K = np.loadtxt(k_path)
-        return float(K[0, 0]), float(K[0, 2]), float(K[1, 2])
+        return float(K[0, 0]), float(K[1, 1]), float(K[0, 2]), float(K[1, 2])
     except Exception:
         return None
 
@@ -282,9 +282,9 @@ def accumulate_contacts_sequence(mesh_verts, fp_poses, mano_frames, threshold,
         Both produce CORRECT image-space coordinates for the same physical point.
     """
     if K_params is not None:
-        fx, cx, cy = K_params
+        fx, fy, cx, cy = K_params
     else:
-        fx, cx, cy = 3000.0, 500.0, 500.0   # reasonable fallback
+        fx, fy, cx, cy = 3000.0, 3000.0, 500.0, 500.0   # reasonable fallback
 
     # Pixel threshold: 30mm at ~2m true depth with fx≈2325px (ARCTIC GT)
     # = 2325 × 0.030 / 2.0 ≈ 35px. Use 50px for robustness.
@@ -339,11 +339,11 @@ def accumulate_contacts_sequence(mesh_verts, fp_poses, mano_frames, threshold,
             # ── 2D 像素投影法 (ARCTIC: Depth Pro K 偏差大, 3D尺度不一致) ──────
             Z_mesh = mesh_cam[:, 2].clip(0.001)
             u_mesh = mesh_cam[:, 0] / Z_mesh * fx + cx
-            v_mesh = mesh_cam[:, 1] / Z_mesh * fx + cy
+            v_mesh = mesh_cam[:, 1] / Z_mesh * fy + cy   # BUG-10修复: 用 fy 而非 fx
 
             Z_hand = hand_v[:, 2].clip(0.001)
             u_hand = hand_v[:, 0] / Z_hand * fx + cx
-            v_hand = hand_v[:, 1] / Z_hand * fx + cy
+            v_hand = hand_v[:, 1] / Z_hand * fy + cy   # BUG-10修复: 用 fy 而非 fx
 
             hand_2d = np.stack([u_hand, v_hand], axis=1)
             mesh_2d = np.stack([u_mesh, v_mesh], axis=1)
@@ -431,7 +431,7 @@ def process_object(ds, obj_ds, obj_name, seqs, mesh_path, threshold, redo=False)
         # Load Depth Pro K (used for 2D mode, or as reference for 3D mode logging)
         K_params = load_depth_K(ds, seq_id)
         if K_params:
-            tqdm.write(f"    [K] fx={K_params[0]:.0f} for {seq_id}")
+            tqdm.write(f"    [K] fx={K_params[0]:.0f} fy={K_params[1]:.0f} for {seq_id}")
 
         # 3D 距离法适用条件: FP + HaPTIC 都用同一 Depth Pro K (two-pass 校准后同米制空间)
         # DexYCB: RealSense D415, fx 误差 < 1% → 3D 距离

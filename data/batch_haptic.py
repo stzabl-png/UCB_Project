@@ -98,6 +98,8 @@ def discover_ho3d(input_dir):
 def discover_dexycb(input_dir):
     """DexYCB: {subject}/{datetime}/{serial}/color_*.jpg"""
     for subj in natsorted(os.listdir(input_dir)):
+        if subj.startswith('.'):   # BUG-04: 过滤 .cache 等隐藏目录
+            continue
         subj_dir = os.path.join(input_dir, subj)
         if not os.path.isdir(subj_dir):
             continue

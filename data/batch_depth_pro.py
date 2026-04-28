@@ -88,6 +88,8 @@ def discover_dexycb(input_dir, cam_filter=None):
     cam_filter: if set, only yield sequences matching this camera serial.
     """
     for subj in natsorted(os.listdir(input_dir)):
+        if subj.startswith('.'):   # BUG-04: 过滤 .cache 等隐藏目录
+            continue
         subj_dir = os.path.join(input_dir, subj)
         if not os.path.isdir(subj_dir): continue
         for dt in natsorted(os.listdir(subj_dir)):

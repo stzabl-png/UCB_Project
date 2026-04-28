@@ -88,7 +88,8 @@ def _dexycb_sessions(subj: str):
         if os.path.isdir(subj_dir):
             _dexycb_session_cache[subj] = natsorted(
                 [d for d in os.listdir(subj_dir)
-                 if os.path.isdir(os.path.join(subj_dir, d))]
+                 if os.path.isdir(os.path.join(subj_dir, d))
+                 and not d.startswith('.')]   # BUG-04: 过滤 .cache 等隐藏目录
             )
         else:
             _dexycb_session_cache[subj] = []
@@ -119,7 +120,10 @@ def seq_to_obj(dataset, seq_id):
     elif dataset == "oakink":
         return "oakink", seq_id.split("_")[0]
     elif dataset == "ho3d_v3":
-        prefix = re.sub(r'\d+$', '', seq_id)
+        # BUG-06 修复: seq_id 带有 'train__' / 'evaluation__' 前缀，
+        # 必须先剥离才能匹配 HO3D_OBJ 字典
+        sid = seq_id.split("__", 1)[-1]   # 'train__ABF10' → 'ABF10'
+        prefix = re.sub(r'\d+$', '', sid)  # 'ABF10' → 'ABF'
         ycb = HO3D_OBJ.get(prefix)
         if ycb: return "ycb", ycb
     elif dataset == "dexycb":
