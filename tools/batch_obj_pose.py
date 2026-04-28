@@ -45,7 +45,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config
 
 # ── FoundationPose 路径 ───────────────────────────────────────────────────────
-FP_ROOT = "/home/lyh/Project/FoundationPose"
+FP_ROOT = os.environ.get("FP_ROOT", "/home/lyh/Project/FoundationPose")
 sys.path.insert(0, FP_ROOT)
 
 # ── 数据路径 ──────────────────────────────────────────────────────────────────
@@ -119,7 +119,8 @@ def seq_to_obj(dataset, seq_id):
     elif dataset == "oakink":
         return "oakink", seq_id.split("_")[0]
     elif dataset == "ho3d_v3":
-        prefix = re.sub(r'\d+$', '', seq_id)
+        s = re.sub(r'^(train|evaluation)__', '', seq_id)
+        prefix = re.sub(r'\d+$', '', s)
         ycb = HO3D_OBJ.get(prefix)
         if ycb: return "ycb", ycb
     elif dataset == "dexycb":
@@ -399,6 +400,12 @@ def main():
                        debug=args.debug)
             tqdm.write(f"  ✅ {ds}/{seq_id}: {n} poses ({time.time()-t0:.1f}s)")
             done += 1
+            # Cleanup tmp scene_dir to save disk
+            try:
+                import shutil
+                shutil.rmtree(scene_dir, ignore_errors=True)
+            except Exception:
+                pass
 
         except Exception as e:
             import traceback

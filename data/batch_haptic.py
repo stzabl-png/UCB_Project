@@ -178,6 +178,8 @@ def main():
                         help="Process only first N sequences (0=all)")
     parser.add_argument("--skip-existing", action="store_true", default=True,
                         help="Skip sequences that already have cached output")
+    parser.add_argument("--shard", type=str, default=None,
+                        help="I/N — process only shard I out of N (1-indexed)")
     parser.add_argument("--only-with-depth-k", action="store_true", default=False,
                         help="Only process sequences that have a Depth Pro K.txt cached. "
                              "Useful to avoid fallback heuristic K for unprepared sequences.")
@@ -202,6 +204,11 @@ def main():
     sequences = list(discover_fn(input_dir))
     if args.seq:
         sequences = [(sid, p, t) for sid, p, t in sequences if args.seq in sid]
+    if getattr(args, 'shard', None):
+        i_n = args.shard.split("/")
+        I, N = int(i_n[0]), int(i_n[1])
+        sequences = [s for k, s in enumerate(sequences) if (k % N) == (I - 1)]
+        print(f"  [--shard {args.shard}] kept {len(sequences)} sequences (every {N}th, offset {I-1})")
     if getattr(args, 'only_with_depth_k', False):
         before = len(sequences)
         sequences = [(sid, p, t) for sid, p, t in sequences

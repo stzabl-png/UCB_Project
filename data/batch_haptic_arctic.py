@@ -58,7 +58,7 @@ def load_haptic_model():
     if "PRETRAINED_WEIGHTS" in cfg.MODEL.BACKBONE:
         cfg.MODEL.BACKBONE.pop("PRETRAINED_WEIGHTS")
     class_ = getattr(haptic_module, cfg.MODEL.get("TARGET", "HAPTIC"))
-    model = class_(cfg)
+    model = class_(cfg, init_renderer=False)
     model.load_state_dict(torch.load(ckpt)["state_dict"], strict=False)
     model = model.to(device)
     model.eval()
