@@ -364,7 +364,16 @@ def main():
             print(f"\n退出（已完成 {task_idx}/{len(pending)}）")
             break
         elif action == 'skip':
-            print(f"  ⏭  跳过 {task}")
+            # 记录为 skipped，以便下次不再弹出，同时下游脚本自动过滤
+            registry[f"egodex__{seq_id}"] = {
+                "dataset":  "egodex",
+                "seq_id":   seq_id,
+                "obj_name": obj_name,
+                "skipped":  True,
+                "skip_reason": "manual_skip",
+            }
+            save_registry(registry)
+            print(f"  ⏭  跳过 {task}（已写入registry，下游不会处理）")
 
     cv2.destroyAllWindows()
     sam2.quit()

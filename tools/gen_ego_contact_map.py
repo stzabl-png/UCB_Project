@@ -77,7 +77,9 @@ SCALE_OVERRIDE = {
 }
 
 # ── 序列配置 ─────────────────────────────────────────────────────────────────
-SEQUENCE_REGISTRY = {
+REGISTRY_JSON = os.path.join(PROJ, "tools", "egodex_sequence_registry.json")
+
+_BUILTIN_REGISTRY = {
     # (dataset, seq_id): {obj_name, hawor_seq_dir, depth_dir, pose_dir}
     ("egodex", "assemble_disassemble_tiles/1"): {
         "obj_name":    "assemble_tile",
@@ -102,6 +104,33 @@ SEQUENCE_REGISTRY = {
                            "__processed_episode_3"),
     },
 }
+
+
+def load_sequence_registry():
+    """EGO-BUG-01 修复: 从 JSON + 内置条目动态加载。"""
+    reg = dict(_BUILTIN_REGISTRY)
+    if os.path.exists(REGISTRY_JSON):
+        with open(REGISTRY_JSON) as f:
+            jreg = json.load(f)
+        for key, cfg in jreg.items():
+            if cfg.get("skipped"):          # 手动标记为不适合的序列
+                continue
+            ds  = cfg["dataset"]
+            sid = cfg["seq_id"]
+            reg[(ds, sid)] = {
+                "obj_name":  cfg["obj_name"],
+                "hawor_dir": cfg.get("hawor_dir",
+                                 os.path.join(RAW_BASE,
+                                     f"egodex/test/{sid}")),
+                "depth_dir": cfg["depth_dir"],
+                "pose_dir":  cfg["pose_dir"],
+            }
+        print(f"[Registry] {len(jreg)} from JSON + {len(_BUILTIN_REGISTRY)} builtins"
+              f" = {len(reg)} total")
+    return reg
+
+
+SEQUENCE_REGISTRY = None  # lazy-loaded in main()
 
 
 # ── MANO forward ─────────────────────────────────────────────────────────────
@@ -419,10 +448,14 @@ def process_sequence(dataset, seq_id, cfg, frame_start=0, frame_end=None):
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main():
+    global SEQUENCE_REGISTRY
+    SEQUENCE_REGISTRY = load_sequence_registry()   # EGO-BUG-01 修复
+    all_objs = sorted(set(v["obj_name"] for v in SEQUENCE_REGISTRY.values()))
+
     parser = argparse.ArgumentParser(
         description="第一人称接触图生成 — MANO + FP → human_prior HDF5")
     parser.add_argument("--obj", default=None,
-                        choices=["assemble_tile", "orange"],
+                        choices=all_objs,
                         help="只处理此物体（默认全部）")
     parser.add_argument("--frames", nargs=2, type=int, default=[0, 59],
                         metavar=("START", "END"),
