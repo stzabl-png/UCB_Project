@@ -56,12 +56,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config
 
 # ── 路径 ──────────────────────────────────────────────────────────────────────
-POSE_BASE   = os.path.join(config.DATA_HUB, "ProcessedData", "obj_poses")
-MANO_BASE   = os.path.join(config.DATA_HUB, "ProcessedData", "third_mano")
-MESH_BASE   = os.path.join(config.DATA_HUB, "ProcessedData", "obj_meshes")
-OUT_TRAIN   = os.path.join(config.DATA_HUB, "ProcessedData", "training_fp")
-OUT_PRIOR   = os.path.join(config.DATA_HUB, "ProcessedData", "human_prior_fp")
-DEPTH_BASE  = os.path.join(config.DATA_HUB, "ProcessedData", "third_depth")
+POSE_BASE      = os.path.join(config.DATA_HUB, "ProcessedData", "obj_poses")
+MANO_BASE      = os.path.join(config.DATA_HUB, "ProcessedData", "third_mano")
+MESH_BASE      = os.path.join(config.DATA_HUB, "ProcessedData", "obj_meshes")
+OUT_TRAIN_BASE = os.path.join(config.DATA_HUB, "ProcessedData", "training_fp")      # 可被 --out_suffix 覆盖
+OUT_PRIOR_BASE = os.path.join(config.DATA_HUB, "ProcessedData", "human_prior_fp")   # 可被 --out_suffix 覆盖
+DEPTH_BASE     = os.path.join(config.DATA_HUB, "ProcessedData", "third_depth")
 
 N_POINTS       = 4096
 CONTACT_SIGMA  = 0.020   # Gaussian smoothing radius (m)
@@ -250,7 +250,7 @@ def load_depth_K(ds, seq_id):
 
 # ── 接触累积 (单序列) — 支持 3D 距离法 和 2D 像素投影法 ──────────────────────
 def accumulate_contacts_sequence(mesh_verts, fp_poses, mano_frames, threshold,
-                                 K_params=None, mode='2d'):
+                                 K_params=None, mode='2d', debug=False):
     """Accumulate per-vertex contact counts using 2D pixel-space contact.
 
     Root cause of 3D mismatch: Depth Pro overestimates focal length vs ARCTIC GT
@@ -300,11 +300,22 @@ def accumulate_contacts_sequence(mesh_verts, fp_poses, mano_frames, threshold,
     n_counted  = 0
     n_diverged = 0
 
-    for i, (_, T) in enumerate(fp_poses):
-        # Proportional mapping: FP frame i → MANO frame j
+    for i, (fp_name, T) in enumerate(fp_poses):
+        # ── Proportional mapping: FP frame i → MANO frame j ───────────────
         j = int(round(i * (n_mano - 1) / max(n_fp - 1, 1)))
         j = max(0, min(j, n_mano - 1))
-        hand_v = mano_frames[j][1]  # (778, 3)
+        mano_key, hand_v = mano_frames[j]
+
+        # Alignment guard: warn if temporal drift is large
+        # FP frame name is zero-padded int (e.g. "000042"), MANO key same format
+        try:
+            fp_idx   = int(fp_name)
+            mano_idx = int(mano_key)
+            drift = abs(fp_idx - mano_idx)
+            if drift > 30 and debug:
+                print(f"      ⚠️  frame drift fp={fp_idx} mano={mano_idx} Δ={drift}")
+        except ValueError:
+            pass  # non-numeric keys: skip drift check
 
         # ── Transform mesh to FP camera space ──────────────────────────────
         R = T[:3, :3]
@@ -324,26 +335,29 @@ def accumulate_contacts_sequence(mesh_verts, fp_poses, mano_frames, threshold,
 
         if mode == '3d':
             # ── 3D 距离法 + 深度归一化 ────────────────────────────────────────
-            # HaPTIC weak-perspective 深度估计 ≈ 1.5× FP 深度 (scale mismatch)
-            # 解法: 把 MANO 按比例缩放到 FP 物体深度平面, 再算 3D 距离
-            # 2D 投影完全重合 → scale 只影响 Z, XY / Z 比值不变 → 接触区域正确
-            z_obj  = float(t[2])                          # FP 物体中心深度 (metres)
-            scale_d = z_obj / max(z_mano, 0.01)           # e.g. 0.882/1.315 = 0.671
-            hand_v_aligned = hand_v * scale_d             # 缩放到同一深度平面
+            z_obj   = float(t[2])                          # FP 物体中心深度
+            scale_d = z_obj / max(z_mano, 0.01)            # 深度比例
 
+            # Guard: 深度比例异常 → 跳过该帧（防止错误缩放）
+            # DexYCB/HO3D RealSense: 手物距离通常 0.3~1.2m, 比例应在 0.3~3.0
+            if scale_d < 0.3 or scale_d > 3.0:
+                n_diverged += 1
+                continue
+
+            hand_v_aligned = hand_v * scale_d
             hand_tree = cKDTree(hand_v_aligned)
-            dists_m, _ = hand_tree.query(mesh_cam)        # min 3D dist per mesh vert
-            contact_count[dists_m < threshold] += 1       # threshold in metres
+            dists_m, _ = hand_tree.query(mesh_cam)
+            contact_count[dists_m < threshold] += 1
 
         else:
-            # ── 2D 像素投影法 (ARCTIC: Depth Pro K 偏差大, 3D尺度不一致) ──────
+            # ── 2D 像素投影法 ──────────────────────────────────────────────
             Z_mesh = mesh_cam[:, 2].clip(0.001)
             u_mesh = mesh_cam[:, 0] / Z_mesh * fx + cx
-            v_mesh = mesh_cam[:, 1] / Z_mesh * fy + cy   # BUG-10修复: 用 fy 而非 fx
+            v_mesh = mesh_cam[:, 1] / Z_mesh * fy + cy
 
             Z_hand = hand_v[:, 2].clip(0.001)
             u_hand = hand_v[:, 0] / Z_hand * fx + cx
-            v_hand = hand_v[:, 1] / Z_hand * fy + cy   # BUG-10修复: 用 fy 而非 fx
+            v_hand = hand_v[:, 1] / Z_hand * fy + cy
 
             hand_2d = np.stack([u_hand, v_hand], axis=1)
             mesh_2d = np.stack([u_mesh, v_mesh], axis=1)
@@ -389,14 +403,19 @@ def sample_pointcloud_with_labels(mesh, contact_per_vertex, n_points=N_POINTS):
 
 
 # ── 主处理函数 ────────────────────────────────────────────────────────────────
-def process_object(ds, obj_ds, obj_name, seqs, mesh_path, threshold, redo=False):
+def process_object(ds, obj_ds, obj_name, seqs, mesh_path, threshold,
+                   out_train_base=None, out_prior_base=None, redo=False):
     """Process all sequences for one object.
 
+    out_train_base: override output directory (default: OUT_TRAIN_BASE)
+    out_prior_base: override prior directory (default: OUT_PRIOR_BASE)
     seqs: list of seq_id strings that map to this object.
     Returns True on success.
     """
-    out_train = os.path.join(OUT_TRAIN, ds, f"{obj_name}.hdf5")
-    out_prior = os.path.join(OUT_PRIOR, f"{obj_name}.hdf5")
+    _out_train = out_train_base or OUT_TRAIN_BASE
+    _out_prior = out_prior_base or OUT_PRIOR_BASE
+    out_train = os.path.join(_out_train, ds, f"{obj_name}.hdf5")
+    out_prior = os.path.join(_out_prior,     f"{obj_name}.hdf5")
 
     if not redo and os.path.exists(out_train):
         print(f"    ⏭  cached: {out_train}")
@@ -433,11 +452,15 @@ def process_object(ds, obj_ds, obj_name, seqs, mesh_path, threshold, redo=False)
         if K_params:
             tqdm.write(f"    [K] fx={K_params[0]:.0f} fy={K_params[1]:.0f} for {seq_id}")
 
-        # 3D 距离法适用条件: FP + HaPTIC 都用同一 Depth Pro K (two-pass 校准后同米制空间)
-        # DexYCB: RealSense D415, fx 误差 < 1% → 3D 距离
-        # HO3D v3: 同款相机, two-pass 后 fx 误差 -1.5% → 3D 距离
-        # ARCTIC/其他: Depth Pro K 偏差 ~44%, 尺度不一致 → 2D 投影兜底
-        contact_mode = '3d' if ds in ('dexycb', 'ho3d_v3') else '2d'
+        # 接触检测模式：统一使用 3D + 深度缩放修正
+        # ─────────────────────────────────────────────────────────────────
+        # 所有第三人称数据集都用 Depth Pro 估计内参 K，存在系统性焦距误差。
+        # 同时 MANO (HaPTIC/HaMeR weak-perspective) 的深度 Z 系统性高于 FP。
+        # 解决方案: 用 FP 物体深度 Z_obj 对 MANO 做比例缩放，使两者在同一
+        # metric 平面对比 (scale_d = Z_obj / Z_hand)。
+        # 守卫条件 scale_d ∈ [0.3, 3.0] 会过滤极端异常帧。
+        # 2D 投影模式仅作为兜底（当 scale_d 守卫全部失败时不会用到）。
+        contact_mode = '3d'   # ← 所有第三人称数据集统一使用
 
         cnt, n_ok, n_div = accumulate_contacts_sequence(
             mesh_verts, fp_poses, mano_frames, threshold,
@@ -453,8 +476,14 @@ def process_object(ds, obj_ds, obj_name, seqs, mesh_path, threshold, redo=False)
         print(f"    ❌ No valid frames for {obj_name}")
         return False
 
-    # Normalize
-    contact_freq = total_contact / total_counted
+    # ── Normalize: count / max_count (per-object) ─────────────────────────
+    # 旧方案: / total_counted → 序列越多, max_hp 越小（ycb_dex_03 有293条 → max=0.019）
+    # 新方案: 每个顶点用接触次数 / 该物体最大接触次数 → 始终输出 [0, 1]
+    max_count = total_contact.max()
+    if max_count > 0:
+        contact_freq = total_contact / max_count   # per-object normalization
+    else:
+        contact_freq = total_contact
 
     # Gaussian smoothing
     contact_smooth = smooth_contact_on_mesh(mesh, contact_freq)
@@ -462,8 +491,10 @@ def process_object(ds, obj_ds, obj_name, seqs, mesh_path, threshold, redo=False)
     # Point cloud sampling + label transfer
     points, normals, human_prior = sample_pointcloud_with_labels(mesh, contact_smooth)
 
-    # Force center
-    high_contact = contact_smooth > 0.05
+    # Force center (使用 top 20% 高接触区域)
+    thr_fc = float(np.percentile(contact_smooth[contact_smooth > 0], 80)) \
+             if (contact_smooth > 0).any() else 0.05
+    high_contact = contact_smooth >= thr_fc
     if high_contact.any():
         force_center = mesh_verts[high_contact].mean(0).astype(np.float32)
     else:
@@ -472,9 +503,12 @@ def process_object(ds, obj_ds, obj_name, seqs, mesh_path, threshold, redo=False)
                         if any_contact.any() else np.zeros(3, np.float32))
 
     n_contact_verts = int((contact_smooth > 0).sum())
+    cov_01 = float((human_prior > 0.01).mean()) * 100
+    cov_50 = float((human_prior > 0.5).mean()) * 100
     print(f"    ✅ {obj_name}: {seq_ok} seqs, {total_counted} frames, "
-          f"{n_contact_verts}/{V} contact verts, "
-          f"coverage={float((human_prior > 0).mean()):.1%}")
+          f"contact_verts={n_contact_verts}/{V}, "
+          f"hp_max={human_prior.max():.3f}, "
+          f"cov(>0.01)={cov_01:.0f}% cov(>0.5)={cov_50:.0f}%")
 
     # Save training HDF5
     os.makedirs(os.path.dirname(out_train), exist_ok=True)
@@ -491,7 +525,7 @@ def process_object(ds, obj_ds, obj_name, seqs, mesh_path, threshold, redo=False)
         f.attrs["threshold"] = threshold
 
     # Save inference prior HDF5
-    os.makedirs(OUT_PRIOR, exist_ok=True)
+    os.makedirs(_out_prior, exist_ok=True)
     with h5py.File(out_prior, "w") as f:
         f.create_dataset("point_cloud",  data=points,      compression="gzip")
         f.create_dataset("normals",      data=normals,     compression="gzip")
@@ -513,9 +547,28 @@ def main():
                         help="Contact distance threshold in mm (default: 30mm)")
     parser.add_argument("--redo",      action="store_true",
                         help="Recompute even if output exists")
+    parser.add_argument("--out_suffix", default=None,
+                        help="输出目录后缀，用于和原始数据对比。\n"
+                             "例如: --out_suffix v2 → training_fp_v2/ human_prior_fp_v2/\n"
+                             "不指定则写入默认 training_fp/（覆盖原数据）")
     args = parser.parse_args()
 
     threshold_m = args.threshold / 1000.0   # mm → m
+
+    # ── 输出路径（支持 --out_suffix 隔离对比版本）────────────────────────────
+    if args.out_suffix:
+        suffix = args.out_suffix.strip("_")
+        out_train_base = os.path.join(config.DATA_HUB, "ProcessedData",
+                                      f"training_fp_{suffix}")
+        out_prior_base = os.path.join(config.DATA_HUB, "ProcessedData",
+                                      f"human_prior_fp_{suffix}")
+        print(f"\n⚠️  --out_suffix={suffix}: 输出到独立目录，不覆盖原数据")
+        print(f"   训练数据 → {out_train_base}")
+        print(f"   推理数据 → {out_prior_base}")
+    else:
+        out_train_base = OUT_TRAIN_BASE
+        out_prior_base = OUT_PRIOR_BASE
+        print(f"\n⚠️  将写入默认路径（覆盖原数据），如需隔离请用 --out_suffix")
 
     # ── Discover all (ds, obj_name) → [seq_ids] ───────────────────────────────
     datasets = [args.dataset] if args.dataset else ["arctic", "oakink", "ho3d_v3", "dexycb"]
@@ -546,7 +599,7 @@ def main():
     print(f" MANO × FoundationPose Alignment → Contact Labels")
     print(f" Objects  : {len(obj_to_seqs)}")
     print(f" Threshold: {args.threshold:.0f}mm")
-    print(f" Output   : {OUT_TRAIN}")
+    print(f" Output   : {out_train_base}")
     print(f"{'='*60}\n")
 
     if not obj_to_seqs:
@@ -561,7 +614,10 @@ def main():
         tqdm.write(f"▶ {ds}/{obj_name}  ({len(seqs)} sequences)")
 
         ok = process_object(ds, mesh_ds, obj_name, seqs, mesh_path,
-                            threshold=threshold_m, redo=args.redo)
+                            threshold=threshold_m,
+                            out_train_base=out_train_base,
+                            out_prior_base=out_prior_base,
+                            redo=args.redo)
         if ok:
             done += 1
         else:
@@ -569,8 +625,12 @@ def main():
 
     print(f"\n{'='*60}")
     print(f"✅ Done: {done}  ❌ Failed: {failed}")
-    print(f"Training HDF5 → {OUT_TRAIN}")
-    print(f"Human Prior   → {OUT_PRIOR}")
+    print(f"Training HDF5 → {out_train_base}")
+    print(f"Human Prior   → {out_prior_base}")
+    if args.out_suffix:
+        print(f"\n对比命令:")
+        print(f"  python tools/vis_contact_heatmap.py --dataset dexycb --batch ")
+        print(f"    --out output/vis_contact_heatmap/compare_{args.out_suffix}")
 
 
 if __name__ == "__main__":
