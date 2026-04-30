@@ -67,9 +67,16 @@ UNIDEPTH_REV = "1d0d3c52f60b5164629d279bb9a7546458e6dcc4"
 
 # ── calibrated focal lengths from 10-sequence MegaSAM calibration ─────────────
 CALIB_FX = {
-    "ph2d_avp": 271.2,   # px @640px wide  (8 seqs, ±13px, +8.6% vs GT)
-    "egodex":   227.2,   # px @640px wide  (10 seqs, ±1px,  -7.5% vs GT)
+    # Initial K for DROID-SLAM (autonomous estimates @ 640px wide).
+    # Only affects SLAM K initialization — depth metric scale comes from
+    # UniDepth and is NOT sensitive to this value.
+    # Obtained via: Pass 1 (--opt-intr on N seqs) → global median of K_opt.
+    # New datasets: no entry needed — generic 60° FoV fallback is used.
+    "ph2d_avp": 271.2,   # px @640px wide (median over 8 seqs)
+    "egodex":   227.8,   # px @640px wide (median over 10 seqs)
 }
+# Generic fallback: assume 60° FoV → fx = W / (2·tan(30°)) = W·√3/2 ≈ 0.866·W
+CALIB_FX_FALLBACK_RATIO = 0.866  # relative to frame width
 
 LONG_DIM   = 640    # resize long-side to this
 MAX_FRAMES = 60     # frames per episode fed to DROID-SLAM
@@ -562,7 +569,10 @@ def main():
     for i, ep in enumerate(tqdm(episodes, desc="Episodes")):
         seq_id       = ep["seq_id"]
         cam_key      = ep["cam_key"]
-        calibrated_fx = CALIB_FX[cam_key]
+        # calibrated_fx: SLAM K init — see CALIB_FX comment above.
+        # Falls back to 60° FoV assumption for unknown cameras.
+        # All frames are resized to LONG_DIM before SLAM, so use LONG_DIM as width.
+        calibrated_fx = CALIB_FX.get(cam_key, LONG_DIM * CALIB_FX_FALLBACK_RATIO)
         safe_id      = seq_id.replace("/", "_")
 
         # temp dirs (per-episode, cleaned after)
