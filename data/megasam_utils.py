@@ -6,20 +6,29 @@ for a given scene.  The intrinsics are jointly optimised over the entire video,
 so they are significantly more accurate (~1-3%) than the per-frame RANSAC
 estimate used by HaWoR or the diagonal heuristic used by HaPTIC.
 
-MegaSAM output layout (produced by tools/run_megasam.py or camera_tracking_scripts/):
-    mega-sam/outputs/{scene_name}_droid.npz
-        intrinsic  : (3, 3) float32  — single K matrix for the whole video
-        cam_c2w    : (N, 4, 4)       — per-frame camera-to-world pose
-        depths     : (N, H, W)       — metric depth maps
-    mega-sam/reconstructions/{scene_name}/
-        intrinsics.npy  : (N, 4) = [fx, fy, cx, cy] per frame (same K replicated)
-        poses.npy       : (N, 7) = [qx, qy, qz, qw, tx, ty, tz]
+Supported output layouts (checked in priority order):
+
+  [NEW] batch_megasam.py v2 output (data_hub/ProcessedData/egocentric_depth/):
+    data_hub/ProcessedData/egocentric_depth/{scene_name}/
+        K.npy            — (3, 3) intrinsic matrix
+        cam_c2w.npy      — (N, 4, 4) camera-to-world poses
+        depth.npz        — depths (N, H, W) float32 [metres]
+        meta.json        — {seq_id, n_frames, hw, calibrated_fx}
+
+  [OLD] mega-sam/outputs/{scene_name}_droid.npz:
+        intrinsic  : (3, 3) float32
+        cam_c2w    : (N, 4, 4)
+        depths     : (N, H, W)
+
+  [OLD] mega-sam/reconstructions/{scene_name}/intrinsics.npy:
+        (N, 4) = [fx, fy, cx, cy] per frame
 
 Usage::
     from data.megasam_utils import load_megasam_K, load_megasam_K_fx
 
-    K = load_megasam_K('box_grab_01')   # 3x3 ndarray | None
-    fx = load_megasam_K_fx('box_grab_01')  # float | None
+    K = load_megasam_K('egodex/slot_batteries/1')  # new format
+    K = load_megasam_K('box_grab_01')              # old format
+    fx = load_megasam_K_fx('egodex/fry_bread/0')   # float | None
 """
 
 import os
@@ -32,17 +41,32 @@ MEGASAM_DIR = os.path.join(_PROJECT_DIR, 'mega-sam')
 MEGASAM_OUTPUT_DIR = os.path.join(MEGASAM_DIR, 'outputs')
 MEGASAM_RECON_DIR = os.path.join(MEGASAM_DIR, 'reconstructions')
 
+# New-format base (batch_megasam.py v2)
+_EGO_DEPTH_BASE = os.path.join(_PROJECT_DIR, 'data_hub', 'ProcessedData', 'egocentric_depth')
+
 
 def load_megasam_K(scene_name: str) -> "np.ndarray | None":
     """Return the 3×3 intrinsic matrix K estimated by MegaSAM for *scene_name*.
 
-    Tries the compact ``outputs/{scene_name}_droid.npz`` first (single K),
-    then falls back to ``reconstructions/{scene_name}/intrinsics.npy``
-    (per-frame [fx, fy, cx, cy], in which case the median is taken).
+    Lookup priority (first hit wins):
+      1. NEW  data_hub/ProcessedData/egocentric_depth/{scene_name}/K.npy
+      2. OLD  mega-sam/outputs/{scene_name}_droid.npz  →  'intrinsic' key
+      3. OLD  mega-sam/reconstructions/{scene_name}/intrinsics.npy  →  median
 
     Returns ``None`` if no MegaSAM output is found for this scene.
     """
-    # Primary: _droid.npz → 'intrinsic' key (3x3)
+    # ── Priority 1: new batch_megasam v2 format ────────────────────────────────
+    new_k_path = os.path.join(_EGO_DEPTH_BASE, scene_name, 'K.npy')
+    if os.path.exists(new_k_path):
+        try:
+            K = np.load(new_k_path).astype(np.float64)  # (3, 3)
+            assert K.shape == (3, 3), f"Unexpected K shape: {K.shape}"
+            print(f"[megasam_utils] K loaded (new format): {new_k_path}")
+            return K
+        except Exception as e:
+            print(f"[megasam_utils] Warning: could not load {new_k_path}: {e}")
+
+    # ── Priority 2: old _droid.npz → 'intrinsic' key (3x3) ───────────────────
     droid_path = os.path.join(MEGASAM_OUTPUT_DIR, f'{scene_name}_droid.npz')
     if os.path.exists(droid_path):
         try:
@@ -53,12 +77,11 @@ def load_megasam_K(scene_name: str) -> "np.ndarray | None":
         except Exception as e:
             print(f"[megasam_utils] Warning: could not load {droid_path}: {e}")
 
-    # Fallback: reconstructions/{scene}/intrinsics.npy → (N, 4) = [fx, fy, cx, cy]
+    # ── Priority 3: reconstructions/{scene}/intrinsics.npy → (N,4) median ────
     recon_path = os.path.join(MEGASAM_RECON_DIR, scene_name, 'intrinsics.npy')
     if os.path.exists(recon_path):
         try:
             intr = np.load(recon_path, allow_pickle=True)  # (N, 4)
-            # Take median across frames for robustness
             fx, fy, cx, cy = np.median(intr, axis=0)
             K = np.array([[fx, 0, cx],
                           [0, fy, cy],
@@ -86,8 +109,18 @@ def load_megasam_K_fx(scene_name: str) -> "float | None":
 def load_megasam_poses(scene_name: str) -> "np.ndarray | None":
     """Return per-frame camera-to-world poses (N, 4, 4) from MegaSAM.
 
+    Checks new format (cam_c2w.npy) first, then old _droid.npz.
     Returns ``None`` if not available.
     """
+    # New format: cam_c2w.npy
+    new_poses_path = os.path.join(_EGO_DEPTH_BASE, scene_name, 'cam_c2w.npy')
+    if os.path.exists(new_poses_path):
+        try:
+            return np.load(new_poses_path).astype(np.float64)  # (N, 4, 4)
+        except Exception as e:
+            print(f"[megasam_utils] Warning: could not load {new_poses_path}: {e}")
+
+    # Old format: _droid.npz → 'cam_c2w'
     droid_path = os.path.join(MEGASAM_OUTPUT_DIR, f'{scene_name}_droid.npz')
     if os.path.exists(droid_path):
         try:
@@ -101,8 +134,19 @@ def load_megasam_poses(scene_name: str) -> "np.ndarray | None":
 def load_megasam_depths(scene_name: str) -> "np.ndarray | None":
     """Return per-frame metric depth maps (N, H, W) from MegaSAM.
 
+    Checks new format (depth.npz) first, then old _droid.npz.
     Returns ``None`` if not available.
     """
+    # New format: depth.npz → 'depths' key
+    new_depth_path = os.path.join(_EGO_DEPTH_BASE, scene_name, 'depth.npz')
+    if os.path.exists(new_depth_path):
+        try:
+            d = np.load(new_depth_path)
+            return d['depths'].astype(np.float32)  # (N, H, W)
+        except Exception as e:
+            print(f"[megasam_utils] Warning: could not load {new_depth_path}: {e}")
+
+    # Old format: _droid.npz → 'depths'
     droid_path = os.path.join(MEGASAM_OUTPUT_DIR, f'{scene_name}_droid.npz')
     if os.path.exists(droid_path):
         try:

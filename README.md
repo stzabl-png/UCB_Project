@@ -388,17 +388,22 @@ Egocentric sequences require a different toolchain from third-person:
 ```
 Ego RGB Video
     │
-    ├─ HaWoR (hawor env) ──────────→ world_space_res.pth  (MANO params, world frame)
+    ├─ MegaSAM ────────────────────→ egocentric_depth/{ds}/{seq}/
+    │                                  K.npy + depth.npz + cam_c2w.npy
     │
-    ├─ MegaSAM ────────────────────→ cam_c2w.npy + depth.npz + K.npy  (metric depth)
+    ├─ HaWoR → batch_hawor.py ────→ ego_mano/{ds}/{seq}.npz
+    │                                  right_verts + left_verts (world frame)
+    │                                  R_w2c + t_w2c (world→cam per frame)
     │
     ├─ SAM2 mask (manual, once) ───→ obj_recon_input/egocentric/{obj}/0.png
     │
-    ├─ estimate_obj_scale_ego.py ──→ scale.json  (d_real / d_mesh via MegaSAM depth)
+    ├─ estimate_obj_scale_ego.py ──→ scale.json  (d_real / d_mesh via MegaSAM)
     │
-    ├─ FoundationPose (bundlesdf) ─→ ob_in_cam/*.txt  (6D object pose per frame)
+    ├─ batch_obj_pose_ego.py ──────→ obj_poses_ego/{ds}/{seq}/ob_in_cam/*.txt
     │
-    └─ gen_ego_contact_map.py ─────→ human_prior/{obj}.hdf5  (contact heatmap)
+    └─ batch_align_ego_mano_fp.py ─→ human_prior/{obj}.hdf5
+                                       2D projection (scale-invariant)
+                                       point_cloud + normals + human_prior
 ```
 
 ### Prerequisites
@@ -409,7 +414,7 @@ conda activate hawor      # HaWoR, MANO, contact map generation
 conda activate bundlesdf  # FoundationPose
 
 # Data layout expected:
-# data_hub/RawData/ThirdPersonRawData/egodex/test/{seq}/extracted_images/
+# data_hub/RawData/EgoRawData/egodex/test/{seq}/extracted_images/
 # data_hub/ProcessedData/egocentric_depth/{dataset}/{seq}/  ← MegaSAM output
 # data_hub/ProcessedData/obj_recon_input/egocentric/{obj}/0.png  ← SAM2 mask
 # data_hub/ProcessedData/obj_meshes/egocentric/{obj}/mesh.ply    ← SAM3D mesh
@@ -417,13 +422,27 @@ conda activate bundlesdf  # FoundationPose
 
 ### Step E1 · HaWoR — MANO Hand Estimation (egocentric)
 
-> HaWoR runs on the extracted RGB frames and outputs world-space MANO parameters
-> using MegaSAM SLAM poses as the world coordinate reference.
+> `batch_hawor.py` processes each sequence in an isolated subprocess (no CUDA conflicts).
+> Output is a preprocessed `.npz` with world-frame MANO vertices and R_w2c/t_w2c per frame.
 
 ```bash
-# Register sequence configuration in tools/gen_ego_contact_map.py (SEQUENCE_REGISTRY)
-# then run HaWoR (see Video2MANO&Mesh/hawor for invocation details)
-# Output: data_hub/RawData/ThirdPersonRawData/{dataset}/{seq}/world_space_res.pth
+conda activate bundlesdf   # dispatcher; subprocess uses hawor env
+
+# All registered egodex sequences
+python data/batch_hawor.py --dataset egodex
+
+# Single sequence
+python data/batch_hawor.py --dataset egodex --seq "fry_bread/1"
+
+# Force redo
+python data/batch_hawor.py --dataset egodex --force-rerun
+
+# Output: data_hub/ProcessedData/ego_mano/egodex/{seq_id}.npz
+#   right_verts  (T, 778, 3) — world frame
+#   left_verts   (T, 778, 3) — world frame
+#   R_w2c        (T, 3, 3)   — SLAM world→cam rotation
+#   t_w2c        (T, 3)      — SLAM world→cam translation
+#   pred_valid   (2, T) bool
 ```
 
 ### Step E2 · MegaSAM — Camera Poses + Metric Depth
@@ -478,34 +497,58 @@ conda run -n bundlesdf python tools/batch_obj_pose_ego.py --dataset egodex --red
 #   track_vis/000000.png  ...  (debug visualisation)
 ```
 
-### Step E6 · Contact Map Generation (egocentric)
+### Step E6 · Contact Label Generation (egocentric)
 
-> Synchronises sparse HaWoR MANO frames with dense FoundationPose object trajectories
-> via nearest-frame matching (not step-based) to maximise valid frame utilisation.
-> Output format is identical to third-person `human_prior/*.hdf5`.
+> Uses **2D image-space projection** (scale-invariant) to align HaWoR MANO with
+> FoundationPose object poses — bypassing the HaWoR SLAM scale ambiguity entirely.
+>
+> **Why 2D?** `u = fx·(x/z) + cx` — the SLAM scale cancels in x/z, so both MANO
+> (any scale) and FP mesh (metric) project to correct image coordinates with the same K.
+>
+> Output is written directly to `data_hub/human_prior/` (same as third-person tools).
 
 ```bash
-# All objects defined in SEQUENCE_REGISTRY
-conda run -n hawor python tools/gen_ego_contact_map.py
+conda activate bundlesdf
+
+# All objects defined in egodex_sequence_registry.json
+python data/batch_align_ego_mano_fp.py --dataset egodex
 
 # Single object
-conda run -n hawor python tools/gen_ego_contact_map.py --obj assemble_tile
+python data/batch_align_ego_mano_fp.py --dataset egodex --obj fry_bread
+
+# Force redo (ignore cached HDF5)
+python data/batch_align_ego_mano_fp.py --dataset egodex --redo
 
 # Output:
-# data_hub/human_prior/{obj}.hdf5
-#   point_cloud   (4096, 3)  — sampled from mesh surface
+# data_hub/ProcessedData/training_fp_ego/egodex/{obj}.hdf5  ← training data
+# data_hub/human_prior/{obj}.hdf5                           ← inference interface
+#   point_cloud   (4096, 3)  — sampled from scale-corrected mesh
 #   normals       (4096, 3)
 #   human_prior   (4096,)    — contact probability [0, 1]
+#   force_center  (3,)       — centroid of top-50% contact region
 ```
+
+**Contact algorithm** (σ = 15 px at depth resolution):
+1. Project MANO world-verts → image: `v_cam = R_w2c @ v_world + t_w2c`, then `u = fx·x/z + cx`
+2. Project FP mesh → image: `mesh_cam = R_oc @ pts + t_oc`, then `u = fx·x/z + cx`
+3. Per mesh-point: `w = exp(−½(d_px / 15)²)`, accumulate across 60 frames, normalise to [0,1]
 
 ### Step E7 · Visualise Contact Map
 
-> Renders a 2-panel figure (binary + continuous jet) consistent with vis_3panel.py.
-> Uses 20K-point dense mesh sampling + KNN interpolation, white background.
-
 ```bash
-conda run -n hawor python tools/vis_ego_contact.py --obj assemble_tile
-# Output: output/affordance_ego/{obj}_contact_3d.png
+conda activate bundlesdf
+
+# 单个物体 (无需 display，生成 PNG)
+python tools/vis_contact_heatmap.py --dataset egodex --obj fry_bread
+python tools/vis_contact_heatmap.py --dataset egodex --obj basic_fold
+
+# 批量全部 EgoDex 物体
+python tools/vis_contact_heatmap.py --dataset egodex --batch
+
+# 简单版 (仅 matplotlib)
+python tools/vis_ego_contact.py --obj fry_bread
+
+# 输出: output/affordance_ego/{obj}.png
 ```
 
 ### Full EgoDex Runbook — 全量 3051 条序列
@@ -526,41 +569,35 @@ conda run -n mega_sam python ../data/batch_megasam.py --dataset egodex
 conda run -n mega_sam python ../data/batch_megasam.py --dataset egodex --resume
 cd ..
 
-# ── Step 2: HaWoR — MANO 手部估计 ─────────────────────────────────
-# 环境: hawor  |  mp4 直接输入，输出 world_space_res.pth
-HAWOR_DIR="/home/lyh/Project/Video2MANO&Mesh/hawor"
-EGODEX_RAW="data_hub/RawData/ThirdPersonRawData/egodex/test"
-conda run -n hawor bash -c "
-  cd $HAWOR_DIR
-  for mp4 in \$OLDPWD/$EGODEX_RAW/*/*.mp4; do
-    task=\$(dirname \"\$mp4\" | xargs basename)
-    subj=\$(basename \"\${mp4%.mp4}\")
-    out=\"\$OLDPWD/$EGODEX_RAW/\$task/\$subj/world_space_res.pth\"
-    [ -f \"\$out\" ] && echo \"  ⏭  \$task/\$subj\" && continue
-    echo \"  ▶  \$task/\$subj\"
-    python demo.py --video_path \"\$mp4\" --input_type file ||  \\
-      echo \"  ❌ \$task/\$subj failed\"
-  done
-"
+# ── Step 2: HaWoR — MANO 手部估计 (世界坐标 npz) ───────────────────
+# 环境: bundlesdf (dispatcher)，子进程自动用 hawor env
+python data/batch_hawor.py --dataset egodex
+# 断点续跑自动跳过已有 ego_mano.npz
+# 输出: data_hub/ProcessedData/ego_mano/egodex/{seq_id}.npz
 
 # ── Step 3: SAM2 标注 + SAM3D 重建 (每个新物体手动做一次) ──────────
 # 见下方 "Registering a New Egocentric Sequence"
 
-# ── Step 4: 注册新序列 (编辑 3 个文件，见下方说明) ─────────────────
+# ── Step 4: 注册新序列 (编辑 egodex_sequence_registry.json) ─────────
 
 # ── Step 5: Scale 估计 ─────────────────────────────────────────────
 conda run -n hawor python data/estimate_obj_scale_ego.py
+# 输出: data_hub/ProcessedData/obj_meshes/egocentric/{obj}/scale.json
 
 # ── Step 6: FoundationPose 物体位姿 ────────────────────────────────
-conda run -n bundlesdf python tools/batch_obj_pose_ego.py --dataset egodex
+conda activate bundlesdf
+python tools/batch_obj_pose_ego.py --dataset egodex
 # 强制重跑: 加 --redo
+# 输出: data_hub/ProcessedData/obj_poses_ego/egodex/{seq__id}/ob_in_cam/*.txt
 
-# ── Step 7: 接触图生成 ─────────────────────────────────────────────
-conda run -n hawor python tools/gen_ego_contact_map.py
+# ── Step 7: 接触图生成 (2D Projection, scale-invariant) ─────────────
+python data/batch_align_ego_mano_fp.py --dataset egodex
+# 强制重跑: 加 --redo
+# 输出: data_hub/human_prior/{obj}.hdf5
 
 # ── Step 8: 可视化 ──────────────────────────────────────────────────
-conda run -n hawor python tools/vis_ego_contact.py --obj assemble_tile
-eog output/affordance_ego/assemble_tile_contact_3d.png
+python tools/vis_contact_heatmap.py --dataset egodex --batch
+# 输出: output/affordance_ego/{obj}.png
 ```
 
 ### 实时进度监控
@@ -575,41 +612,47 @@ bash tools/egodex_progress.sh
 
 ```bash
 # 快速查看各步骤完成数
-echo "Step 0 帧提取:" && find data_hub/RawData/ThirdPersonRawData/egodex/test -name "extracted_images" -type d | wc -l
+echo "Step 0 帧提取:" && find data_hub/RawData/EgoRawData/egodex/test -name "extracted_images" -type d | wc -l
 echo "Step 1 MegaSAM:" && find data_hub/ProcessedData/egocentric_depth/egodex -name "depth.npz" | wc -l
-echo "Step 2 HaWoR:"   && find data_hub/RawData/ThirdPersonRawData/egodex/test -name "world_space_res.pth" | wc -l
+echo "Step 2 HaWoR:"   && find data_hub/RawData/EgoRawData/egodex/test -name "world_space_res.pth" | wc -l
 echo "Step 7 接触图:"  && ls data_hub/human_prior/*.hdf5 2>/dev/null | wc -l
 ```
 
 ### Registering a New Egocentric Sequence
 
-1. Add entry to `SEQUENCE_REGISTRY` in `tools/batch_obj_pose_ego.py`
-2. Add entry to `SEQUENCE_REGISTRY` in `tools/gen_ego_contact_map.py`
-3. Add entry to `OBJ_DEPTH_MAP` in `data/estimate_obj_scale_ego.py`
-4. Place SAM2 mask at `obj_recon_input/egocentric/{obj}/0.png`
-5. Place SAM3D mesh at `obj_meshes/egocentric/{obj}/mesh.ply`
-6. Run Steps E1–E4 above
+1. Add entry to `tools/egodex_sequence_registry.json`
+   ```json
+   "egodex/my_task/0": {
+     "dataset": "egodex", "seq_id": "my_task/0", "obj_name": "my_obj",
+     "depth_dir": "data_hub/ProcessedData/egocentric_depth/egodex/my_task/0"
+   }
+   ```
+2. Place SAM2 mask at `obj_recon_input/egocentric/{obj}/0.png`
+3. Place SAM3D mesh at `obj_meshes/egocentric/{obj}/mesh.ply`
+4. Run Steps E2 → E7 above
 
 ### Estimated Runtime (single RTX 4080, full EgoDex 3051 sequences)
 
 | Step | 耗时 (单 GPU) | 说明 |
 |---|---|---|
 | 0 · 帧提取 | ✅ 已完成 | EgoDex 官方数据自带 extracted_images |
-| 1 · MegaSAM | ~15-30 min/条 × 3051 | 支持 `--resume` 断点续跑 |
-| 2 · HaWoR | ~2-5 min/条 × 3051 | shell 循环，中断后重跑自动跳过 |
+| 1 · MegaSAM | ~15-30 min/条 × N | 支持 `--resume` 断点续跑 |
+| 2 · HaWoR (`batch_hawor.py`) | ~2-5 min/条 × N | 自动跳过已有 ego_mano.npz |
 | 3 · SAM2+SAM3D | 手动，每物体一次 | — |
 | 5 · Scale 估计 | < 1 min/物体 | — |
 | 6 · FP 位姿 | ~15 min/序列 | 按注册序列数决定 |
-| 7 · 接触图 | ~2 min/物体 | — |
+| 7 · 接触图 (`batch_align_ego_mano_fp.py`) | ~3 s/物体 | 2D projection，无需 smplx |
 | 8 · 可视化 | ~1 min/物体 | — |
 
 ### Key Differences vs Third-Person Pipeline
 
 | | Third-Person (DexYCB / HO3D) | Egocentric (EgoDex / PH2D) |
 |---|---|---|
-| Hand estimation | HaPTIC → camera space | HaWoR → world space |
-| Depth source | Depth Pro (single image) | MegaSAM (SLAM, metric) |
+| Hand estimation | HaPTIC → camera space | HaWoR → `batch_hawor.py` → `ego_mano.npz` (world frame) |
+| Depth source | Depth Pro (single image) | MegaSAM (SLAM, metric) → `K.npy` |
 | Scale estimation | `estimate_obj_scale.py` (Depth Pro) | `estimate_obj_scale_ego.py` (MegaSAM) |
 | Object pose | `batch_obj_pose.py` | `batch_obj_pose_ego.py` |
-| Contact map | `gen_m5_training_data.py` | `gen_ego_contact_map.py` |
-| Output HDF5 | `data_hub/human_prior/` (compatible) | `data_hub/human_prior/` (identical format) |
+| Contact map | `batch_align_mano_fp.py` (3D, depth-scaled) | `batch_align_ego_mano_fp.py` (2D projection, scale-invariant) |
+| MANO→object alignment | 3D distance after depth-ratio rescaling | 2D pixel distance (SLAM scale cancels in u=fx·x/z+cx) |
+| Conda env | `bundlesdf` | `bundlesdf` (dispatcher + FP + align) |
+| Output HDF5 | `data_hub/human_prior/{obj}.hdf5` | `data_hub/human_prior/{obj}.hdf5` (identical format) |

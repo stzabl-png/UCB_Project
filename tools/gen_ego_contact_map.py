@@ -123,7 +123,9 @@ def load_sequence_registry():
                                  os.path.join(RAW_BASE,
                                      f"egodex/test/{sid}")),
                 "depth_dir": cfg["depth_dir"],
-                "pose_dir":  cfg["pose_dir"],
+                "pose_dir":  cfg.get("pose_dir",
+                                 os.path.join(POSE_BASE, ds,
+                                              sid.replace("/", "__"))),
             }
         print(f"[Registry] {len(jreg)} from JSON + {len(_BUILTIN_REGISTRY)} builtins"
               f" = {len(reg)} total")

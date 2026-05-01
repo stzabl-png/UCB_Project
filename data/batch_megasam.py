@@ -53,9 +53,10 @@ sys.path.insert(0, os.path.join(MEGASAM_DIR, "Depth-Anything"))
 import config as proj_cfg
 
 DATA_ROOT   = os.path.join(proj_cfg.DATA_HUB, "RawData", "ThirdPersonRawData")
+EGO_ROOT    = os.path.join(proj_cfg.DATA_HUB, "RawData", "EgoRawData")
 PH2D_ROOT   = os.path.join(DATA_ROOT, "ph2d")
 PH2D_META   = os.path.join(DATA_ROOT, "ph2d", "ph2d_metadata.json")
-EGODEX_ROOT = os.path.join(DATA_ROOT, "egodex", "test")
+EGODEX_ROOT = os.path.join(EGO_ROOT,  "egodex", "test")
 OUT_BASE    = os.path.join(proj_cfg.DATA_HUB, "ProcessedData", "egocentric_depth")
 WORK_DIR    = os.path.join(OUT_BASE, "_workdir")   # temp frames + DA/UD outputs
 

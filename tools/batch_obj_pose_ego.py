@@ -55,7 +55,7 @@ FP_ROOT = "/home/lyh/Project/FoundationPose"
 
 # ── 数据路径 ──────────────────────────────────────────────────────────────────
 EGO_DEPTH_BASE = os.path.join(config.DATA_HUB, "ProcessedData", "egocentric_depth")
-EGO_RGB_BASE   = os.path.join(config.DATA_HUB, "RawData",       "ThirdPersonRawData")
+EGO_RGB_BASE   = os.path.join(config.DATA_HUB, "RawData",       "EgoRawData")
 MESH_BASE      = os.path.join(config.DATA_HUB, "ProcessedData", "obj_meshes", "egocentric")
 OBJ_INPUT      = os.path.join(config.DATA_HUB, "ProcessedData", "obj_recon_input", "egocentric")
 OUT_BASE       = os.path.join(config.DATA_HUB, "ProcessedData", "obj_poses_ego")   # ← 第一人称专属

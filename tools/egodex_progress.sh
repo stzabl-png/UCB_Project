@@ -6,7 +6,7 @@
 # ════════════════════════════════════════════════════
 
 PROJ="/home/lyh/Project/Affordance2Grasp"
-EGODEX_RAW="$PROJ/data_hub/RawData/ThirdPersonRawData/egodex/test"
+EGODEX_RAW="$PROJ/data_hub/RawData/EgoRawData/egodex/test"
 DEPTH_OUT="$PROJ/data_hub/ProcessedData/egocentric_depth/egodex"
 OBJ_POSE_OUT="$PROJ/data_hub/ProcessedData/obj_poses_ego/egodex"
 PRIOR_OUT="$PROJ/data_hub/human_prior"

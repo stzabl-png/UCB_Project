@@ -1,262 +1,261 @@
 """
-Universal HaWoR batch inference — supports all first-person (egocentric) datasets.
+batch_hawor.py – Batch HaWoR hand-prior generation.
 
-Usage:
-  conda activate hawor
-  python data/batch_hawor.py --dataset arctic
-  python data/batch_hawor.py --dataset fpha
-  python data/batch_hawor.py --dataset fpha --seq Subject_1  # single subject
-  python data/batch_hawor.py --dataset arctic --seq s05
+Each sequence is processed in a fresh subprocess (conda run -n hawor python run_hawor_seq.py),
+so there are no shared CUDA contexts, no multiprocessing conflicts, and failures are isolated.
 
-Output:
-  data_hub/ProcessedData/ego_mano/{dataset}/{seq_id}.npz
-    right_verts: (N, 778, 3)   right hand MANO vertices (world space)
-    left_verts:  (N, 778, 3)   left  hand MANO vertices (world space)
-    R_w2c: (N, 3, 3), t_w2c: (N, 3)   camera extrinsics
-    img_focal: float
+Usage examples:
+    # All egodex sequences
+    python data/batch_hawor.py --dataset egodex
 
-Note: For frame-based datasets (FPHA), frames are temporarily encoded to
-      MP4 via ffmpeg before being passed to HaWoR.
+    # Filter by substring
+    python data/batch_hawor.py --dataset egodex --seq "slot_batteries/1"
+
+    # Limit frames (for frame-based datasets like arctic)
+    python data/batch_hawor.py --dataset arctic --max-frames 120
+
+    # Force re-run even if .npz exists
+    python data/batch_hawor.py --dataset egodex --force-rerun
 """
-
-import os, sys, shutil, tempfile, subprocess, argparse, numpy as np, torch
+import os, sys, argparse, subprocess, tempfile, shutil, json
 from glob import glob
 from natsort import natsorted
 from tqdm import tqdm
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+# ── project config ─────────────────────────────────────────────────────────────
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config
 
-sys.path.insert(0, config.HAWOR_DIR)
-sys.path.insert(0, os.path.join(config.HAWOR_DIR, 'thirdparty', 'DROID-SLAM', 'droid_slam'))
+HAWOR_DIR   = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "third_party", "hawor")
+RUNNER      = os.path.join(HAWOR_DIR, "run_hawor_seq.py")
+CONDA_ENV   = "hawor"
 
-from data.megasam_utils import load_megasam_K, load_megasam_K_fx
+OUT_BASE    = os.path.join(config.DATA_HUB, "ProcessedData", "ego_mano")
 
-# ── Paths ─────────────────────────────────────────────────────────────────────
-OUT_BASE = os.path.join(config.DATA_HUB, "ProcessedData", "ego_mano")
-RAW_BASE = os.path.join(config.DATA_HUB, "RawData", "EgoRawData")
+# Egocentric raw data root
+EGO_BASE    = os.path.join(config.DATA_HUB, "RawData", "EgoRawData")
+# Third-person datasets (EgoDex, etc.)
+THIRD_BASE  = os.path.join(config.DATA_HUB, "RawData", "ThirdPersonRawData")
 
-HAWOR_CKPT     = os.path.join(config.HAWOR_DIR, 'weights/hawor/checkpoints/hawor.ckpt')
-HAWOR_INFILLER = os.path.join(config.HAWOR_DIR, 'weights/hawor/checkpoints/infiller.pt')
-
-# Known SLAM failure sequences (dataset-specific)
-SLAM_SKIP = {
-    "arctic": {("s09", "scissors_use_01"), ("s10", "scissors_use_02")},
-    "fpha":   set(),
-}
+EGODEX_ROOT = os.path.join(EGO_BASE,   "egodex", "test")
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# ── dataset discoverers ────────────────────────────────────────────────────────
 
-def frames_to_video(img_paths, fps=15, out_path=None):
-    """Convert a sorted list of frames to MP4 using ffmpeg (lossless-ish)."""
-    tmp_dir = tempfile.mkdtemp(prefix="hawor_frames_")
-    # Symlink frames with sequential names so ffmpeg pattern works
-    ext = os.path.splitext(img_paths[0])[1]
-    for i, p in enumerate(img_paths):
-        os.symlink(os.path.abspath(p), os.path.join(tmp_dir, f"{i:06d}{ext}"))
+def discover_egodex(input_dir):
+    """EgoDex: test/{task}/{episode}.mp4  →  (seq_id, mp4_path, 'video')"""
+    for task in natsorted(os.listdir(input_dir)):
+        task_dir = os.path.join(input_dir, task)
+        if not os.path.isdir(task_dir):
+            continue
+        for mp4 in natsorted(glob(os.path.join(task_dir, "*.mp4"))):
+            stem = os.path.splitext(os.path.basename(mp4))[0]
+            yield f"egodex/{task}/{stem}", mp4, "video"
 
-    if out_path is None:
-        out_path = os.path.join(tmp_dir, "input.mp4")
-
-    res = subprocess.run([
-        "ffmpeg", "-y", "-r", str(fps),
-        "-i", os.path.join(tmp_dir, f"%06d{ext}"),
-        "-c:v", "libx264", "-crf", "18", "-pix_fmt", "yuv420p",
-        out_path
-    ], capture_output=True, text=True)
-
-    if res.returncode != 0:
-        raise RuntimeError(f"ffmpeg failed: {res.stderr[-500:]}")
-
-    return out_path, tmp_dir
-
-
-def run_hawor_on_video(video_path, seq_name, out_path, dataset):
-    """Run full HaWoR pipeline on one video file, save result to out_path."""
-    from scripts.scripts_test_video.detect_track_video import detect_track_video
-    from scripts.scripts_test_video.hawor_video import hawor_motion_estimation, hawor_infiller
-    from scripts.scripts_test_video.hawor_slam import hawor_slam
-    from hawor.utils.process import run_mano, run_mano_left
-    from lib.eval_utils.custom_utils import load_slam_cam
-
-    class Args:
-        pass
-    args = Args()
-    args.video_path   = video_path
-    args.input_type   = 'file'
-    args.img_focal    = load_megasam_K_fx(seq_name)
-    args.checkpoint       = HAWOR_CKPT
-    args.infiller_weight  = HAWOR_INFILLER
-    args.vis_mode     = 'cam'
-
-    megasam_K = load_megasam_K(seq_name)
-    if args.img_focal:
-        print(f"  [MegaSAM] focal={args.img_focal:.1f}px for {seq_name}")
-
-    _orig = os.getcwd()
-    os.chdir(config.HAWOR_DIR)
-    try:
-        start_idx, end_idx, seq_folder, imgfiles = detect_track_video(args)
-        frame_chunks_all, img_focal = hawor_motion_estimation(args, start_idx, end_idx, seq_folder)
-
-        slam_path = os.path.join(seq_folder, f"SLAM/hawor_slam_w_scale_{start_idx}_{end_idx}.npz")
-        if not os.path.exists(slam_path):
-            existing = natsorted(glob(os.path.join(seq_folder, "SLAM/hawor_slam_w_scale_*.npz")))
-            if existing:
-                slam_path = existing[-1]
-            else:
-                hawor_slam(args, start_idx, end_idx)
-        R_w2c_sl, t_w2c_sl, R_c2w_sl, t_c2w_sl = load_slam_cam(slam_path)
-
-        pred_trans, pred_rot, pred_hand_pose, pred_betas, pred_valid = hawor_infiller(
-            args, start_idx, end_idx, frame_chunks_all)
-    finally:
-        os.chdir(_orig)
-
-    N = pred_trans.shape[1]
-    R_x = np.array([[1,0,0],[0,-1,0],[0,0,-1]], dtype=np.float32)
-
-    right_verts = run_mano(pred_trans[1:2,:N], pred_rot[1:2,:N],
-                           pred_hand_pose[1:2,:N], betas=pred_betas[1:2,:N])
-    right_verts = np.einsum('ij,tnj->tni', R_x, right_verts['vertices'][0].cpu().numpy())
-
-    left_verts = run_mano_left(pred_trans[0:1,:N], pred_rot[0:1,:N],
-                               pred_hand_pose[0:1,:N], betas=pred_betas[0:1,:N])
-    left_verts = np.einsum('ij,tnj->tni', R_x, left_verts['vertices'][0].cpu().numpy())
-
-    R_c2w = np.einsum('ij,njk->nik', R_x, R_c2w_sl.cpu().numpy())
-    t_c2w = np.einsum('ij,nj->ni', R_x, t_c2w_sl.cpu().numpy())
-    R_w2c = np.transpose(R_c2w, (0,2,1))
-    t_w2c = -np.einsum('nij,nj->ni', R_w2c, t_c2w)
-
-    save_kw = dict(right_verts=right_verts, left_verts=left_verts,
-                   R_w2c=R_w2c[:N], t_w2c=t_w2c[:N], img_focal=img_focal,
-                   pred_trans=pred_trans.cpu().numpy(),
-                   pred_rot=pred_rot.cpu().numpy(),
-                   pred_hand_pose=pred_hand_pose.cpu().numpy(),
-                   pred_betas=pred_betas.cpu().numpy())
-    if megasam_K is not None:
-        save_kw['megasam_K'] = megasam_K
-
-    np.savez_compressed(out_path, **save_kw)
-
-
-# ── Dataset-specific discoverers ──────────────────────────────────────────────
 
 def discover_arctic_ego(input_dir):
-    """ARCTIC cam0: {subj}/{seq}/0/*.jpg  → needs temp video"""
+    """ARCTIC cam0: {subj}/{seq}/0/*.jpg  →  (seq_id, [frames], 'frames')"""
     for subj in natsorted(os.listdir(input_dir)):
         subj_dir = os.path.join(input_dir, subj)
-        if not os.path.isdir(subj_dir): continue
+        if not os.path.isdir(subj_dir):
+            continue
         for seq in natsorted(os.listdir(subj_dir)):
             cam_dir = os.path.join(subj_dir, seq, "0")
-            if not os.path.isdir(cam_dir): continue
+            if not os.path.isdir(cam_dir):
+                continue
             imgs = natsorted(glob(os.path.join(cam_dir, "*.jpg")) +
                              glob(os.path.join(cam_dir, "*.png")))
             if imgs:
-                yield f"{subj}__{seq}", imgs, "frames"
-
-
-def discover_fpha(input_dir):
-    """FPHA: {Subject_N}/{action}/frame_XXXXXX.jpeg"""
-    for subj in natsorted(os.listdir(input_dir)):
-        subj_dir = os.path.join(input_dir, subj)
-        if not os.path.isdir(subj_dir): continue
-        for action in natsorted(os.listdir(subj_dir)):
-            action_dir = os.path.join(subj_dir, action)
-            if not os.path.isdir(action_dir): continue
-            imgs = natsorted(
-                glob(os.path.join(action_dir, "*.jpeg")) +
-                glob(os.path.join(action_dir, "*.jpg")) +
-                glob(os.path.join(action_dir, "*.png"))
-            )
-            if imgs:
-                yield f"{subj}__{action}", imgs, "frames"
+                yield f"arctic/{subj}/{seq}", imgs, "frames"
 
 
 DISCOVERERS = {
-    "arctic": (discover_arctic_ego, "arctic"),
-    "fpha":   (discover_fpha,       "fpha"),
+    "egodex": (discover_egodex, EGODEX_ROOT),
+    "arctic":  (discover_arctic_ego, os.path.join(EGO_BASE, "arctic", "images")),
 }
 
 
-# ── Main ──────────────────────────────────────────────────────────────────────
+# ── helpers ────────────────────────────────────────────────────────────────────
+
+def frames_to_temp_video(img_paths, fps=15):
+    """Encode a list of image paths into a temp mp4. Returns (mp4_path, tmp_dir)."""
+    tmp_dir = tempfile.mkdtemp(prefix="hawor_tmp_")
+    ext = os.path.splitext(img_paths[0])[1]
+    for i, p in enumerate(img_paths):
+        os.symlink(os.path.abspath(p), os.path.join(tmp_dir, f"{i:06d}{ext}"))
+    out_mp4 = os.path.join(tmp_dir, "video.mp4")
+    subprocess.run(
+        ["ffmpeg", "-y", "-framerate", str(fps),
+         "-i", os.path.join(tmp_dir, f"%06d{ext}"),
+         "-c:v", "libx264", "-pix_fmt", "yuv420p", out_mp4],
+        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    return out_mp4, tmp_dir
+
+
+def load_megasam_focal(seq_id, dataset):
+    """Try to load focal length from MegaSAM K.npy output."""
+    try:
+        import numpy as np
+        parts = seq_id.split("/")  # e.g. ["egodex", "slot_batteries", "1"]
+        rel   = "/".join(parts[1:])  # "slot_batteries/1"
+        k_path = os.path.join(config.DATA_HUB, "ProcessedData", "egocentric_depth",
+                               dataset, rel, "K.npy")
+        if not os.path.exists(k_path):
+            return None
+        K = np.load(k_path)
+        if K.ndim == 2:
+            return float((K[0, 0] + K[1, 1]) / 2)
+        return None
+    except Exception:
+        return None
+
+
+def run_sequence(video_path, out_npz, img_focal=None, force_rerun=False,
+                 timeout=3600):
+    """
+    Call run_hawor_seq.py in a subprocess inside the 'hawor' conda environment.
+    Returns (success: bool, message: str).
+    """
+    cmd = [
+        "conda", "run", "--no-capture-output", "-n", CONDA_ENV,
+        "python", RUNNER,
+        "--video_path", video_path,
+        "--out_npz",    out_npz,
+    ]
+    if img_focal is not None:
+        cmd += ["--img_focal", str(img_focal)]
+    if force_rerun:
+        cmd += ["--force_rerun"]
+
+    try:
+        result = subprocess.run(
+            cmd,
+            timeout=timeout,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            return True, "ok"
+        else:
+            # Show last 10 lines of stderr for diagnostics
+            err_tail = "\n".join(result.stderr.strip().splitlines()[-10:])
+            return False, err_tail
+    except subprocess.TimeoutExpired:
+        return False, f"timeout after {timeout}s"
+    except Exception as e:
+        return False, str(e)
+
+
+# ── CLI ────────────────────────────────────────────────────────────────────────
+
+def parse_args():
+    p = argparse.ArgumentParser(description="Batch HaWoR MANO prior generation")
+    p.add_argument("--dataset",      required=True, choices=list(DISCOVERERS))
+    p.add_argument("--seq",          default="",
+                   help="Filter: only process sequences whose ID contains this string")
+    p.add_argument("--seqs",         default="",
+                   help="Comma-separated list of exact rel seq IDs, e.g. slot_batteries/1,fry_bread/0")
+    p.add_argument("--focal",        type=float, default=None,
+                   help="Fixed focal length (px) for all sequences; overrides MegaSAM per-seq focal")
+    p.add_argument("--max-frames",   type=int, default=0,
+                   help="Max frames to use (for frame-based datasets); 0 = all")
+    p.add_argument("--fps",          type=int, default=15,
+                   help="FPS for frame→video encoding (frame-based datasets)")
+    p.add_argument("--force-rerun",  action="store_true",
+                   help="Re-run even if output .npz already exists")
+    p.add_argument("--timeout",      type=int, default=3600,
+                   help="Per-sequence subprocess timeout in seconds")
+    return p.parse_args()
+
 
 def main():
-    parser = argparse.ArgumentParser(description="Universal HaWoR batch inference")
-    parser.add_argument("--dataset", required=True, choices=list(DISCOVERERS.keys()))
-    parser.add_argument("--input-dir", default=None,
-                        help="Override input directory")
-    parser.add_argument("--seq", default=None,
-                        help="Process only sequences matching this substring")
-    parser.add_argument("--fps", type=int, default=15,
-                        help="FPS for temp video encoding (default 15)")
-    parser.add_argument("--max-frames", type=int, default=500,
-                        help="Max frames per sequence (0=all)")
-    args = parser.parse_args()
+    args = parse_args()
 
     discover_fn, data_folder = DISCOVERERS[args.dataset]
-    input_dir  = args.input_dir or os.path.join(RAW_BASE, data_folder)
     output_dir = os.path.join(OUT_BASE, args.dataset)
     os.makedirs(output_dir, exist_ok=True)
 
-    print(f"{'='*60}")
+    print("=" * 60)
     print(f" Dataset   : {args.dataset}")
-    print(f" Input     : {input_dir}")
+    print(f" Input     : {data_folder}")
     print(f" Output    : {output_dir}")
-    print(f"{'='*60}")
+    print(f" Runner    : {RUNNER}")
+    print(f" Env       : {CONDA_ENV}")
+    print("=" * 60)
 
-    if not os.path.isdir(input_dir):
-        print(f"❌ Input not found: {input_dir}")
-        return
-
-    sequences = list(discover_fn(input_dir))
-    if args.seq:
+    # Discover all sequences
+    sequences = list(discover_fn(data_folder))
+    if args.seqs:
+        # exact rel IDs: "slot_batteries/1,fry_bread/0" → filter by dataset/rel
+        wanted = set(s.strip() for s in args.seqs.split(",") if s.strip())
+        sequences = [(sid, imgs, t) for sid, imgs, t in sequences
+                     if "/".join(sid.split("/")[1:]) in wanted]
+    elif args.seq:
         sequences = [(sid, imgs, t) for sid, imgs, t in sequences if args.seq in sid]
     print(f"Found {len(sequences)} sequences\n")
 
-    skip_set = SLAM_SKIP.get(args.dataset, set())
-    done, skipped, failed = 0, 0, 0
+    done = skipped = failed = 0
 
-    for seq_id, img_paths, src_type in tqdm(sequences, desc=f"HaWoR/{args.dataset}"):
-        out_path = os.path.join(output_dir, f"{seq_id}.npz")
+    for seq_id, img_src, src_type in tqdm(sequences, desc=f"HaWoR/{args.dataset}"):
+        # Output path: OUT_BASE/dataset/{seq_id_without_dataset_prefix}.npz
+        # seq_id format: "egodex/slot_batteries/1"  →  strip first component
+        rel = "/".join(seq_id.split("/")[1:])  # "slot_batteries/1"
+        out_npz = os.path.join(output_dir, f"{rel}.npz")
 
-        if os.path.exists(out_path):
+        if os.path.exists(out_npz) and not args.force_rerun:
             tqdm.write(f"  ⏭  {seq_id}: cached")
             skipped += 1
             continue
 
-        # Check skip list
-        parts = seq_id.split("__")
-        if len(parts) >= 2 and (parts[0], parts[1]) in skip_set:
-            tqdm.write(f"  ⚠️  {seq_id}: known SLAM failure, skipping")
-            skipped += 1
-            continue
-
-        # Subsample long sequences
-        if args.max_frames > 0 and len(img_paths) > args.max_frames:
-            step = len(img_paths) // args.max_frames
-            img_paths = img_paths[::step][:args.max_frames]
-
+        # Resolve video path
         tmp_dir = None
         try:
-            # Convert frames → temp video if needed
-            video_path, tmp_dir = frames_to_video(img_paths, fps=args.fps)
-            tqdm.write(f"  🎬 {seq_id}: {len(img_paths)} frames → temp video")
+            if src_type == "video":
+                video_path = img_src  # already an mp4 path
+                tqdm.write(f"  🎬 {seq_id}: mp4")
+            else:
+                # Frame list → encode to temp video
+                frames = img_src
+                if args.max_frames > 0 and len(frames) > args.max_frames:
+                    step   = len(frames) // args.max_frames
+                    frames = frames[::step][: args.max_frames]
+                tqdm.write(f"  🎬 {seq_id}: {len(frames)} frames → temp video")
+                video_path, tmp_dir = frames_to_temp_video(frames, fps=args.fps)
 
-            run_hawor_on_video(video_path, seq_id, out_path, args.dataset)
-            tqdm.write(f"  ✅ {seq_id} → {out_path}")
-            done += 1
+            # Focal length: --focal flag > MegaSAM K.npy > HaWoR auto-estimate
+            if args.focal is not None:
+                img_focal = args.focal
+                tqdm.write(f"  [focal] {img_focal:.1f}px (fixed)")
+            else:
+                img_focal = load_megasam_focal(seq_id, args.dataset)
+                if img_focal:
+                    tqdm.write(f"  [focal] {img_focal:.1f}px from MegaSAM")
+
+            ok, msg = run_sequence(
+                video_path=video_path,
+                out_npz=out_npz,
+                img_focal=img_focal,
+                force_rerun=args.force_rerun,
+                timeout=args.timeout,
+            )
+
+            if ok and os.path.exists(out_npz):
+                tqdm.write(f"  ✅ {seq_id} → {out_npz}")
+                done += 1
+            else:
+                tqdm.write(f"  ❌ {seq_id}: {msg}")
+                failed += 1
 
         except Exception as e:
+            import traceback
             tqdm.write(f"  ❌ {seq_id}: {e}")
+            tqdm.write(traceback.format_exc())
             failed += 1
-
         finally:
             if tmp_dir and os.path.exists(tmp_dir):
                 shutil.rmtree(tmp_dir, ignore_errors=True)
-            torch.cuda.empty_cache()
 
     print(f"\n{'='*60}")
     print(f"✅ Done: {done}  ⏭ Skipped: {skipped}  ❌ Failed: {failed}")

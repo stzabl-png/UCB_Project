@@ -41,7 +41,7 @@ from pathlib import Path
 # ── Paths ─────────────────────────────────────────────────────────────────────
 PROJ        = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_HUB    = os.path.join(PROJ, "data_hub")
-EGODEX_ROOT = os.path.join(DATA_HUB, "RawData", "ThirdPersonRawData", "egodex", "test")
+EGODEX_ROOT = os.path.join(DATA_HUB, "RawData", "EgoRawData", "egodex", "test")
 DEPTH_BASE  = os.path.join(DATA_HUB, "ProcessedData", "egocentric_depth", "egodex")
 MESH_BASE   = os.path.join(DATA_HUB, "ProcessedData", "obj_meshes", "egocentric")
 OBJ_INPUT   = os.path.join(DATA_HUB, "ProcessedData", "obj_recon_input", "egocentric")
