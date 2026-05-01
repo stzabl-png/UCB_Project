@@ -90,19 +90,6 @@ _BUILTIN_REGISTRY = {
         "pose_dir":    os.path.join(POSE_BASE,
                            "egodex/assemble_disassemble_tiles__1"),
     },
-    ("ph2d_avp", "1407-picking_orange_tj_2025-03-12_16-42-19/processed_episode_3"): {
-        "obj_name":    "orange",
-        "hawor_dir":   os.path.join(RAW_BASE,
-                           "ph2d/1407-picking_orange_tj_2025-03-12_16-42-19"
-                           "/processed_episode_3"),
-        "depth_dir":   os.path.join(EGO_DEPTH_BASE,
-                           "ph2d_avp/1407-picking_orange_tj_2025-03-12_16-42-19"
-                           "/processed_episode_3"),
-        "pose_dir":    os.path.join(POSE_BASE,
-                           "ph2d_avp"
-                           "/1407-picking_orange_tj_2025-03-12_16-42-19"
-                           "__processed_episode_3"),
-    },
 }
 
 
