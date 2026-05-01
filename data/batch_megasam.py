@@ -52,11 +52,13 @@ sys.path.insert(0, os.path.join(MEGASAM_DIR, "Depth-Anything"))
 
 import config as proj_cfg
 
-DATA_ROOT   = os.path.join(proj_cfg.DATA_HUB, "RawData", "ThirdPersonRawData")
-EGO_ROOT    = os.path.join(proj_cfg.DATA_HUB, "RawData", "EgoRawData")
-PH2D_ROOT   = os.path.join(DATA_ROOT, "ph2d")
-PH2D_META   = os.path.join(DATA_ROOT, "ph2d", "ph2d_metadata.json")
-EGODEX_ROOT = os.path.join(EGO_ROOT,  "egodex", "test")
+DATA_ROOT      = os.path.join(proj_cfg.DATA_HUB, "RawData", "ThirdPersonRawData")
+EGO_ROOT       = os.path.join(proj_cfg.DATA_HUB, "RawData", "EgoRawData")
+PH2D_ROOT      = os.path.join(DATA_ROOT, "ph2d")
+PH2D_META      = os.path.join(DATA_ROOT, "ph2d", "ph2d_metadata.json")
+EGODEX_ROOT    = os.path.join(EGO_ROOT,  "egodex", "test")
+TACO_EGO_ROOT  = os.path.join(EGO_ROOT,  "taco",   "Egocentric_RGB_Videos")
+HOI4D_ROOT     = os.path.join(EGO_ROOT,  "hoi4d",  "HOI4D_release")
 OUT_BASE    = os.path.join(proj_cfg.DATA_HUB, "ProcessedData", "egocentric_depth")
 WORK_DIR    = os.path.join(OUT_BASE, "_workdir")   # temp frames + DA/UD outputs
 
@@ -66,17 +68,15 @@ MEGA_CKPT   = os.path.join(MEGASAM_DIR, "checkpoints", "megasam_final.pth")
 UNIDEPTH_ID = "lpiccinelli/unidepth-v2-vitl14"
 UNIDEPTH_REV = "1d0d3c52f60b5164629d279bb9a7546458e6dcc4"
 
-# ── calibrated focal lengths from 10-sequence MegaSAM calibration ─────────────
+# ── calibrated focal lengths (SLAM opt-intr auto-calib, x1.10 corrected) ──────
+# Run data/calibrate_dataset_fx.py to regenerate for new datasets.
 CALIB_FX = {
-    # Initial K for DROID-SLAM (autonomous estimates @ 640px wide).
-    # Only affects SLAM K initialization — depth metric scale comes from
-    # UniDepth and is NOT sensitive to this value.
-    # Obtained via: Pass 1 (--opt-intr on N seqs) → global median of K_opt.
-    # New datasets: no entry needed — generic 60° FoV fallback is used.
+    # px @640px wide  (all frames resized so long-side = LONG_DIM = 640)
     "ph2d_avp": 271.2,   # px @640px wide (median over 8 seqs)
-    "egodex":   227.8,   # px @640px wide (median over 10 seqs)
+    "egodex":   249.4,   # SLAM opt-intr auto-calib x1.10 (was 227.8)
+    "taco":     455.3,   # SLAM opt-intr auto-calib x1.10
 }
-# Generic fallback: assume 60° FoV → fx = W / (2·tan(30°)) = W·√3/2 ≈ 0.866·W
+# Generic fallback: assume 60deg FoV -> fx = W / (2*tan(30deg)) = W*sqrt(3)/2
 CALIB_FX_FALLBACK_RATIO = 0.866  # relative to frame width
 
 LONG_DIM   = 640    # resize long-side to this
@@ -125,6 +125,45 @@ def enumerate_egodex():
                 "mp4":     mp4,
                 "hdf5":    hdf5,
             })
+    return eps
+
+
+def enumerate_taco_ego():
+    """Returns list of dicts for TACO Egocentric_RGB_Videos."""
+    eps = []
+    if not os.path.isdir(TACO_EGO_ROOT):
+        return eps
+    for triplet in natsorted(os.listdir(TACO_EGO_ROOT)):
+        triplet_dir = os.path.join(TACO_EGO_ROOT, triplet)
+        if not os.path.isdir(triplet_dir):
+            continue
+        for seq in natsorted(os.listdir(triplet_dir)):
+            mp4 = os.path.join(triplet_dir, seq, "color.mp4")
+            if os.path.exists(mp4):
+                eps.append({
+                    "seq_id":  f"taco/{triplet}/{seq}",
+                    "cam_key": "taco",
+                    "mp4":     mp4,
+                    "hdf5":    None,
+                })
+    return eps
+
+
+def enumerate_hoi4d():
+    """Returns list of dicts for HOI4D align_rgb sequences."""
+    eps = []
+    if not os.path.isdir(HOI4D_ROOT):
+        return eps
+    for mp4 in natsorted(glob.glob(
+            os.path.join(HOI4D_ROOT, "**", "image.mp4"), recursive=True)):
+        rel    = os.path.relpath(mp4, HOI4D_ROOT)   # e.g. ZY.../H1/.../align_rgb/image.mp4
+        seq_id = "hoi4d/" + rel.replace("/align_rgb/image.mp4", "").replace("/", "_")
+        eps.append({
+            "seq_id":  seq_id,
+            "cam_key": "hoi4d",
+            "mp4":     mp4,
+            "hdf5":    None,
+        })
     return eps
 
 
@@ -475,8 +514,10 @@ def main():
     parser = argparse.ArgumentParser(
         description="Batch MegaSAM depth inference for egocentric datasets."
     )
-    parser.add_argument("--dataset", choices=["ph2d_avp", "egodex", "both"],
-                        default="both")
+    parser.add_argument("--dataset",
+                        choices=["ph2d_avp", "egodex", "taco", "hoi4d", "all_ego", "both"],
+                        default="all_ego",
+                        help="Dataset to process. 'all_ego' runs egodex+taco+hoi4d.")
     parser.add_argument("--resume", action="store_true",
                         help="Skip episodes that already have depth.npz output")
     parser.add_argument("--min-motion", type=float, default=0.0,
@@ -500,22 +541,26 @@ def main():
 
     # ── Collect episodes ───────────────────────────────────────────────────────
     if args.seq_ids:
-        all_ph2d = {ep["seq_id"]: ep for ep in enumerate_ph2d_avp()}
-        all_eg   = {ep["seq_id"]: ep for ep in enumerate_egodex()}
+        all_eps = {}
+        for ep in (enumerate_ph2d_avp() + enumerate_egodex() +
+                   enumerate_taco_ego() + enumerate_hoi4d()):
+            all_eps[ep["seq_id"]] = ep
         episodes = []
         for sid in args.seq_ids:
-            if sid in all_ph2d:
-                episodes.append(all_ph2d[sid])
-            elif sid in all_eg:
-                episodes.append(all_eg[sid])
+            if sid in all_eps:
+                episodes.append(all_eps[sid])
             else:
-                print(f"  ⚠️  seq_id not found: {sid}")
+                print(f"  seq_id not found: {sid}")
     else:
         episodes = []
         if args.dataset in ("ph2d_avp", "both"):
             episodes += enumerate_ph2d_avp()
-        if args.dataset in ("egodex", "both"):
+        if args.dataset in ("egodex", "both", "all_ego"):
             episodes += enumerate_egodex()
+        if args.dataset in ("taco", "all_ego"):
+            episodes += enumerate_taco_ego()
+        if args.dataset in ("hoi4d", "all_ego"):
+            episodes += enumerate_hoi4d()
 
     print(f"\n  Total episodes: {len(episodes)}")
 
