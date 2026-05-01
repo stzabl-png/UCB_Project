@@ -38,8 +38,9 @@ FP_POSE_BASE   = os.path.join(config.DATA_HUB, "ProcessedData", "obj_poses_ego")
 MESH_BASE      = os.path.join(config.DATA_HUB, "ProcessedData", "obj_meshes", "egocentric")
 DEPTH_BASE     = os.path.join(config.DATA_HUB, "ProcessedData", "egocentric_depth")
 OUT_TRAIN_BASE = os.path.join(config.DATA_HUB, "ProcessedData", "training_fp_ego")
-OUT_PRIOR_BASE = os.path.join(config.DATA_HUB, "human_prior")   # 与第三人称推理接口一致
-REGISTRY_JSON  = os.path.join(config.PROJECT_DIR, "tools", "egodex_sequence_registry.json")
+OUT_PRIOR_BASE = os.path.join(config.DATA_HUB, "human_prior")   # shared inference interface
+REGISTRY_JSON       = os.path.join(config.PROJECT_DIR, "tools", "egodex_sequence_registry.json")
+TACO_REGISTRY_JSON  = os.path.join(config.PROJECT_DIR, "tools", "taco_ego_sequence_registry.json")
 
 N_POINTS      = 4096
 CONTACT_SIGMA = 0.020   # Gaussian σ for contact smoothing (m)
@@ -50,20 +51,34 @@ MAX_FP_FRAMES  = 60
 # ── Registry ─────────────────────────────────────────────────────────────────
 
 def load_registry():
-    """obj_name → list of (dataset, seq_id, depth_dir) from egodex_sequence_registry.json"""
-    if not os.path.exists(REGISTRY_JSON):
-        raise FileNotFoundError(f"Registry not found: {REGISTRY_JSON}")
-    with open(REGISTRY_JSON) as f:
-        jreg = json.load(f)
-    obj_map = {}  # obj_name → list[(ds, seq_id, depth_dir)]
-    for key, cfg in jreg.items():
-        if cfg.get("skipped"):
+    """
+    Build obj_name -> [(dataset, seq_id, depth_dir)] from:
+      1. tools/egodex_sequence_registry.json  (EgoDex sequences)
+      2. tools/taco_ego_sequence_registry.json (TACO Ego sequences, same format)
+    Registry JSON format:
+      { "key": { "dataset": "egodex"|"taco_ego",
+                 "seq_id":  "task/episode",
+                 "obj_name": "obj_name",
+                 "depth_dir": "path/to/megasam/output",
+                 "skipped": false } }
+    """
+    obj_map = {}  # obj_name -> list[(ds, seq_id, depth_dir)]
+    for reg_path in [REGISTRY_JSON, TACO_REGISTRY_JSON]:
+        if not os.path.exists(reg_path):
             continue
-        obj = cfg["obj_name"]
-        ds  = cfg["dataset"]
-        sid = cfg["seq_id"]
-        dd  = cfg.get("depth_dir", "")
-        obj_map.setdefault(obj, []).append((ds, sid, dd))
+        with open(reg_path) as f:
+            jreg = json.load(f)
+        for key, cfg in jreg.items():
+            if cfg.get("skipped"):
+                continue
+            obj  = cfg["obj_name"]
+            ds   = cfg["dataset"]
+            sid  = cfg["seq_id"]
+            dd   = cfg.get("depth_dir", "")
+            obj_map.setdefault(obj, []).append((ds, sid, dd))
+    if not obj_map:
+        raise FileNotFoundError(
+            f"No registry found. Expected: {REGISTRY_JSON} or {TACO_REGISTRY_JSON}")
     return obj_map
 
 
@@ -232,7 +247,8 @@ def save_hdf5(out_path, pts, nrm, human_prior, force_center):
 def parse_args():
     p = argparse.ArgumentParser(
         description="第一人称 MANO × FP 对齐 → 接触 HDF5")
-    p.add_argument("--dataset",   default=None, help="只处理此 dataset (e.g. egodex)")
+    p.add_argument("--dataset",   default=None,
+                   help="Filter by dataset: egodex | taco_ego")
     p.add_argument("--obj",       default=None, help="只处理此物体名子串")
     p.add_argument("--threshold", type=float, default=30.0,
                    help="接触距离阈值 mm (默认 30mm)")

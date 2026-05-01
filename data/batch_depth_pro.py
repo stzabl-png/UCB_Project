@@ -105,11 +105,39 @@ def discover_dexycb(input_dir, cam_filter=None):
                     yield f"{subj}__{dt}__{serial}", imgs
 
 
+def discover_taco_allocentric(input_dir):
+    """TACO Allocentric: Allocentric_RGB_Videos/{triplet}/{session}/{cam_serial}/*.jpg
+    Structure mirrors Allocentric_Camera_Parameters:
+      Allocentric_Camera_Parameters/(action, tool, object)/{session}/calibration.json
+    Videos expected at: Allocentric_RGB_Videos/(action, tool, object)/{session}/{cam_serial}/
+    NOTE: Company must download Allocentric_RGB_Videos separately from TACO dataset.
+    """
+    for triplet in natsorted(os.listdir(input_dir)):
+        triplet_dir = os.path.join(input_dir, triplet)
+        if not os.path.isdir(triplet_dir):
+            continue
+        for session in natsorted(os.listdir(triplet_dir)):
+            session_dir = os.path.join(triplet_dir, session)
+            if not os.path.isdir(session_dir):
+                continue
+            for cam_serial in natsorted(os.listdir(session_dir)):
+                cam_dir = os.path.join(session_dir, cam_serial)
+                if not os.path.isdir(cam_dir):
+                    continue
+                imgs = natsorted(glob(os.path.join(cam_dir, "*.jpg")) +
+                                 glob(os.path.join(cam_dir, "*.png")))
+                if imgs:
+                    # Replace special chars in triplet name for safe seq_id
+                    safe_triplet = triplet.replace("(", "").replace(")", "").replace(", ", "_")
+                    yield f"{safe_triplet}__{session}__{cam_serial}", imgs
+
+
 DISCOVERERS = {
-    "arctic":  (discover_arctic,  "arctic"),
-    "oakink":  (discover_oakink,  "oakink_v1"),
-    "ho3d_v3": (discover_ho3d,    "ho3d_v3"),
-    "dexycb":  (discover_dexycb,  "dexycb"),
+    "arctic":           (discover_arctic,           "arctic"),
+    "oakink":           (discover_oakink,           "oakink_v1"),
+    "ho3d_v3":          (discover_ho3d,             "ho3d_v3"),
+    "dexycb":           (discover_dexycb,           "dexycb"),
+    "taco_allocentric": (discover_taco_allocentric, "taco/Allocentric_RGB_Videos"),
 }
 
 

@@ -4,7 +4,7 @@
 
 Pipeline: `Video → Depth + Pose Estimation → Human Contact Prior → Sim Filtering → Affordance Model → Robot Grasp`
 
-Supports both **third-person** (DexYCB, HO3D v3) and **egocentric / first-person** (EgoDex, PH2D-AVP) video sources.
+Supports **third-person** (DexYCB, HO3D v3, OakInk, TACO Allocentric) and **first-person / egocentric** (EgoDex, TACO Ego) video sources.
 
 ---
 
@@ -46,22 +46,24 @@ Supports both **third-person** (DexYCB, HO3D v3) and **egocentric / first-person
 
 ### Third-Person Datasets
 
-| Dataset | Objects | Sequences | Frames | Depth Pro bias |
+| Dataset | Objects | Sequences | Depth method | K error |
 |---|---|---|---|---|
-| **DexYCB** | 20 YCB objects | ~3,600 (6 cameras) | ~260K | +0.2% |
-| **HO3D v3** | 8 YCB objects | 68 | ~90K | -1.5% |
-| **OakInk v1** | 100 objects (hand-object) | 778 | ~45K | -5.7% |
+| **DexYCB** | 20 YCB objects | ~3,600 (6 cameras) | Depth Pro two-pass | ~0.2% |
+| **HO3D v3** | 8 YCB objects | 68 | Depth Pro two-pass | ~1.5% |
+| **OakInk v1** | 100 hand-object pairs | 778 | Depth Pro two-pass | ~5.7% |
+| **TACO Allocentric** | 100+ tool-object pairs | 2,300+ (12 cams) | Depth Pro two-pass | ~5-8% |
 
-All three datasets use **identical scripts** — swap `--dataset dexycb` / `--dataset ho3d_v3` / `--dataset oakink`.
+All four datasets use **identical scripts** — swap `--dataset dexycb` / `--dataset ho3d_v3` / `--dataset oakink` / `--dataset taco_allocentric`.
 
 ### Egocentric Datasets (First-Person)
 
-| Dataset | Objects | Source |
-|---|---|---|
-| **EgoDex** | dexterous manipulation objects (e.g. `assemble_tile`) | Apple Vision Pro |
-| **PH2D-AVP** | household objects (e.g. `orange`) | Apple Vision Pro |
+| Dataset | Camera | Sequences | Depth method | K error |
+|---|---|---|---|---|
+| **EgoDex** | Apple Vision Pro | 3,051 | MegaSAM (SLAM opt-intr × 1.10) | ~1% |
+| **TACO Ego** | GoPro (71° FOV) | 2,311 | MegaSAM (SLAM opt-intr × 1.10) | ~1% |
 
 Egocentric sequences use **HaWoR** (MANO) + **MegaSAM** (camera poses + metric depth) + **FoundationPose** (object pose).
+Camera intrinsics are estimated automatically via `calibrate_dataset_fx.py` — **no GT required**.
 
 ---
 
@@ -105,8 +107,11 @@ FP_ROOT    = "/path/to/FoundationPose"
 | Dataset | Official link | Place at |
 |---|---|---|
 | DexYCB | https://dex-ycb.github.io | `data_hub/RawData/ThirdPersonRawData/dexycb/` |
-| HO3D v3 | https://www.tugraz.at/...ho3d | `data_hub/RawData/ThirdPersonRawData/ho3d_v3/` |
+| HO3D v3 | https://www.tugraz.at/institute/icg/research/team-lepetit/research-projects/hand-object-3d-pose-annotation | `data_hub/RawData/ThirdPersonRawData/ho3d_v3/` |
 | OakInk v1 | https://oakink.net | `data_hub/RawData/ThirdPersonRawData/oakink_v1/` |
+| TACO Allocentric RGB | https://taco-group.github.io → Allocentric_RGB_Videos | `data_hub/RawData/ThirdPersonRawData/taco/Allocentric_RGB_Videos/` |
+| EgoDex | https://egodex.cs.columbia.edu | `data_hub/RawData/EgoRawData/egodex/test/` |
+| TACO Ego | https://taco-group.github.io → Egocentric_RGB_Videos | `data_hub/RawData/EgoRawData/taco/Egocentric_RGB_Videos/` |
 
 ### 5. Download preprocessed assets (HuggingFace)
 
@@ -128,11 +133,10 @@ Includes: YCB meshes (`obj_meshes/ycb/`) + FP init masks (`obj_recon_input/ycb/`
 
 ## Phase 1 — Data Generation
 
-### Step 1 · Depth Pro — Camera Intrinsics + Depth Maps
+### Step 1 · Depth Pro — Camera Intrinsics + Depth Maps (Third-Person)
 
 **Two-pass self-calibration** (no GT intrinsics needed):
 Pass 1 estimates focal length per sequence → global median → Pass 2 uses fixed focal length.
-Verified accuracy: DexYCB +0.2%, HO3D v3 -1.5%.
 
 ```bash
 conda activate depth-pro
@@ -144,6 +148,12 @@ done
 
 # HO3D v3 — all 68 sequences
 python data/batch_depth_pro.py --dataset ho3d_v3 --two-pass --max-frames 150
+
+# OakInk v1
+python data/batch_depth_pro.py --dataset oakink --two-pass --max-frames 150
+
+# TACO Allocentric (requires Allocentric_RGB_Videos downloaded)
+python data/batch_depth_pro.py --dataset taco_allocentric --two-pass --max-frames 150
 ```
 
 Output: `data_hub/ProcessedData/third_depth/{dataset}/{seq_id}/`
@@ -157,9 +167,10 @@ Output: `data_hub/ProcessedData/third_depth/{dataset}/{seq_id}/`
 ```bash
 conda activate haptic
 
-python data/batch_haptic.py --dataset dexycb   --only-with-depth-k
-python data/batch_haptic.py --dataset ho3d_v3  --only-with-depth-k
-python data/batch_haptic.py --dataset oakink   --only-with-depth-k
+python data/batch_haptic.py --dataset dexycb           --only-with-depth-k
+python data/batch_haptic.py --dataset ho3d_v3          --only-with-depth-k
+python data/batch_haptic.py --dataset oakink           --only-with-depth-k
+python data/batch_haptic.py --dataset taco_allocentric --only-with-depth-k
 ```
 
 Output: `data_hub/ProcessedData/third_mano/{dataset}/{seq_id}.npz`
@@ -175,6 +186,7 @@ conda activate bundlesdf
 python tools/batch_obj_pose.py --dataset dexycb
 python tools/batch_obj_pose.py --dataset ho3d_v3
 python tools/batch_obj_pose.py --dataset oakink
+python tools/batch_obj_pose.py --dataset taco_allocentric
 ```
 
 Output: `data_hub/ProcessedData/obj_poses/{dataset}/{seq_id}/ob_in_cam/{frame}.txt`
@@ -197,17 +209,10 @@ Output: `data_hub/ProcessedData/obj_poses/{dataset}/{seq_id}/ob_in_cam/{frame}.t
 ```bash
 conda activate bundlesdf
 
-# 正式运行（直接写入 training_fp/，覆盖旧数据）
 python data/batch_align_mano_fp.py --dataset dexycb
 python data/batch_align_mano_fp.py --dataset ho3d_v3
-
-# 对比运行（输出到独立目录，保留原数据）
-python data/batch_align_mano_fp.py --dataset dexycb   --out_suffix v2
-python data/batch_align_mano_fp.py --dataset ho3d_v3  --out_suffix v2
-# 输出 → training_fp_v2/{dataset}/{obj}.hdf5
-
-# 重新计算已存在的 HDF5
-python data/batch_align_mano_fp.py --dataset dexycb --redo
+python data/batch_align_mano_fp.py --dataset oakink
+python data/batch_align_mano_fp.py --dataset taco_allocentric
 ```
 
 Output:
@@ -346,14 +351,14 @@ python run.py --mesh path/to/object.obj --no-sim
 
 ## Estimated Runtime (RTX 4080 SUPER, single GPU)
 
-| Step | DexYCB (6 cams) | HO3D v3 | OakInk v1 |
-|---|---|---|---|
-| 1 · Depth Pro | ~21 h | ~1.7 h | ~4 h |
-| 2 · HaPTIC | ~48 h | ~1 h | ~4 h |
-| 3 · FoundationPose | ~8 h | ~15 min | ~3 h |
-| 4 · Contact Labels | **~15 min** † | **~1 min** | **~5 min** |
-| 5–6 · Sim (robot GT) | ~varies | ~varies | ~varies |
-| 7–8 · Train | ~2 h | — | — |
+| Step | DexYCB (6 cams) | HO3D v3 | OakInk v1 | TACO Alloc | EgoDex | TACO Ego |
+|---|---|---|---|---|---|---|
+| 1/E0 · Depth Pro / SLAM calib | ~21 h | ~1.7 h | ~4 h | ~8 h | ~30 min (calib) | ~30 min (calib) |
+| 2/E1 · HaPTIC / HaWoR | ~48 h | ~1 h | ~4 h | ~10 h | ~40 h | ~30 h |
+| 3/E2 · FoundationPose / MegaSAM | ~8 h | ~15 min | ~3 h | ~6 h | ~50 h | ~35 h |
+| 4 · Contact Labels | **~15 min** † | **~1 min** | **~5 min** | **~10 min** | **~1 h** | **~45 min** |
+| 5–6 · Sim (robot GT) | ~varies | ~varies | ~varies | ~varies | ~varies | ~varies |
+| 7–8 · Train | ~2 h total across all datasets | | | | | |
 
 † 需安装 `fast-simplification`；未安装时退化为 ~23 h。
 
@@ -371,9 +376,11 @@ python run.py --mesh path/to/object.obj --no-sim
 | Config | Result |
 |---|---|
 | DexYCB cam `841412060263`, `ycb_dex_02` | coverage=100%, diverged=0 |
-| Depth Pro fx bias — DexYCB | **+0.2%** vs GT |
-| Depth Pro fx bias — HO3D v3 (two-pass) | **-1.5%** vs GT |
-| Depth Pro fx bias — OakInk v1 (two-pass, 23 seqs) | **-5.7%** vs GT |
+| Depth Pro fx — DexYCB (two-pass self-calib) | ~+0.2% residual error |
+| Depth Pro fx — HO3D v3 (two-pass) | ~-1.5% residual error |
+| Depth Pro fx — OakInk v1 (two-pass, 23 seqs) | ~-5.7% residual error |
+| SLAM opt-intr fx — EgoDex AVP (×1.10 corrected) | **~1%** |
+| SLAM opt-intr fx — TACO Ego GoPro (×1.10 corrected) | **~1%** |
 | FP tracking success rate | **100%** |
 | EgoDex `assemble_tile` contact coverage | **8.0%** (2160 MANO frames) |
 | DexYCB v2 contact quality (`max_hp`) | **≥ 0.76** all 27 objects |
@@ -381,29 +388,30 @@ python run.py --mesh path/to/object.obj --no-sim
 
 ---
 
-## Egocentric Extension (EgoDex / PH2D-AVP)
+## Egocentric (First-Person) Pipeline — EgoDex + TACO Ego
 
 Egocentric sequences require a different toolchain from third-person:
 
 ```
 Ego RGB Video
     │
-    ├─ MegaSAM ────────────────────→ egocentric_depth/{ds}/{seq}/
-    │                                  K.npy + depth.npz + cam_c2w.npy
+    ├─ calibrate_dataset_fx.py ──→ CALIB_FX in batch_megasam.py  (once per dataset)
+    │   SLAM opt-intr × 1.10,  no GT required.  ~1% error.
     │
-    ├─ HaWoR → batch_hawor.py ────→ ego_mano/{ds}/{seq}.npz
-    │                                  right_verts + left_verts (world frame)
-    │                                  R_w2c + t_w2c (world→cam per frame)
+    ├─ MegaSAM (batch_megasam.py) ──→ egocentric_depth/{ds}/{seq}/
+    │                                   K.npy + depth.npz + cam_c2w.npy
     │
-    ├─ SAM2 mask (manual, once) ───→ obj_recon_input/egocentric/{obj}/0.png
+    ├─ HaWoR (batch_hawor.py) ───→ ego_mano/{ds}/{seq}.npz
+    │                                right_verts + left_verts (world frame)
+    │                                R_w2c + t_w2c (world→cam per frame)
     │
-    ├─ estimate_obj_scale_ego.py ──→ scale.json  (d_real / d_mesh via MegaSAM)
+    ├─ SAM2 mask (manual, once) ──→ obj_recon_input/egocentric/{obj}/0.png
     │
-    ├─ batch_obj_pose_ego.py ──────→ obj_poses_ego/{ds}/{seq}/ob_in_cam/*.txt
+    ├─ estimate_obj_scale_ego.py ─→ scale.json  (d_real / d_mesh via MegaSAM)
     │
-    └─ batch_align_ego_mano_fp.py ─→ human_prior/{obj}.hdf5
-                                       2D projection (scale-invariant)
-                                       point_cloud + normals + human_prior
+    ├─ batch_obj_pose_ego.py ─────→ obj_poses_ego/{ds}/{seq}/ob_in_cam/*.txt
+    │
+    └─ batch_align_ego_mano_fp.py → human_prior/{obj}.hdf5
 ```
 
 ### Prerequisites
@@ -420,42 +428,75 @@ conda activate bundlesdf  # FoundationPose
 # data_hub/ProcessedData/obj_meshes/egocentric/{obj}/mesh.ply    ← SAM3D mesh
 ```
 
+### Step E0 · Calibrate Camera Intrinsics (once per dataset)
+
+> **Fully automatic, no GT required.** Runs SLAM opt-intr on N sequences, filters outliers, applies ×1.10 correction, and patches `CALIB_FX` in `batch_megasam.py` automatically.
+
+```bash
+cd mega-sam
+
+# EgoDex (Apple Vision Pro, ~15 min)
+conda run --no-capture-output -n mega_sam \
+  python -u ../data/calibrate_dataset_fx.py --dataset egodex --n 15 \
+  2>&1 | tee ../output/calib_egodex.log
+
+# TACO Ego (GoPro, ~30 min)
+conda run --no-capture-output -n mega_sam \
+  python -u ../data/calibrate_dataset_fx.py --dataset taco --n 15 \
+  2>&1 | tee ../output/calib_taco.log
+```
+
+**Pre-calibrated values** (already in `batch_megasam.py`):
+- EgoDex: `CALIB_FX["egodex"] = 249.4` px @640px
+- TACO Ego: `CALIB_FX["taco"] = 455.3` px @640px
+
+Skip this step if running on the same datasets — values are already set.
+
+
 ### Step E1 · HaWoR — MANO Hand Estimation (egocentric)
 
 > `batch_hawor.py` processes each sequence in an isolated subprocess (no CUDA conflicts).
-> Output is a preprocessed `.npz` with world-frame MANO vertices and R_w2c/t_w2c per frame.
 
 ```bash
 conda activate bundlesdf   # dispatcher; subprocess uses hawor env
 
-# All registered egodex sequences
+# EgoDex
 python data/batch_hawor.py --dataset egodex
 
-# Single sequence
-python data/batch_hawor.py --dataset egodex --seq "fry_bread/1"
+# TACO Ego
+python data/batch_hawor.py --dataset taco_ego
 
-# Force redo
+# Single sequence / force redo
+python data/batch_hawor.py --dataset egodex --seq "fry_bread/1"
 python data/batch_hawor.py --dataset egodex --force-rerun
 
-# Output: data_hub/ProcessedData/ego_mano/egodex/{seq_id}.npz
+# Output: data_hub/ProcessedData/ego_mano/{dataset}/{seq_id}.npz
 #   right_verts  (T, 778, 3) — world frame
 #   left_verts   (T, 778, 3) — world frame
 #   R_w2c        (T, 3, 3)   — SLAM world→cam rotation
 #   t_w2c        (T, 3)      — SLAM world→cam translation
-#   pred_valid   (2, T) bool
 ```
 
 ### Step E2 · MegaSAM — Camera Poses + Metric Depth
 
-> MegaSAM provides cam_c2w (camera-to-world transforms) and metric depth maps
-> that define the shared world coordinate frame used by both HaWoR and FoundationPose.
-
 ```bash
-# Output layout (60-frame subsampled):
+cd mega-sam
+
+# EgoDex (3,051 sequences, ~2-3 days on 1 GPU)
+conda run --no-capture-output -n mega_sam \
+  python -u data/batch_megasam.py --dataset egodex --resume \
+  2>&1 | tee output/megasam_egodex.log
+
+# TACO Ego (2,311 sequences)
+conda run --no-capture-output -n mega_sam \
+  python -u data/batch_megasam.py --dataset taco --resume \
+  2>&1 | tee output/megasam_taco.log
+
+# Output per sequence:
 # data_hub/ProcessedData/egocentric_depth/{dataset}/{seq}/
-#   depth.npz   # (60, H, W) float32 metric depth in metres
-#   K.npy       # 3×3 camera intrinsic at depth resolution
-#   cam_c2w.npy # (60, 4, 4) camera-to-world transforms
+#   depth.npz    (60, H, W) float32 metric depth in metres
+#   K.npy        3×3 camera intrinsic at depth resolution
+#   cam_c2w.npy  (60, 4, 4) camera-to-world transforms
 ```
 
 ### Step E3 · Object Scale Estimation (egocentric)

@@ -38,7 +38,8 @@ EGO_BASE    = os.path.join(config.DATA_HUB, "RawData", "EgoRawData")
 # Third-person datasets (EgoDex, etc.)
 THIRD_BASE  = os.path.join(config.DATA_HUB, "RawData", "ThirdPersonRawData")
 
-EGODEX_ROOT = os.path.join(EGO_BASE,   "egodex", "test")
+EGODEX_ROOT   = os.path.join(EGO_BASE, "egodex", "test")
+TACO_EGO_ROOT = os.path.join(EGO_BASE, "taco",   "Egocentric_RGB_Videos")
 
 
 # ── dataset discoverers ────────────────────────────────────────────────────────
@@ -69,10 +70,25 @@ def discover_arctic_ego(input_dir):
             if imgs:
                 yield f"arctic/{subj}/{seq}", imgs, "frames"
 
+def discover_taco_ego(input_dir):
+    """TACO Ego: Egocentric_RGB_Videos/{triplet}/{seq}/color.mp4"""
+    if not os.path.isdir(input_dir):
+        return
+    for triplet in natsorted(os.listdir(input_dir)):
+        triplet_dir = os.path.join(input_dir, triplet)
+        if not os.path.isdir(triplet_dir):
+            continue
+        for seq in natsorted(os.listdir(triplet_dir)):
+            mp4 = os.path.join(triplet_dir, seq, "color.mp4")
+            if os.path.exists(mp4):
+                yield f"taco_ego/{triplet}/{seq}", mp4, "video"
+
 
 DISCOVERERS = {
-    "egodex": (discover_egodex, EGODEX_ROOT),
-    "arctic":  (discover_arctic_ego, os.path.join(EGO_BASE, "arctic", "images")),
+
+    "egodex":   (discover_egodex,   EGODEX_ROOT),
+    "taco_ego": (discover_taco_ego, TACO_EGO_ROOT),
+    "arctic":   (discover_arctic_ego, os.path.join(EGO_BASE, "arctic", "images")),
 }
 
 

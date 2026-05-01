@@ -1,0 +1,20 @@
+{
+  "_README": {
+    "format": "Same as egodex_sequence_registry.json. Add one entry per TACO Ego sequence.",
+    "fields": {
+      "dataset":   "taco_ego",
+      "seq_id":    "triplet_dir/seq_dir  (e.g. '20231006_010/color')",
+      "obj_name":  "tool name from TACO triplet  (e.g. 'brush', 'knife', 'spatula')",
+      "depth_dir": "abs path to MegaSAM egocentric_depth output dir for this seq",
+      "skipped":   "set true to exclude this sequence"
+    },
+    "example": {
+      "key": "taco_ego/20231006_010",
+      "dataset":   "taco_ego",
+      "seq_id":    "20231006_010/color",
+      "obj_name":  "brush",
+      "depth_dir": "/path/to/data_hub/ProcessedData/egocentric_depth/taco_ego/20231006_010/color",
+      "skipped":   false
+    }
+  }
+}
