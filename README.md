@@ -6,6 +6,27 @@ Pipeline: `Video → Depth + Pose → Human Contact Prior → Sim Filtering → 
 
 ---
 
+## Pipeline Philosophy
+
+This pipeline is **object-agnostic by design**.
+
+The PointNet++ model does not learn "how to grasp object X". Instead, it learns a general principle: **where humans tend to make contact on an object's surface, and where the force center lies**. This geometric pattern transfers across object categories.
+
+**Why use so many different datasets?**
+Each dataset contributes a different type of diversity:
+
+| Dataset | Object Category | What it contributes |
+|---------|----------------|---------------------|
+| DexYCB / HO3D | YCB household items | High-quality multi-view contact data; used as evaluation benchmark |
+| OakInk | 100 diverse household objects | Broadens object category coverage for better generalization |
+| TACO Allocentric | 100+ tool-object pairs | Tool grasping patterns; multi-camera 3rd-person view |
+| EgoDex | Manipulation task objects | First-person viewpoint; diverse action-driven grasping |
+| TACO Ego | Tool-object interactions | Egocentric complement to TACO Allocentric |
+
+**The 7 YCB objects in DexYCB are an evaluation benchmark, not a deployment limit.** The model can be applied to any object given its mesh. Adding more diverse datasets is an ongoing process — more data leads to stronger generalization.
+
+---
+
 ## Pipeline Overview
 
 ```
@@ -59,19 +80,19 @@ Pipeline: `Video → Depth + Pose → Human Contact Prior → Sim Filtering → 
 
 ### Phase 1A — Third-Person
 
-| Dataset | Objects | Sequences | Depth | K error | Download |
+| Dataset | Objects | Sequences | K error | Role | Download |
 |---|---|---|---|---|---|
-| **DexYCB** | 20 YCB | ~3,600 (6 cams) | Depth Pro two-pass | ~0.2% | [dex-ycb.github.io](https://dex-ycb.github.io) |
-| **HO3D v3** | 8 YCB | 68 | Depth Pro two-pass | ~1.5% | [tugraz.at HO3D](https://www.tugraz.at/institute/icg/research/team-lepetit/research-projects/hand-object-3d-pose-annotation) |
-| **OakInk v1** | 100 | 778 | Depth Pro two-pass | ~5.7% | [oakink.net](https://oakink.net) |
-| **TACO Allocentric** | 100+ | 2,300+ (12 cams) | Depth Pro two-pass | ~5–8% | [taco-group.github.io](https://taco-group.github.io) → `Allocentric_RGB_Videos` |
+| **DexYCB** | 20 YCB | ~3,600 (6 cams) | ~0.2% | Evaluation benchmark + training | [dex-ycb.github.io](https://dex-ycb.github.io) |
+| **HO3D v3** | 8 YCB | 68 | ~1.5% | Additional YCB contact data | [tugraz.at HO3D](https://www.tugraz.at/institute/icg/research/team-lepetit/research-projects/hand-object-3d-pose-annotation) |
+| **OakInk v1** | 100 | 778 | ~5.7% | Expands object diversity (100 categories) | [oakink.net](https://oakink.net) |
+| **TACO Allocentric** | 100+ | 2,300+ (12 cams) | ~5–8% | Tool grasping; multi-camera diversity | [taco-group.github.io](https://taco-group.github.io) → `Allocentric_RGB_Videos` |
 
 ### Phase 1B — First-Person (Egocentric)
 
-| Dataset | Camera | Sequences | Depth | K error | Download |
+| Dataset | Camera | Sequences | K error | Role | Download |
 |---|---|---|---|---|---|
-| **EgoDex** | Apple Vision Pro | 3,051 | MegaSAM SLAM opt-intr ×1.10 | ~1% | [egodex.cs.columbia.edu](https://egodex.cs.columbia.edu) |
-| **TACO Ego** | GoPro 71° | 2,311 | MegaSAM SLAM opt-intr ×1.10 | ~1% | [taco-group.github.io](https://taco-group.github.io) → `Egocentric_RGB_Videos` |
+| **EgoDex** | Apple Vision Pro | 3,051 | ~1% | First-person grasping patterns; action diversity | [egodex.cs.columbia.edu](https://egodex.cs.columbia.edu) |
+| **TACO Ego** | GoPro 71° | 2,311 | ~1% | Egocentric tool grasping complement | [taco-group.github.io](https://taco-group.github.io) → `Egocentric_RGB_Videos` |
 
 ---
 
