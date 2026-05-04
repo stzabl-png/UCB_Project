@@ -45,7 +45,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config
 
 # ── FoundationPose 路径 ───────────────────────────────────────────────────────
-FP_ROOT = "/home/lyh/Project/FoundationPose"
+FP_ROOT = config.FP_ROOT
 sys.path.insert(0, FP_ROOT)
 
 # ── 数据路径 ──────────────────────────────────────────────────────────────────

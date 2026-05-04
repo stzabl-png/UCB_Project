@@ -29,7 +29,7 @@ sys.path.insert(0, config.HAPTIC_DIR)
 
 # ── 路径配置 ─────────────────────────────────────────────────────────────────
 OAKINK_STREAM  = os.path.join(config.DATA_HUB, 'RawData', 'ThirdPersonRawData', 'oakink_v1')
-OAKINK_CAM_K   = '/home/lyh/Project/OakInk/image/anno/cam_intr'
+OAKINK_CAM_K   = os.path.join(config.OAKINK_ANNO_DIR, 'image', 'anno', 'cam_intr') if config.OAKINK_ANNO_DIR else ''
 ANNOT_JSON     = os.path.join(config.OUTPUT_DIR, 'oakink_keyframe_annot.json')
 CACHE_DIR      = os.path.join(config.OUTPUT_DIR, 'haptic_oakink_cache')
 os.makedirs(CACHE_DIR, exist_ok=True)

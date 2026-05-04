@@ -194,7 +194,7 @@ python setup_weights.py --tool depthpro   # places depth_pro.pt in third_party/m
 conda create -n bundlesdf python=3.9 -y
 conda activate bundlesdf
 pip install trimesh scipy h5py opencv-python natsort tqdm
-pip install fast-simplification   # ← CRITICAL: without this, contact alignment takes 23 h not 15 min
+pip install "fast-simplification>=0.1.6"  # ← CRITICAL: without this, contact alignment takes 23 h not 15 min
 ```
 
 **Step 2 — Install HaPTIC**

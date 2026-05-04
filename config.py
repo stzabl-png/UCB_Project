@@ -52,6 +52,9 @@ HAPTIC_DIR = os.environ.get("HAPTIC_DIR", os.path.join(PROJECT_DIR, "third_party
 ARCTIC_ROOT = os.environ.get("ARCTIC_ROOT", "")
 MANO_MODELS = os.path.join(ARCTIC_ROOT, "mano_v1_2", "models") if ARCTIC_ROOT else ""
 
+# OakInk annotation repo (for GT camera intrinsics in batch_haptic_oakink.py)
+OAKINK_ANNO_DIR = os.environ.get("OAKINK_ANNO_DIR", "")
+
 # ContactPose (optional external dataset)
 CONTACTPOSE_DIR = os.environ.get("CONTACTPOSE_DIR", "")
 CONTACTPOSE_DATA_DIR = os.path.join(
