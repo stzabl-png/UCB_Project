@@ -185,6 +185,25 @@ def download_egomasks():
         print("❌ egocentric/ folder not found in EgoDataMask repo")
 
 
+def download_egodex():
+    """Download EgoDex raw dataset from UCBProject/Affordance2Grasp-EgoDex (~30 GB)."""
+    print("\n📥 EgoDex raw dataset (~30 GB, 101 tasks, 3051 sequences)...")
+    dest = PROJECT / "data_hub" / "RawData" / "EgoRawData" / "egodex"
+    if dest.exists() and any(dest.iterdir()):
+        n = sum(1 for _ in dest.iterdir() if _.is_dir())
+        print(f"   ⏭️  {dest} already has {n} task dirs, skipping")
+        return
+    dest.mkdir(parents=True, exist_ok=True)
+    from huggingface_hub import snapshot_download
+    snapshot_download(
+        repo_id="UCBProject/Affordance2Grasp-EgoDex",
+        repo_type="dataset",
+        local_dir=str(dest),
+    )
+    n = sum(1 for _ in dest.iterdir() if _.is_dir())
+    print(f"✅ EgoDex: {n} task categories → {dest}")
+
+
 TOOLS = {
     "fp":       download_fp,
     "hawor":    download_hawor,
@@ -192,6 +211,7 @@ TOOLS = {
     "megasam":  download_megasam,
     "depthpro": download_depthpro,
     "egomasks": download_egomasks,
+    "egodex":   download_egodex,
 }
 
 
