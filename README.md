@@ -480,9 +480,18 @@ Output: `data_hub/ProcessedData/obj_meshes/egocentric/{obj}/scale.json`
 
 ### Step E4 · SAM2 Mask (manual, once per object)
 
-Annotate the object mask on one representative frame:
+> **Skip this step** if the object already has a mask in `obj_recon_input/egocentric/`.
+> All objects from existing datasets (EgoDex tasks, TACO Ego) already have masks.
+> Only needed when adding a **new object category** not previously seen.
+
+Annotate the object mask on one representative frame using the SAM2 GUI, then save to:
 ```
 data_hub/ProcessedData/obj_recon_input/egocentric/{obj}/0.png
+```
+
+To check which objects already have masks:
+```bash
+ls data_hub/ProcessedData/obj_recon_input/egocentric/
 ```
 
 ---
@@ -543,7 +552,19 @@ Expected: `max_hp ≥ 0.7`, `cov(>0.1) = 100%` for all objects.
 
 ---
 
-## Phase 3 — Robot Ground Truth (Isaac Sim)
+## Phase 3 — Robot Ground Truth (Isaac Sim) — Optional
+
+> **This phase is optional for training.** The current model (`checkpoints_gtfree_v2`, F1=0.642)
+> was trained in **gtfree mode** (HumanPrior only, no robot simulation labels).
+> Skip to Phase 4 if you want to train without Isaac Sim.
+>
+> Run Phase 3 only if you want to generate `robot_gt` labels to potentially improve accuracy.
+>
+> **Isaac Sim requirements:**
+> - NVIDIA Omniverse account (free registration at [developer.nvidia.com](https://developer.nvidia.com/omniverse))
+> - ~30 GB disk space
+> - RTX-class GPU
+> - Set: `export ISAAC_SIM_PATH=/path/to/isaac-sim`
 
 ### Step 5 · Sample Grasp Candidates
 
