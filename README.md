@@ -837,16 +837,20 @@ Expect ~12 GB total. Takes 5–30 min depending on connection speed.
 
 ### T4 — HaPTIC detectron2 build fails
 ```
-error: command 'gcc' failed: No such file or directory
+ImportError: cannot import name 'packaging' from 'pkg_resources'
+# or: error: command 'gcc' failed
 ```
-detectron2 must be compiled from source. Ensure build tools are present:
+**Root cause:** `setuptools ≥ 70` removes `pkg_resources`, which `torch` cpp_extension uses during detectron2 compilation.
+
+**Fix (do this first):**
 ```bash
-sudo apt-get install -y gcc g++ build-essential
 conda activate haptic
+pip install --force-reinstall "setuptools<70"   # ← must do BEFORE detectron2
+sudo apt-get install -y gcc g++ build-essential  # ensure build tools present
 pip install 'git+https://github.com/facebookresearch/detectron2.git'
 ```
-Alternatively, install a pre-built wheel matching your CUDA version from:
-https://github.com/facebookresearch/detectron2/releases
+> **Note:** Any subsequent `pip install` may upgrade setuptools back to ≥70.
+> Always re-run `pip install --force-reinstall "setuptools<70"` after installing new packages in the `haptic` env.
 
 ### T5 — HaPTIC `gdown` fails: `output/` directory not found
 ```

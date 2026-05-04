@@ -112,7 +112,7 @@ def main():
               "run: python setup_weights.py --tool hawor")
 
         check("MegaSAM weights",
-              (PROJECT / "third_party" / "mega-sam" / "checkpoints" / "megasam_final.pth").exists(),
+              (PROJECT / "mega-sam" / "checkpoints" / "megasam_final.pth").exists(),
               "run: python setup_weights.py --tool megasam")
 
         check("DepthPro weights",
@@ -128,6 +128,13 @@ def main():
 
         check("DexYCB raw data",
               (PROJECT / "data_hub" / "RawData" / "ThirdPersonRawData" / "dexycb").exists())
+
+        # setuptools<70 required for detectron2 (pkg_resources removed in >=70)
+        import subprocess as _sp
+        _st = _sp.run(["python3", "-c", "import pkg_resources"], capture_output=True)
+        check("setuptools<70 (detectron2 compat)",
+              _st.returncode == 0,
+              "fix: pip install 'setuptools<70'")
 
     # ── Phase 1A ──────────────────────────────────────────────────
     if args.phase in (0, 1) and not args.skip_gpu:
