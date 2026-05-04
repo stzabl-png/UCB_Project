@@ -137,7 +137,7 @@ python setup_weights.py --tool megasam  # MegaSAM only (21 MB)
 > ```
 
 
-### 2. Conda Environments
+### 3. Conda Environments
 
 ```bash
 # Environment A — Depth Pro  (Phase 1A Step 1)
@@ -153,7 +153,7 @@ pip install natsort tqdm pillow numpy h5py
 # Follow third_party/hawor/README for setup
 ```
 
-### 2b. Environment B — `bundlesdf` (main environment)
+### 3b. Environment B — `bundlesdf` (main environment)
 
 > **Used for:** HaPTIC (Step 2), FoundationPose (Steps 3, E5), contact alignment (Steps 4, E6), Sim (Phase 3), training (Phase 4).
 
@@ -167,7 +167,11 @@ pip install fast-simplification   # ← CRITICAL: without this, contact alignmen
 
 **Step 2 — Install HaPTIC**
 ```bash
-# Follow the official HaPTIC README for installation
+conda create -n haptic python=3.10 -y
+conda activate haptic
+cd third_party/haptic
+bash scripts/one_click.sh   # downloads HaPTIC weights automatically
+cd ../..
 ```
 
 **Step 3 — Clone and build FoundationPose**
