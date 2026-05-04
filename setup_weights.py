@@ -14,6 +14,9 @@ Tools:
     haptic   — HaPTIC vitpose  (3.8 GB)
     megasam  — MegaSAM         (21 MB)
     depthpro — Apple Depth Pro (1.9 GB, avoids Apple CDN firewall issues)
+    egomasks — Egocentric object masks for FoundationPose (EgoDex+TACO, ~70 MB)
+               Source: UCBProject/EgoDataMask
+               Tasks without a mask are automatically skipped by the pipeline.
 
 Notes:
     - MANO model weights require manual registration at https://mano.is.tue.mpg.de/
@@ -153,12 +156,42 @@ def download_depthpro():
     print("✅ Depth Pro done")
 
 
+def download_egomasks():
+    """Download egocentric object masks from UCBProject/EgoDataMask."""
+    print("\n📥 Egocentric object masks (~70 MB)...")
+    dest = PROJECT / "data_hub" / "ProcessedData" / "obj_recon_input" / "egocentric"
+    if dest.exists() and any(dest.iterdir()):
+        print(f"   ⏭️  {dest} already populated, skipping")
+        print("       Use --redo to force re-download")
+        return
+    dest.mkdir(parents=True, exist_ok=True)
+    from huggingface_hub import snapshot_download
+    tmp = PROJECT / ".hf_tmp_egomasks"
+    snapshot_download(
+        repo_id="UCBProject/EgoDataMask",
+        repo_type="dataset",
+        local_dir=str(tmp),
+    )
+    src = tmp / "egocentric"
+    if src.exists():
+        import shutil
+        if dest.exists():
+            shutil.rmtree(dest)
+        shutil.copytree(str(src), str(dest))
+        shutil.rmtree(str(tmp), ignore_errors=True)
+        n = sum(1 for _ in dest.iterdir() if _.is_dir())
+        print(f"✅ Egocentric masks: {n} task categories → {dest}")
+    else:
+        print("❌ egocentric/ folder not found in EgoDataMask repo")
+
+
 TOOLS = {
     "fp":       download_fp,
     "hawor":    download_hawor,
     "haptic":   download_haptic,
     "megasam":  download_megasam,
     "depthpro": download_depthpro,
+    "egomasks": download_egomasks,
 }
 
 
