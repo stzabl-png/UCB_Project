@@ -114,19 +114,92 @@ conda activate depth-pro
 pip install git+https://github.com/apple/ml-depth-pro.git
 pip install natsort tqdm pillow numpy h5py
 
-# Environment B — bundlesdf  (Phase 1A Steps 2-4, Phase 1B Steps 4-5, Phases 3-4)
-conda create -n bundlesdf python=3.9 -y
-conda activate bundlesdf
-pip install trimesh scipy h5py opencv-python natsort tqdm torch
-pip install fast-simplification   # ← CRITICAL: without this, Step 4 takes 23 h not 15 min
-# Install HaPTIC per its official README
-# Install FoundationPose: pip install -e /path/to/FoundationPose
-
 # Environment C — mega_sam  (Phase 1B Steps 1-2)
 # Follow mega-sam/README for setup
 
 # Environment D — hawor  (Phase 1B Step 3)
 # Follow third_party/hawor/README for setup
+```
+
+### 2b. Environment B — `bundlesdf` (main environment)
+
+> **Used for:** HaPTIC (Step 2), FoundationPose (Steps 3, E5), contact alignment (Steps 4, E6), Sim (Phase 3), training (Phase 4).
+
+**Step 1 — Create the environment**
+```bash
+conda create -n bundlesdf python=3.9 -y
+conda activate bundlesdf
+pip install trimesh scipy h5py opencv-python natsort tqdm
+pip install fast-simplification   # ← CRITICAL: without this, contact alignment takes 23 h not 15 min
+```
+
+**Step 2 — Install HaPTIC**
+```bash
+# Follow the official HaPTIC README for installation
+```
+
+**Step 3 — Clone and build FoundationPose**
+
+> FoundationPose requires compiling CUDA C++ extensions. A simple `pip install` is not sufficient.
+
+```bash
+# Clone
+git clone https://github.com/NVlabs/FoundationPose.git /path/to/FoundationPose
+cd /path/to/FoundationPose
+
+# Install Eigen3 3.4.0 (required for C++ build)
+conda install conda-forge::eigen=3.4.0 -y
+export CMAKE_PREFIX_PATH="$CONDA_PREFIX:$CMAKE_PREFIX_PATH"
+
+# Install Python dependencies
+pip install -r requirements.txt
+
+# Install NVDiffRast (rendering backend)
+pip install git+https://github.com/NVlabs/nvdiffrast.git
+
+# Build CUDA C++ extensions (takes ~3-5 min)
+bash build_all_conda.sh
+```
+
+**Step 4 — Download model weights**
+
+Weights are hosted on our HuggingFace repo. Run from inside the FoundationPose directory:
+
+```bash
+cd /path/to/FoundationPose
+
+python3 -c "
+from huggingface_hub import hf_hub_download, snapshot_download
+import shutil, os
+
+repo = 'UCBProject/Affordance2Grasp-Data'
+
+for folder in ['2023-10-28-18-33-37', '2024-01-11-20-02-45']:
+    snapshot_download(
+        repo_id=repo,
+        repo_type='dataset',
+        allow_patterns=f'FoundationPose/weights/{folder}/*',
+        local_dir='.',
+    )
+    # Move into weights/
+    src = f'FoundationPose/weights/{folder}'
+    dst = f'weights/{folder}'
+    if os.path.exists(src):
+        shutil.move(src, dst)
+        print(f'✅ {dst}')
+"
+```
+
+After download, your `weights/` folder should contain:
+```
+weights/
+├── 2023-10-28-18-33-37/model_best.pth   ← refiner
+└── 2024-01-11-20-02-45/model_best.pth   ← scorer
+```
+
+**Step 5 — Set path in `config.py`**
+```python
+FP_ROOT = "/path/to/FoundationPose"
 ```
 
 ### 3. Configure paths in `config.py`
