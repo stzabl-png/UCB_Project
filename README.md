@@ -98,12 +98,44 @@ Each dataset contributes a different type of diversity:
 
 ## Setup
 
-### 1. Clone
+### 1. Clone (with all dependencies)
 
 ```bash
-git clone https://github.com/stzabl-png/UCB_Project.git Affordance2Grasp
+# --recursive pulls HaWoR, MegaSAM, and HaPTIC code automatically
+git clone --recursive https://github.com/stzabl-png/UCB_Project.git Affordance2Grasp
 cd Affordance2Grasp
 ```
+
+> If you already cloned without `--recursive`, run:
+> ```bash
+> git submodule update --init --recursive
+> ```
+
+### 2. Download Model Weights
+
+All weights are hosted on HuggingFace. One script downloads everything:
+
+```bash
+pip install huggingface_hub   # if not already installed
+python setup_weights.py       # downloads FP + HaWoR + HaPTIC + MegaSAM (~8 GB total)
+```
+
+To download a specific tool only:
+```bash
+python setup_weights.py --tool fp       # FoundationPose only (248 MB)
+python setup_weights.py --tool hawor    # HaWoR only (3.6 GB)
+python setup_weights.py --tool haptic   # HaPTIC only (3.8 GB)
+python setup_weights.py --tool megasam  # MegaSAM only (21 MB)
+```
+
+> **⚠️ MANO (license required — manual download)**
+> MANO cannot be redistributed. Register at [mano.is.tue.mpg.de](https://mano.is.tue.mpg.de/) and place:
+> ```
+> third_party/haptic/assets/mano/
+>     MANO_RIGHT.pkl
+>     MANO_LEFT.pkl
+> ```
+
 
 ### 2. Conda Environments
 
