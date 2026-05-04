@@ -47,8 +47,8 @@ GRASPS_DIR = os.path.join(OUTPUT_DIR, "grasps")
 # Only needed for upstream data generation, NOT for training/inference.
 # ============================================================
 ISAAC_SIM_PATH = os.environ.get("ISAAC_SIM_PATH", "")
-HAWOR_DIR  = os.environ.get("HAWOR_DIR",  "/home/lyh/Project/Video2MANO&Mesh/hawor")
-HAPTIC_DIR = os.environ.get("HAPTIC_DIR", "/home/lyh/Project/haptic")
+HAWOR_DIR  = os.environ.get("HAWOR_DIR",  os.path.join(PROJECT_DIR, "third_party", "hawor"))
+HAPTIC_DIR = os.environ.get("HAPTIC_DIR", os.path.join(PROJECT_DIR, "third_party", "haptic"))
 ARCTIC_ROOT = os.environ.get("ARCTIC_ROOT", "")
 MANO_MODELS = os.path.join(ARCTIC_ROOT, "mano_v1_2", "models") if ARCTIC_ROOT else ""
 
