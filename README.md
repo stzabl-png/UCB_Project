@@ -341,6 +341,9 @@ cd ../..
 > FoundationPose requires compiling CUDA C++ extensions. A simple `pip install` is not sufficient.
 
 ```bash
+# System dependencies (requires sudo — only needed once per machine)
+sudo apt-get install -y libboost-dev libboost-program-options-dev libomp-dev
+
 # Clone and pin to a tested commit (main branch may have breaking changes)
 git clone https://github.com/NVlabs/FoundationPose.git third_party/FoundationPose
 cd third_party/FoundationPose
