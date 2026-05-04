@@ -342,7 +342,10 @@ cd ../..
 
 ```bash
 # System dependencies (requires sudo — only needed once per machine)
-sudo apt-get install -y libboost-dev libboost-program-options-dev libomp-dev
+sudo apt-get install -y libboost-all-dev libomp-dev build-essential git
+
+# cmake must be < 4.0: cmake ≥ 4.0 removes FindBoost, breaking FP's C++ build
+pip install "cmake<4.0" ninja pybind11
 
 # Clone and pin to a tested commit (main branch may have breaking changes)
 git clone https://github.com/NVlabs/FoundationPose.git third_party/FoundationPose
@@ -356,11 +359,16 @@ export CMAKE_PREFIX_PATH="$CONDA_PREFIX:$CMAKE_PREFIX_PATH"
 # Install Python dependencies
 pip install -r requirements.txt
 
-# Install NVDiffRast (rendering backend)
-pip install git+https://github.com/NVlabs/nvdiffrast.git
+# Install NVDiffRast — clone locally to avoid git metadata build issues
+git clone --depth 1 https://github.com/NVlabs/nvdiffrast.git /tmp/nvdiffrast_src
+pip install /tmp/nvdiffrast_src --no-build-isolation
 
-# Build CUDA C++ extensions (takes ~3-5 min)
+# Build CUDA C++ extensions
+# ⚠️  conda's gcc is a cross-compiler that conflicts with system glibc headers.
+# Always force system gcc for this step:
 bash build_all_conda.sh
+# If build_all_conda.sh fails with 'bits/timesize.h not found', use system gcc:
+# (see Troubleshooting T11 below)
 
 # Register FP_ROOT so pipeline scripts can find it
 echo 'export FP_ROOT="'"$(pwd)"'"' >> ~/.bashrc
@@ -876,17 +884,20 @@ Expect ~12 GB total. Takes 5–30 min depending on connection speed.
 
 ### T4 — HaPTIC detectron2 build fails
 ```
-ImportError: cannot import name 'packaging' from 'pkg_resources'
-# or: error: command 'gcc' failed
+ModuleNotFoundError: No module named 'pkg_resources'
+# or: ImportError: cannot import name 'packaging' from 'pkg_resources'
 ```
 **Root cause:** `setuptools ≥ 70` removes `pkg_resources`, which `torch` cpp_extension uses during detectron2 compilation.
 
-**Fix (do this first):**
+**Fix:**
 ```bash
 conda activate haptic
 pip install --force-reinstall "setuptools<70"   # ← must do BEFORE detectron2
-sudo apt-get install -y gcc g++ build-essential  # ensure build tools present
-pip install 'git+https://github.com/facebookresearch/detectron2.git'
+sudo apt-get install -y gcc g++ build-essential
+
+# Clone locally (more reliable than pip install git+URL)
+git clone --depth 1 https://github.com/facebookresearch/detectron2.git /tmp/detectron2_src
+pip install /tmp/detectron2_src --no-build-isolation
 ```
 > **Note:** Any subsequent `pip install` may upgrade setuptools back to ≥70.
 > Always re-run `pip install --force-reinstall "setuptools<70"` after installing new packages in the `haptic` env.
@@ -923,4 +934,92 @@ Requires registering and using their provided download script.
 ```bash
 # Extract to correct location:
 tar -xzf dex-ycb-*.tar.gz -C data_hub/RawData/ThirdPersonRawData/
+```
+
+### T9 — nvdiffrast / FoundationPose build: CUDA version mismatch
+```
+RuntimeError: The detected CUDA version (12.x) mismatches the version that was
+used to compile PyTorch (11.8).
+```
+**Root cause:** `conda install cuda-toolkit` installs the *latest* CUDA (e.g. 12.9), not the version matching your torch wheel.
+
+**Rule of thumb:** Match torch CUDA suffix to `nvidia-smi`'s "CUDA Version" (driver max), **not** `nvcc --version`.
+```bash
+# With CUDA 12.x driver → use cu121
+pip install torch==2.1.1+cu121 torchvision==0.16.1+cu121 \
+  --index-url https://download.pytorch.org/whl/cu121
+
+# With CUDA 11.x driver → use cu118
+pip install torch==2.1.1+cu118 torchvision==0.16.1+cu118 \
+  --index-url https://download.pytorch.org/whl/cu118
+
+# Then install nvdiffrast via local clone (avoids git metadata build issues):
+git clone --depth 1 https://github.com/NVlabs/nvdiffrast.git /tmp/nvdiffrast_src
+pip install /tmp/nvdiffrast_src --no-build-isolation
+```
+> ⚠️ Never run `conda install -c nvidia cuda-toolkit` — it installs the latest CUDA version and will mismatch your torch wheel.
+
+### T10 — FoundationPose cmake fails: FindBoost module removed
+```
+CMake Warning: Policy CMP0167 is not set: The FindBoost module is removed.
+Could NOT find Boost (missing: system program_options)
+```
+**Root cause:** `cmake ≥ 4.0` dropped the legacy FindBoost module. You must use `cmake < 4.0`.
+```bash
+# Uninstall any cmake ≥ 4.0 first:
+pip uninstall cmake -y
+# Install pinned version:
+pip install "cmake<4.0"
+# Also ensure system Boost is installed:
+sudo apt-get install -y libboost-all-dev
+```
+
+### T11 — FoundationPose mycpp compile fails: `bits/timesize.h: No such file or directory`
+```
+fatal error: bits/timesize.h: No such file or directory
+```
+**Root cause:** The bundlesdf conda environment ships a cross-compilation gcc (`x86_64-conda-linux-gnu-gcc`). When used with system headers from `/usr/include`, it cannot find glibc-internal headers because it expects its own isolated sysroot.
+
+**Fix:** Bypass conda's gcc and use the system compiler directly:
+```bash
+cd third_party/FoundationPose
+PYBIND11_DIR=$(python -c "import pybind11; print(pybind11.get_cmake_dir())")
+
+mkdir -p mycpp/build && cd mycpp/build
+cmake .. \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_C_COMPILER=/usr/bin/gcc \
+  -DCMAKE_CXX_COMPILER=/usr/bin/g++ \
+  -DCMAKE_PREFIX_PATH="$CONDA_PREFIX:/usr" \
+  -DPython3_ROOT_DIR="$CONDA_PREFIX" \
+  -DPYBIND11_PYTHON_EXECUTABLE="$CONDA_PREFIX/bin/python" \
+  -Dpybind11_DIR="$PYBIND11_DIR" \
+  -DBOOST_ROOT=/usr \
+  -DBOOST_LIBRARYDIR=/usr/lib/x86_64-linux-gnu \
+  -DBOOST_INCLUDEDIR=/usr/include \
+  -DBoost_NO_SYSTEM_PATHS=OFF \
+  -Wno-dev
+cmake --build . -j$(nproc)
+```
+Expected result: `[100%] Built target mycpp` — `mycpp.cpython-3x-x86_64-linux-gnu.so` created. ✅
+
+---
+
+## Complete System Prerequisite Checklist
+
+Run this **before** starting any conda environment setup:
+
+```bash
+# 1. Check GPU + driver
+nvidia-smi | grep "CUDA Version"   # must be ≥ 11.8
+
+# 2. System build dependencies (one-shot)
+sudo apt-get install -y \
+  libboost-all-dev \
+  libomp-dev \
+  build-essential \
+  git
+
+# 3. Python build tools (install in each conda env before other packages)
+pip install "cmake<4.0" ninja pybind11 "setuptools<70" "numpy<2.0"
 ```
