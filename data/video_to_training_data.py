@@ -736,7 +736,7 @@ def main():
     source_stats = defaultdict(int)  # track which source was used per object
 
     # Dual output directories
-    hp_dir = os.path.join(config.DATA_HUB, 'human_prior')
+    hp_dir = config.HUMAN_PRIOR_DIR  # data_hub/human_prior
     os.makedirs(hp_dir, exist_ok=True)
 
     for obj_name in objects:

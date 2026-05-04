@@ -25,7 +25,7 @@ GRASP_MESH_DIR = os.path.join(DATA_HUB, "meshes", "grasp_collection")
 SEQUENCES_V1_DIR = os.path.join(DATA_HUB, "sequences", "v1")
 TRAINING_M5_DIR = os.path.join(DATA_HUB, "training_m5")
 
-HUMAN_PRIOR_DIR = os.path.join(DATA_HUB, "HumanPrior")
+HUMAN_PRIOR_DIR = os.path.join(DATA_HUB, "human_prior")  # lowercase — matches Phase 2/3 scripts
 ROBOT_GT_DIR = os.path.join(DATA_HUB, "robot_gt")
 TRAINING_DIR = os.path.join(DATA_HUB, "training")
 REGISTRY_PATH = os.path.join(DATA_HUB, "registry.json")

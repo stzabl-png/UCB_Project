@@ -1,11 +1,15 @@
 import os
+import sys
 import glob
 import h5py
 import numpy as np
 
-ROBOT_GT_DIR = "output/robot_gt"
-HUMAN_PRIOR_DIR = "data_hub/human_prior"
-TRAINING_OUT_DIR = "data_hub/training"
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import config
+
+ROBOT_GT_DIR   = os.path.join(config.OUTPUT_DIR, "robot_gt")
+HUMAN_PRIOR_DIR = config.HUMAN_PRIOR_DIR            # data_hub/human_prior
+TRAINING_OUT_DIR = config.TRAINING_DIR              # data_hub/training
 
 os.makedirs(TRAINING_OUT_DIR, exist_ok=True)
 
