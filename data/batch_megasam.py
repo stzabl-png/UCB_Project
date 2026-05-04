@@ -22,7 +22,7 @@ Output layout:
 
 Usage:
   conda activate mega_sam
-  cd /home/lyh/Project/Affordance2Grasp/mega-sam
+  cd mega-sam                     # from repo root; populated by git clone --recursive
   python ../data/batch_megasam.py --dataset both --workers 1
 
   # Resume interrupted run
