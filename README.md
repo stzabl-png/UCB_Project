@@ -94,6 +94,87 @@ Each dataset contributes a different type of diversity:
 | **EgoDex** | Apple Vision Pro | 3,051 | ~1% | First-person grasping patterns; action diversity | [egodex.cs.columbia.edu](https://egodex.cs.columbia.edu) |
 | **TACO Ego** | GoPro 71° | 2,311 | ~1% | Egocentric tool grasping complement | [taco-group.github.io](https://taco-group.github.io) → `Egocentric_RGB_Videos` |
 
+### Dataset Acquisition Checklist
+
+> Use this checklist to confirm what you have before starting. Items marked **Required for gtfree** must be present to run Phase 4 training without Isaac Sim.
+
+| Dataset | Size | Required for gtfree | Status | Notes |
+|---------|------|-------------------|--------|-------|
+| **DexYCB** | ~250 GB | ✅ Yes | `dex-ycb-20210415.tar.gz` | Extract to `RawData/ThirdPersonRawData/dexycb/` |
+| **HO3D v3** | ~60 GB | ✅ Yes | ❌ Need to download | [tugraz.at](https://www.tugraz.at/institute/icg/research/team-lepetit/research-projects/hand-object-3d-pose-annotation) |
+| **OakInk v1** | ~80 GB | ✅ Yes | ❌ Need to download | [oakink.net](https://oakink.net) |
+| **TACO Allocentric** | ~120 GB | ⚠️ Optional | ❌ Need to download | Skip if storage is limited |
+| **EgoDex** | ~30 GB | ⚠️ Optional | ❌ Need to download | [egodex.cs.columbia.edu](https://egodex.cs.columbia.edu) |
+| **TACO Ego** | ~24 GB | ⚠️ Optional | ❌ Need to download | [taco-group.github.io](https://taco-group.github.io) |
+| **MANO** | ~50 MB | ✅ Yes | `mano_v1_2.zip` | See MANO setup below |
+| **SMPL-H** | ~300 MB | ✅ Yes | `smplh.tar.xz` | See MANO setup below |
+| **Model weights** | ~12 GB | ✅ Yes | ❌ Run `setup_weights.py` | Automated download |
+| **Ego masks** | ~70 MB | ✅ Yes (1B) | ❌ Run `setup_weights.py --tool egomasks` | Automated download |
+
+> **Minimum viable dataset for gtfree training:** DexYCB + HO3D v3 + OakInk v1 (~390 GB).
+> TACO and EgoDex extend coverage but are not required for an initial working model.
+
+---
+
+## Prerequisites
+
+### Hardware Requirements
+
+| Resource | Minimum | Recommended |
+|----------|---------|-------------|
+| **GPU** | 1× RTX 3090 / A100 (24 GB VRAM) | 8× A100 80GB |
+| **Storage** | 500 GB free (raw data + processed) | 2 TB (all datasets) |
+| **RAM** | 64 GB | 128 GB |
+| **OS** | Ubuntu 20.04+ (Linux only — case-sensitive paths) | Ubuntu 22.04 |
+
+> **Storage breakdown:**
+> EgoDex 30 GB · TACO Ego 24 GB · DexYCB ~250 GB · OakInk ~80 GB · HO3D ~60 GB
+> Processed outputs (depth, poses, priors) add another ~100 GB.
+> **Mount a dedicated `/data` volume before starting.** Do NOT install to `/home`.
+
+---
+
+## Multi-GPU Parallelization
+
+All batch scripts support `--start N --end N` (or `--seqs`) for sharding across GPUs.
+With 8 GPUs, Phase 1A + 1B can be completed in **~2–3 days** instead of ~10 days.
+
+### Pattern: 8-GPU sharding
+
+```bash
+# Split N total sequences across 8 GPUs
+# GPU 0: sequences 0..374,  GPU 1: 375..749,  GPU 2: 750..1124 ...
+TOTAL=3000
+CHUNK=$((TOTAL / 8))
+
+for GPU in {0..7}; do
+  START=$((GPU * CHUNK))
+  END=$((START + CHUNK))
+  CUDA_VISIBLE_DEVICES=$GPU python data/batch_megasam.py \
+      --dataset egodex --start $START --end $END &
+done
+wait
+```
+
+### Per-script flags
+
+| Script | Shard flag | Example |
+|--------|-----------|---------|
+| `batch_megasam.py` | `--start N --end N` | `--start 0 --end 375` |
+| `batch_hawor.py` | `--seqs task1/0,task1/1,...` | comma-separated seq IDs |
+| `batch_obj_pose_ego.py` | `--seq substring` | `--seq add_remove` |
+| `batch_obj_pose.py` | `--seq substring` | `--seq dexycb` |
+| `batch_depth_pro.py` | `--start N --end N` | same as MegaSAM |
+
+### Time estimates (8× A100)
+
+| Phase | Single GPU | 8× A100 |
+|-------|-----------|---------|
+| Phase 1A (4 datasets) | ~120 h | **~15 h** |
+| Phase 1B EgoDex+TACO | ~150 h | **~19 h** |
+| Phase 2 (aggregate) | ~2 h | ~2 h (single) |
+| Phase 4 (training) | ~6 h | ~1 h |
+
 ---
 
 ## Setup
