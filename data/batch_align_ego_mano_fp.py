@@ -59,10 +59,14 @@ def load_registry():
       { "key": { "dataset": "egodex"|"taco_ego",
                  "seq_id":  "task/episode",
                  "obj_name": "obj_name",
-                 "depth_dir": "path/to/megasam/output",
                  "skipped": false } }
+
+    depth_dir is always derived from config.DATA_HUB + seq_id so that the
+    registry works on any machine regardless of what paths are stored in the JSON.
     """
     obj_map = {}  # obj_name -> list[(ds, seq_id, depth_dir)]
+    ego_depth_base = os.path.join(config.DATA_HUB, "ProcessedData", "egocentric_depth")
+
     for reg_path in [REGISTRY_JSON, TACO_REGISTRY_JSON]:
         if not os.path.exists(reg_path):
             continue
@@ -73,8 +77,11 @@ def load_registry():
                 continue
             obj  = cfg["obj_name"]
             ds   = cfg["dataset"]
-            sid  = cfg["seq_id"]
-            dd   = cfg.get("depth_dir", "")
+            sid  = cfg["seq_id"]   # e.g. "add_remove_lid/22"
+
+            # Always derive depth_dir from config — ignore hardcoded path in JSON
+            dd = os.path.join(ego_depth_base, ds, sid)
+
             obj_map.setdefault(obj, []).append((ds, sid, dd))
     if not obj_map:
         raise FileNotFoundError(
