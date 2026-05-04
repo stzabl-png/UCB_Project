@@ -249,6 +249,23 @@ python setup_weights.py --tool megasam  # MegaSAM only (21 MB)
 
 ### 3. Conda Environments
 
+> **First time only — install Miniconda if not present:**
+> ```bash
+> # Install Miniconda to your large disk (NOT /home if space is limited)
+> wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
+> bash Miniconda3-latest-Linux-x86_64.sh -b -p /data/miniconda3
+> echo 'export PATH="/data/miniconda3/bin:$PATH"' >> ~/.bashrc && source ~/.bashrc
+> # Accept the Terms of Service (required for new installs)
+> conda tos accept
+> ```
+
+> **If your data is on a separate large disk (e.g. /data/5TB):**
+> ```bash
+> # Create symlink so all scripts find data_hub automatically
+> mkdir -p /data/5TB/Affordance2Grasp
+> ln -s /data/5TB/Affordance2Grasp data_hub
+> ```
+
 ```bash
 # Environment A — Depth Pro  (Phase 1A Step 1)
 conda create -n depth-pro python=3.9 -y
@@ -274,6 +291,7 @@ python setup_weights.py --tool depthpro   # places depth_pro.pt in third_party/m
 ```bash
 conda create -n bundlesdf python=3.9 -y
 conda activate bundlesdf
+pip install "numpy<2.0"                  # ← pin FIRST before other packages
 pip install trimesh scipy h5py opencv-python natsort tqdm
 pip install "fast-simplification>=0.1.6"  # ← CRITICAL: without this, contact alignment takes 23 h not 15 min
 ```
@@ -787,3 +805,79 @@ python tools/vis_ego_contact.py --obj assemble_tile
 | Object pose | `batch_obj_pose.py` | `batch_obj_pose_ego.py` |
 | Contact alignment | 3D distance + depth-ratio rescaling | 2D pixel distance (SLAM scale cancels) |
 | Output HDF5 | `human_prior/{obj}.hdf5` | same format — directly mergeable |
+
+---
+
+## Troubleshooting
+
+Common issues encountered during fresh deployment:
+
+### T1 — `conda tos accept` error on `conda create`
+```
+CondaError: Please accept the Terms of Service
+```
+**Fix:** `conda tos accept` then retry.
+
+### T2 — `fast-simplification` crashes with numpy 2.x
+```
+TypeError: ... numpy incompatible
+```
+**Fix:** Pin numpy before installing:
+```bash
+pip install "numpy<2.0"
+pip install "fast-simplification>=0.1.6"
+```
+
+### T3 — `setup_weights.py` shows no output / seems stuck
+The script is working — HuggingFace downloads large files silently. Check disk activity:
+```bash
+watch -n 2 'ls -lh third_party/*/weights/ third_party/*/checkpoints/ 2>/dev/null | grep -v total'
+```
+Expect ~12 GB total. Takes 5–30 min depending on connection speed.
+
+### T4 — HaPTIC detectron2 build fails
+```
+error: command 'gcc' failed: No such file or directory
+```
+detectron2 must be compiled from source. Ensure build tools are present:
+```bash
+sudo apt-get install -y gcc g++ build-essential
+conda activate haptic
+pip install 'git+https://github.com/facebookresearch/detectron2.git'
+```
+Alternatively, install a pre-built wheel matching your CUDA version from:
+https://github.com/facebookresearch/detectron2/releases
+
+### T5 — HaPTIC `gdown` fails: `output/` directory not found
+```
+FileNotFoundError: [Errno 2] No such file or directory: 'output/'
+```
+**Fix:**
+```bash
+mkdir -p output
+# then re-run the gdown / one_click.sh command
+```
+
+### T6 — DATA_HUB path mismatch (data on large disk, project in /home)
+If your large dataset disk is mounted at e.g. `/data/5TB`:
+```bash
+# Inside the project directory:
+ln -s /data/5TB/Affordance2Grasp/data_hub data_hub
+# All scripts use config.DATA_HUB which auto-detects this symlink
+```
+
+### T7 — MANO download fails / not found
+MANO cannot be redistributed. Download manually:
+1. Register at [mano.is.tue.mpg.de](https://mano.is.tue.mpg.de)
+2. Download `mano_v1_2.zip`
+3. Place `MANO_RIGHT.pkl` and `MANO_LEFT.pkl` in both locations:
+   - `third_party/haptic/assets/mano/`
+   - `third_party/hawor/_DATA/data/mano/`
+
+### T8 — DexYCB download (~250 GB)
+DexYCB is not redistributable. Download from [dex-ycb.github.io](https://dex-ycb.github.io).
+Requires registering and using their provided download script.
+```bash
+# Extract to correct location:
+tar -xzf dex-ycb-*.tar.gz -C data_hub/RawData/ThirdPersonRawData/
+```
