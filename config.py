@@ -52,6 +52,10 @@ HAPTIC_DIR = os.environ.get("HAPTIC_DIR", os.path.join(PROJECT_DIR, "third_party
 ARCTIC_ROOT = os.environ.get("ARCTIC_ROOT", "")
 MANO_MODELS = os.path.join(ARCTIC_ROOT, "mano_v1_2", "models") if ARCTIC_ROOT else ""
 
+# FoundationPose — external clone required (cannot pip install)
+# Set via: export FP_ROOT=/path/to/FoundationPose
+FP_ROOT = os.environ.get("FP_ROOT", os.path.join(PROJECT_DIR, "third_party", "FoundationPose"))
+
 # OakInk annotation repo (for GT camera intrinsics in batch_haptic_oakink.py)
 OAKINK_ANNO_DIR = os.environ.get("OAKINK_ANNO_DIR", "")
 

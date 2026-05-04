@@ -136,6 +136,27 @@ def main():
               _st.returncode == 0,
               "fix: pip install 'setuptools<70'")
 
+        # Build toolchain checks
+        check("cmake available",
+              run("cmake-check", ["cmake", "--version"]))
+        check("nvcc available (for FP build)",
+              run("nvcc-check", ["nvcc", "--version"]))
+        check("FoundationPose cloned",
+              (PROJECT / "third_party" / "FoundationPose").exists() or
+              bool(os.environ.get("FP_ROOT", "")),
+              "export FP_ROOT=/path/to/FoundationPose or clone to third_party/FoundationPose")
+        fp_root = os.environ.get("FP_ROOT",
+                  str(PROJECT / "third_party" / "FoundationPose"))
+        check("FoundationPose built (mycpp)",
+              (Path(fp_root) / "mycpp" / "build").exists(),
+              "cd $FP_ROOT && bash build_all_conda.sh")
+
+        # Pre-flight system check
+        import shutil as _sh
+        check("disk space > 100 GB free",
+              _sh.disk_usage(str(PROJECT)).free > 100 * 1024**3,
+              f"free: {_sh.disk_usage(str(PROJECT)).free / 1024**3:.0f} GB")
+
     # ── Phase 1A ──────────────────────────────────────────────────
     if args.phase in (0, 1) and not args.skip_gpu:
         print("\n[PHASE 1A] Third-Person Pipeline (1 DexYCB sequence)")

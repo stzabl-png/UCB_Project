@@ -179,6 +179,36 @@ wait
 
 ## Setup
 
+### 0. Pre-flight System Check
+
+Run before installing anything to catch environment issues early:
+
+```bash
+nvidia-smi | grep "CUDA Version"   # check max supported CUDA (driver)
+nvcc --version                      # check compiler CUDA version (must match torch build)
+df -h /data /home                   # confirm > 500 GB free
+free -h                             # confirm > 32 GB RAM
+python3 --version                   # confirm Python ≥ 3.9
+cmake --version                     # confirm cmake present (needed for FP build)
+```
+
+> **CUDA Version Alignment** — critical to avoid build failures:
+> ```bash
+> # Check your driver's max supported CUDA:
+> nvidia-smi | grep "CUDA Version"   # e.g. "CUDA Version: 12.2"
+> # Choose your torch build accordingly:
+> #   Driver ≥ 12.0  →  use cu121
+> #   Driver 11.x    →  use cu118
+> # Install matching torch:
+> pip install torch==2.1.1+cu121 torchvision --index-url https://download.pytorch.org/whl/cu121
+> # or for 11.x:
+> pip install torch==2.1.1+cu118 torchvision --index-url https://download.pytorch.org/whl/cu118
+> ```
+> Also install cmake and ninja (required for FoundationPose CUDA build):
+> ```bash
+> conda install -c conda-forge cmake ninja -y
+> ```
+
 ### 1. Clone (with all dependencies)
 
 ```bash
@@ -291,9 +321,10 @@ python setup_weights.py --tool depthpro   # places depth_pro.pt in third_party/m
 ```bash
 conda create -n bundlesdf python=3.9 -y
 conda activate bundlesdf
-pip install "numpy<2.0"                  # ← pin FIRST before other packages
+conda install -c conda-forge cmake ninja -y  # ← required for FoundationPose CUDA build
+pip install "numpy<2.0"                      # ← pin FIRST before other packages
 pip install trimesh scipy h5py opencv-python natsort tqdm
-pip install "fast-simplification>=0.1.6"  # ← CRITICAL: without this, contact alignment takes 23 h not 15 min
+pip install "fast-simplification>=0.1.6"     # ← CRITICAL: without this, contact alignment takes 23 h not 15 min
 ```
 
 **Step 2 — Install HaPTIC**
@@ -310,9 +341,10 @@ cd ../..
 > FoundationPose requires compiling CUDA C++ extensions. A simple `pip install` is not sufficient.
 
 ```bash
-# Clone
-git clone https://github.com/NVlabs/FoundationPose.git /path/to/FoundationPose
-cd /path/to/FoundationPose
+# Clone and pin to a tested commit (main branch may have breaking changes)
+git clone https://github.com/NVlabs/FoundationPose.git third_party/FoundationPose
+cd third_party/FoundationPose
+git checkout 25e225a   # last tested commit — update if you verify a newer one works
 
 # Install Eigen3 3.4.0 (required for C++ build)
 conda install conda-forge::eigen=3.4.0 -y
@@ -326,6 +358,10 @@ pip install git+https://github.com/NVlabs/nvdiffrast.git
 
 # Build CUDA C++ extensions (takes ~3-5 min)
 bash build_all_conda.sh
+
+# Register FP_ROOT so pipeline scripts can find it
+echo 'export FP_ROOT="'"$(pwd)"'"' >> ~/.bashrc
+export FP_ROOT="$(pwd)"
 ```
 
 **Step 4 — Download model weights**
