@@ -129,11 +129,40 @@ python setup_weights.py --tool megasam  # MegaSAM only (21 MB)
 ```
 
 > **⚠️ MANO (license required — manual download)**
-> MANO cannot be redistributed. Register at [mano.is.tue.mpg.de](https://mano.is.tue.mpg.de/) and place:
+>
+> MANO cannot be redistributed. Register and download from [mano.is.tue.mpg.de](https://mano.is.tue.mpg.de/).
+> You need: `MANO_RIGHT.pkl` and `MANO_LEFT.pkl` from the `mano_v1_2` package.
+>
+> Place the files in **two locations** (both tools need their own copy):
+>
+> **HaPTIC:**
 > ```
 > third_party/haptic/assets/mano/
 >     MANO_RIGHT.pkl
 >     MANO_LEFT.pkl
+> ```
+>
+> **HaWoR:**
+> ```
+> third_party/hawor/_DATA/data/mano/
+>     MANO_RIGHT.pkl
+> third_party/hawor/_DATA/data_left/mano_left/
+>     MANO_LEFT.pkl
+> ```
+>
+> Quick copy commands (after extracting mano_v1_2.zip):
+> ```bash
+> MANO=/path/to/mano_v1_2/models
+>
+> # HaPTIC
+> mkdir -p third_party/haptic/assets/mano
+> cp $MANO/MANO_RIGHT.pkl $MANO/MANO_LEFT.pkl third_party/haptic/assets/mano/
+>
+> # HaWoR
+> mkdir -p third_party/hawor/_DATA/data/mano
+> mkdir -p third_party/hawor/_DATA/data_left/mano_left
+> cp $MANO/MANO_RIGHT.pkl third_party/hawor/_DATA/data/mano/
+> cp $MANO/MANO_LEFT.pkl  third_party/hawor/_DATA/data_left/mano_left/
 > ```
 
 
