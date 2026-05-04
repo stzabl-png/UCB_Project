@@ -9,10 +9,11 @@ Usage:
     python setup_weights.py --tool fp  # download only FoundationPose weights
 
 Tools:
-    fp      — FoundationPose  (248 MB)
-    hawor   — HaWoR           (3.6 GB, checkpoints + external)
-    haptic  — HaPTIC vitpose  (3.8 GB)
-    megasam — MegaSAM         (21 MB)
+    fp       — FoundationPose  (248 MB)
+    hawor    — HaWoR           (3.6 GB, checkpoints + external)
+    haptic   — HaPTIC vitpose  (3.8 GB)
+    megasam  — MegaSAM         (21 MB)
+    depthpro — Apple Depth Pro (1.9 GB, avoids Apple CDN firewall issues)
 
 Notes:
     - MANO model weights require manual registration at https://mano.is.tue.mpg.de/
@@ -137,11 +138,27 @@ def download_megasam():
     print("✅ MegaSAM done")
 
 
+def download_depthpro():
+    print("\n📥 Depth Pro checkpoint (~1.9 GB)...")
+    dest = PROJECT / "third_party" / "ml-depth-pro" / "checkpoints" / "depth_pro.pt"
+    if dest.exists():
+        print("   ⏭️  depth_pro.pt already exists, skipping")
+        return
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    download_and_place(
+        patterns=["DepthPro/checkpoints/depth_pro.pt"],
+        local_prefix="DepthPro/checkpoints",
+        dest=dest.parent,
+    )
+    print("✅ Depth Pro done")
+
+
 TOOLS = {
-    "fp":      download_fp,
-    "hawor":   download_hawor,
-    "haptic":  download_haptic,
-    "megasam": download_megasam,
+    "fp":       download_fp,
+    "hawor":    download_hawor,
+    "haptic":   download_haptic,
+    "megasam":  download_megasam,
+    "depthpro": download_depthpro,
 }
 
 

@@ -117,7 +117,7 @@ All weights are hosted on HuggingFace. One script downloads everything:
 
 ```bash
 pip install huggingface_hub   # if not already installed
-python setup_weights.py       # downloads FP + HaWoR + HaPTIC + MegaSAM (~8 GB total)
+python setup_weights.py       # downloads FP + HaWoR + HaPTIC + MegaSAM + DepthPro (~12 GB total)
 ```
 
 To download a specific tool only:
@@ -172,8 +172,11 @@ python setup_weights.py --tool megasam  # MegaSAM only (21 MB)
 # Environment A — Depth Pro  (Phase 1A Step 1)
 conda create -n depth-pro python=3.9 -y
 conda activate depth-pro
-pip install git+https://github.com/apple/ml-depth-pro.git
+# Install from submodule (avoids Apple CDN firewall issues)
+pip install -e third_party/ml-depth-pro
 pip install natsort tqdm pillow numpy h5py
+# Download checkpoint via HuggingFace (Apple CDN may be blocked on remote servers)
+python setup_weights.py --tool depthpro   # places depth_pro.pt in third_party/ml-depth-pro/checkpoints/
 
 # Environment C — mega_sam  (Phase 1B Steps 1-2)
 # Follow mega-sam/README for setup
