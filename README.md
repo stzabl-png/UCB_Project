@@ -1084,21 +1084,18 @@ except ImportError:
 # mmengine: not installed (correct)
 ```
 
-### T16 — FoundationPose: `bundlesdf` Python 3.9 incompatibility (pytorch3d / nvdiffrast)
+### T16 — FoundationPose: `bundlesdf` Python 3.9 incompatibility (pytorch3d / nvdiffrast / mycpp)
 
 **Symptoms:**
 ```
-# pytorch3d missing in bundlesdf:
 ModuleNotFoundError: No module named 'pytorch3d'
-
-# nvdiffrast crashes on import:
-ImportError: /lib/x86_64-linux-gnu/libstdc++.so.6: version CXXABI_1.3.15 not found
+ImportError: version CXXABI_1.3.15 not found   # nvdiffrast binary wheel
+ModuleNotFoundError: No module named 'mycpp'   # old .so is cpython-39
 ```
 
-**Root cause:** `batch_obj_pose.py` requires `bundlesdf` to have **both** `pytorch3d` and
-`nvdiffrast`. Our reference environment uses **Python 3.10**. If `bundlesdf` was created
-with Python 3.9, pytorch3d wheels and compiled `.so` files are ABI-incompatible — you
-cannot copy them between versions.
+**Root cause:** `batch_obj_pose.py` requires `bundlesdf` to have `pytorch3d`, `nvdiffrast`,
+and a compiled `mycpp.so` — all built for the **same Python ABI**. Our reference is
+**Python 3.10**. A 3.9 env cannot use any of these.
 
 **Verified working stack:**
 
@@ -1106,38 +1103,58 @@ cannot copy them between versions.
 |---------|---------|-------|
 | Python | **3.10** | NOT 3.9 — ABI incompatible |
 | torch | 2.1.1+cu121 | same as haptic env |
-| pytorch3d | 0.7.5 | pre-built wheel for py310/cu121/torch2.1.1 |
-| nvdiffrast | latest | build from source to match system libstdc++ |
+| pytorch3d | 0.7.5 | pre-built wheel py310/cu121/torch2.1.1 |
+| nvdiffrast | 0.4.0 | compiled from source (NOT pip binary) |
+| mycpp | — | compiled from source with cmake |
 
-**Fix — rebuild `bundlesdf` as Python 3.10:**
+**Fix — full rebuild procedure:**
 ```bash
-# Remove old 3.9 env first
+# 1. Remove old env
 conda env remove -n bundlesdf -y
-
-# Recreate with Python 3.10
 conda create -n bundlesdf python=3.10 -y
 conda activate bundlesdf
 
-# PyTorch (match haptic env)
+# 2. PyTorch
 pip install torch==2.1.1 torchvision==0.16.1 \
     --index-url https://download.pytorch.org/whl/cu121
 
-# pytorch3d 0.7.5 pre-built for py310+cu121+torch2.1.1
+# 3. pytorch3d 0.7.5 (pre-built for py310+cu121+torch2.1.1)
 pip install pytorch3d \
     -f https://dl.fbaipublicfiles.com/pytorch3d/packaging/wheels/py310_cu121_pyt211/download.html
 
-# nvdiffrast from source (avoids CXXABI mismatch from binary wheels)
-pip install git+https://github.com/NVlabs/nvdiffrast.git
+# 4. nvdiffrast from source
+#    ⚠️ setuptools>=70 breaks source builds — pin it first
+pip install 'setuptools<70'
+git clone https://github.com/NVlabs/nvdiffrast.git /tmp/nvdiffrast_src
+export PATH=/usr/local/cuda/bin:$PATH   # nvcc must be on PATH
+pip install /tmp/nvdiffrast_src --no-build-isolation
 
-# FoundationPose requirements
+# 5. FoundationPose requirements
 cd /path/to/FoundationPose
 pip install -r requirements.txt
+pip install fast-simplification   # not always in requirements.txt
 
-# Compile mycpp (must run inside FP directory)
-conda run -n bundlesdf bash -c "cmake -B build && cmake --build build -j$(nproc)"
+# 6. Compile mycpp for Python 3.10
+#    System deps first:
+sudo apt-get install -y libeigen3-dev
+pip install pybind11 'cmake<4.0'
+#    Use pip-installed cmake (avoids system cmake version issues):
+CMAKE=$(python -c "import cmake,os; print(os.path.join(os.path.dirname(cmake.__file__),'data','bin','cmake'))")
+rm -rf /path/to/FoundationPose/mycpp/build
+$CMAKE -B /path/to/FoundationPose/mycpp/build \
+       /path/to/FoundationPose/mycpp/ \
+       -DPYTHON_EXECUTABLE=$(which python) \
+       -DCMAKE_BUILD_TYPE=Release \
+       -DCUDA_TOOLKIT_ROOT_DIR=/usr/local/cuda
+$CMAKE --build /path/to/FoundationPose/mycpp/build -j$(nproc)
+# → produces mycpp.cpython-310-x86_64-linux-gnu.so
 
-# Verify all three
-conda run -n bundlesdf python -c "
+# 7. Set FP_ROOT before running (config.py default is the empty submodule!)
+export FP_ROOT=/path/to/FoundationPose
+
+# 8. Verify all three
+cd /path/to/FoundationPose
+python -c "
 import sys; sys.path.insert(0, '.')
 import pytorch3d; print('pytorch3d:', pytorch3d.__version__)
 import nvdiffrast.torch; print('nvdiffrast: ok')
@@ -1146,19 +1163,26 @@ from mycpp import *; print('mycpp: ok')
 ```
 
 > **Why not just install pytorch3d into the existing 3.9 env?**
-> The pre-built wheel URL above is `py310` only. Building from source on 3.9 is
-> possible but takes ~30 min and often fails on older CUDA toolchains. Rebuilding
-> the env as 3.10 is faster and matches the reference machine exactly.
+> The pre-built wheel is `py310` only. Source build on 3.9 + older CUDA often fails.
+> Rebuilding as 3.10 takes ~15 min and matches the reference machine exactly.
 
-### T5 — HaPTIC `gdown` fails: `output/` directory not found
-```
-FileNotFoundError: [Errno 2] No such file or directory: 'output/'
-```
-**Fix:**
+### T5 — HaPTIC `gdown` / `one_click.sh`: `output/` not found + `_DATA/data/mano` symlink
+
+**Symptom 1:** `FileNotFoundError: output/`
 ```bash
 mkdir -p output
-# then re-run the gdown / one_click.sh command
+# then re-run one_click.sh
 ```
+
+**Symptom 2 (after weights download):** `FileNotFoundError: _DATA/data/mano/mano_mean_params.npz`
+HaPTIC looks for `_DATA/data/mano/` but model files are in `assets/mano/`:
+```bash
+# Run from inside third_party/haptic/
+mkdir -p _DATA/data
+ln -s ../../assets/mano _DATA/data/mano
+```
+> Note: `patches/haptic-intrinsics-fix.patch` (patch 1/2) adds the `mkdir -p output` fix
+> automatically. The `_DATA/data/mano` symlink still needs to be created manually.
 
 ### T6 — DATA_HUB path mismatch (data on large disk, project in /home)
 If your large dataset disk is mounted at e.g. `/data/5TB`:
@@ -1182,6 +1206,44 @@ MANO cannot be redistributed. Download manually:
    - `third_party/haptic/assets/mano/MANO_UV_left.obj`
    - `third_party/hawor/_DATA/data/mano/MANO_RIGHT.pkl`
    - `third_party/hawor/_DATA/data_left/mano_left/MANO_LEFT.pkl`
+
+### T7.5 — HaPTIC: `No module named 'webdataset'`
+
+```
+ModuleNotFoundError: No module named 'webdataset'
+```
+**Fix:**
+```bash
+conda activate haptic
+pip install webdataset
+```
+
+### T7.7 — FoundationPose: `obj_recon_input/ycb/` missing (initial mask not found)
+
+**Symptom:**
+```
+FileNotFoundError: .../obj_recon_input/ycb/ycb_dex_01/0.png
+```
+**Root cause:** FoundationPose requires a binary mask of the object in frame 0 to initialize
+pose estimation. These masks were hand-annotated using `tools/annotate_obj_mask_recon.py`
+and are stored in our HuggingFace repo. They are NOT generated automatically.
+
+**Fix — download from HuggingFace:**
+```bash
+python3 -c "
+from huggingface_hub import snapshot_download
+snapshot_download(
+    repo_id='UCBProject/Affordance2Grasp-Mesh',
+    repo_type='dataset',
+    local_dir='data_hub/ProcessedData',
+    allow_patterns=['obj_recon_input/ycb/**', 'obj_meshes/ycb/**'],
+    token='YOUR_HF_TOKEN',
+)
+"
+# Downloads:
+#   obj_recon_input/ycb/ycb_dex_01~20/0.png  (initial masks, 12 MB)
+#   obj_meshes/ycb/ycb_dex_01~20/mesh.ply    (object meshes, 999 MB)
+```
 
 ### T8 — DexYCB download (~250 GB)
 DexYCB is not redistributable. Download from [dex-ycb.github.io](https://dex-ycb.github.io).
