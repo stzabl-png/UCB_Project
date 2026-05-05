@@ -28,8 +28,26 @@ import config
 
 HAWOR_DIR   = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                             "third_party", "hawor")
+# Canonical source of run_hawor_seq.py is data/ (tracked in main project git).
+# We auto-copy it to HAWOR_DIR before each run so imports resolve correctly.
+_RUNNER_SRC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "run_hawor_seq.py")
 RUNNER      = os.path.join(HAWOR_DIR, "run_hawor_seq.py")
 CONDA_ENV   = "hawor"
+
+
+def _sync_runner():
+    """Copy data/run_hawor_seq.py → third_party/hawor/ if missing or outdated."""
+    import shutil
+    if not os.path.exists(_RUNNER_SRC):
+        raise FileNotFoundError(
+            f"run_hawor_seq.py not found at {_RUNNER_SRC}. "
+            "Please verify your git clone is up to date (git pull).")
+    if (not os.path.exists(RUNNER) or
+            os.path.getmtime(_RUNNER_SRC) > os.path.getmtime(RUNNER)):
+        shutil.copy2(_RUNNER_SRC, RUNNER)
+        print(f"[batch_hawor] synced run_hawor_seq.py → {RUNNER}")
+
+_sync_runner()
 
 OUT_BASE    = os.path.join(config.DATA_HUB, "ProcessedData", "ego_mano")
 
@@ -139,6 +157,7 @@ def run_sequence(video_path, out_npz, img_focal=None, force_rerun=False,
         "python", RUNNER,
         "--video_path", video_path,
         "--out_npz",    out_npz,
+        "--hawor_dir",  HAWOR_DIR,   # always explicit so script resolves paths correctly
     ]
     if img_focal is not None:
         cmd += ["--img_focal", str(img_focal)]
