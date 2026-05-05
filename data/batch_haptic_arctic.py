@@ -89,7 +89,7 @@ def run_haptic_on_images(model, model_cfg, img_paths, scene_name=None,
     from nnutils.det_utils import parse_det_seq
     from haptic.utils.renderer import cam_crop_to_full_w_depth, cam_crop_to_full_w_pp
 
-    hand_wrapper = ManopthWrapper().to(device)
+    hand_wrapper = ManopthWrapper(mano_path=config.HAPTIC_MANO_DIR).to(device)
     overlap = 1 if model_cfg.MODEL.NUM_FRAMES > 1 else 0
 
     # --- Intrinsics priority: precomputed_K > MegaSAM > HaPTIC heuristic ------

@@ -142,7 +142,7 @@ def run_haptic_oakink(model, model_cfg, frame_paths, K):
     from haptic.utils.renderer import cam_crop_to_full_w_depth, cam_crop_to_full_w_pp
     from data.megasam_utils import K_as_haptic_intrinsics
 
-    hand_wrapper   = ManopthWrapper().to(device)
+    hand_wrapper   = ManopthWrapper(mano_path=config.HAPTIC_MANO_DIR).to(device)
     overlap = 1 if model_cfg.MODEL.NUM_FRAMES > 1 else 0
 
     # GT 内参转换为 HaPTIC 9-element format

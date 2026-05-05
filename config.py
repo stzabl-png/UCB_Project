@@ -49,6 +49,10 @@ GRASPS_DIR = os.path.join(OUTPUT_DIR, "grasps")
 ISAAC_SIM_PATH = os.environ.get("ISAAC_SIM_PATH", "")
 HAWOR_DIR  = os.environ.get("HAWOR_DIR",  os.path.join(PROJECT_DIR, "third_party", "hawor"))
 HAPTIC_DIR = os.environ.get("HAPTIC_DIR", os.path.join(PROJECT_DIR, "third_party", "haptic"))
+HAPTIC_MANO_DIR = os.environ.get(
+    "HAPTIC_MANO_DIR",
+    os.path.join(HAPTIC_DIR, "assets", "mano")  # third_party/haptic/assets/mano/
+)
 ARCTIC_ROOT = os.environ.get("ARCTIC_ROOT", "")
 MANO_MODELS = os.path.join(ARCTIC_ROOT, "mano_v1_2", "models") if ARCTIC_ROOT else ""
 
