@@ -1,0 +1,81 @@
+From dae363b1c383d184161858b6da0b3a0e2811702d Mon Sep 17 00:00:00 2001
+From: stzabl-png <stzabl@berkeley.edu>
+Date: Mon, 4 May 2026 13:29:01 -0700
+Subject: [PATCH 1/2] fix: mkdir -p output before gdown to prevent
+ FileNotFoundError (#5c)
+
+---
+ scripts/dl_model.sh | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/scripts/dl_model.sh b/scripts/dl_model.sh
+index 854ceab..c79e172 100644
+--- a/scripts/dl_model.sh
++++ b/scripts/dl_model.sh
+@@ -1,6 +1,7 @@
+ set -x
+ 
+ # download haptic model
++mkdir -p output   # ensure output/ exists before gdown writes to it
+ gdown 1BX_gT__7hE47B_YUizUWfEfeqopLxloZ  -O output/haptic_model.tar.gz
+ 
+ tar -xvf output/haptic_model.tar.gz -C output/
+-- 
+2.43.0
+
+
+From c4109637e76b716dd541c7d2e4713548f6ff7721 Mon Sep 17 00:00:00 2001
+From: stzabl-png <stzabl@berkeley.edu>
+Date: Mon, 4 May 2026 17:16:45 -0700
+Subject: [PATCH 2/2] fix: add intrinsics param to parse_det_seq for
+ metric-scale K injection
+
+batch_haptic_arctic.py passes calibrated intrinsics from Depth Pro or
+MegaSAM via parse_det_seq(..., intrinsics=K). This overrides HaPTIC's
+default sqrt(W^2+H^2) focal heuristic with the true camera matrix.
+
+When intrinsics=None (default), original behaviour is preserved.
+---
+ nnutils/det_utils.py | 19 ++++++++++++++++---
+ 1 file changed, 16 insertions(+), 3 deletions(-)
+
+diff --git a/nnutils/det_utils.py b/nnutils/det_utils.py
+index e5f0a76..233fc64 100644
+--- a/nnutils/det_utils.py
++++ b/nnutils/det_utils.py
+@@ -74,7 +74,15 @@ def load_all_imgs(seq_dir, out_folder):
+     return img_paths, pkl_paths
+ 
+ 
+-def parse_det_seq(data_cfg, cfg, t0=0, skip=True):
++def parse_det_seq(data_cfg, cfg, t0=0, skip=True, intrinsics=None):
++    """Parse detection sequence.
++
++    Args:
++        intrinsics: optional 9-element list or (3,3) array with camera
++            intrinsics [fx, 0, cx, 0, fy, cy, 0, 0, 1].  When provided,
++            overrides HaPTIC's default sqrt(W^2+H^2) focal heuristic so that
++            metric-scale Depth-Pro / MegaSAM K can be used directly.
++    """
+     # TODO: lazy
+     detector, cpm = None, None
+     if data_cfg.video_list is not None:
+@@ -184,8 +192,13 @@ def parse_det_seq(data_cfg, cfg, t0=0, skip=True):
+             seq_info['cTw'] = np.tile(np.eye(4)[None], [T, 1, 1]) # null 
+             seq_info['is_right'] = np.array(is_right[side]) # (T,)
+             H, W = img_cv2.shape[:2]
+-            focal = (W**2 + H**2)**0.5
+-            intr = np.array([[focal, 0, W/2], [0, focal, H/2], [0, 0, 1]])
++            if intrinsics is not None:
++                # Use caller-provided calibrated intrinsics (Depth Pro / MegaSAM)
++                intr = np.array(intrinsics, dtype=np.float64).reshape(3, 3)
++            else:
++                # HaPTIC default: focal = sqrt(W^2 + H^2), principal = image centre
++                focal = (W**2 + H**2)**0.5
++                intr = np.array([[focal, 0, W/2], [0, focal, H/2], [0, 0, 1]])
+ 
+             x1, y1, x2, y2 = np.split(np.array(bboxes[side]), [1, 2, 3], -1)
+             c_x = (x1 + x2) / 2
+-- 
+2.43.0
+
