@@ -976,34 +976,69 @@ python -c "import manopth; print(manopth.__file__)"
 > Verified version: `0.0.1` from `hassony2/manopth` — no MANO model files needed for install,
 > but MANO `.pkl` files must still be placed manually (see T7).
 
-### T15 — HaPTIC: `No module named 'mmpose'`
+### T15 — HaPTIC: `No module named 'mmpose'` / mmengine version conflict
 
+**Symptoms (may appear in sequence):**
 ```
 ModuleNotFoundError: No module named 'mmpose'
+# or after installing mmpose from PyPI:
+ModuleNotFoundError: No module named 'mmengine'
+# or after installing mmengine:
+ERROR: mmengine requires mmcv >= 2.0.0rc4, but you have mmcv 1.3.9
 ```
 
-**Root cause:** `mmpose` is **not** the standalone PyPI package. HaPTIC uses `mmpose 0.24.0`
-from inside the **ViTPose** directory, installed as an editable package.
+**Root cause:** Two separate issues that compound each other:
 
-**Fix:**
+1. `mmpose` is **not** the standalone PyPI package — it is `mmpose 0.24.0` bundled inside
+   **ViTPose**, installed as an editable package. Installing from PyPI gives the wrong version.
+2. `mmengine` belongs to the **mmcv 2.x** ecosystem. Our haptic env uses **mmcv 1.x**.
+   The two are incompatible — installing `mmengine` into a 1.x env breaks everything.
+
+**Verified working stack** (confirmed on RTX 4080 SUPER):
+
+| Package | Version | Source |
+|---------|---------|--------|
+| `mmpose` | `0.24.0` | editable from `third-party/ViTPose/` |
+| `mmcv` | `1.3.9` | pip (NOT mmcv-full, NOT 2.x) |
+| `mmengine` | — | **not installed** |
+
+**Fix (complete, in order):**
 ```bash
 conda activate haptic
 
-# Step 1: editable install of mmpose from ViTPose
-cd third-party/ViTPose     # wherever you cloned ViTPose
+# Step 1: remove incorrectly installed packages
+pip uninstall mmengine mmpose -y
+
+# Step 2: clone ViTPose (if not already present)
+cd third_party/haptic/third-party
+git clone https://github.com/ViTAE-Transformer/ViTPose
+cd ViTPose
+
+# Step 3: editable install (this gives mmpose 0.24.0 from ViTPose)
 pip install -e .
 
-# Step 2: install matching mmcv (NOT mmcv-full)
-pip uninstall mmcv-full -y 2>/dev/null   # remove if installed
+# Step 4: install mmcv 1.3.9 (1.x series, not 2.x, not mmcv-full)
+pip uninstall mmcv-full mmcv -y 2>/dev/null
 pip install mmcv==1.3.9
 
-# Verify
-python -c "import mmpose; print(mmpose.__file__)"
-# Expected: .../third-party/ViTPose/mmpose/__init__.py
-```
+# Step 5: re-pin numpy (ViTPose install may upgrade it)
+pip install "numpy<2.0"
 
-> **Verified working:** mmpose 0.24.0 (editable from ViTPose) + mmcv 1.3.9  
-> If you installed mmcv-full 1.7.2 previously: uninstall it first, then install mmcv==1.3.9.
+# Verify
+python -c "
+import mmpose, mmcv
+print('mmpose:', mmpose.__version__, mmpose.__file__)
+print('mmcv:  ', mmcv.__version__)
+try:
+    import mmengine; print('mmengine: PRESENT (should not be!)')
+except ImportError:
+    print('mmengine: not installed (correct)')
+"
+# Expected output:
+# mmpose: 0.24.0  .../third-party/ViTPose/mmpose/__init__.py
+# mmcv:   1.3.9
+# mmengine: not installed (correct)
+```
 
 ### T5 — HaPTIC `gdown` fails: `output/` directory not found
 ```
