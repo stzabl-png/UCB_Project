@@ -976,6 +976,35 @@ python -c "import manopth; print(manopth.__file__)"
 > Verified version: `0.0.1` from `hassony2/manopth` — no MANO model files needed for install,
 > but MANO `.pkl` files must still be placed manually (see T7).
 
+### T15 — HaPTIC: `No module named 'mmpose'`
+
+```
+ModuleNotFoundError: No module named 'mmpose'
+```
+
+**Root cause:** `mmpose` is **not** the standalone PyPI package. HaPTIC uses `mmpose 0.24.0`
+from inside the **ViTPose** directory, installed as an editable package.
+
+**Fix:**
+```bash
+conda activate haptic
+
+# Step 1: editable install of mmpose from ViTPose
+cd third-party/ViTPose     # wherever you cloned ViTPose
+pip install -e .
+
+# Step 2: install matching mmcv (NOT mmcv-full)
+pip uninstall mmcv-full -y 2>/dev/null   # remove if installed
+pip install mmcv==1.3.9
+
+# Verify
+python -c "import mmpose; print(mmpose.__file__)"
+# Expected: .../third-party/ViTPose/mmpose/__init__.py
+```
+
+> **Verified working:** mmpose 0.24.0 (editable from ViTPose) + mmcv 1.3.9  
+> If you installed mmcv-full 1.7.2 previously: uninstall it first, then install mmcv==1.3.9.
+
 ### T5 — HaPTIC `gdown` fails: `output/` directory not found
 ```
 FileNotFoundError: [Errno 2] No such file or directory: 'output/'
