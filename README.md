@@ -367,7 +367,9 @@ python setup_weights.py --tool depthpro   # places depth_pro.pt in third_party/m
 # Follow mega-sam/README for setup
 
 # Environment D — hawor  (Phase 1B Step 3)
-# Follow third_party/hawor/README for setup
+# ⚠️  DO NOT follow third_party/hawor/README blindly!
+#     HaWoR's own README specifies torch 1.13+cu117 which is WRONG for our stack.
+#     We use torch 2.1.0+cu121. See Section 3d below for the correct setup.
 ```
 
 ### 3b. Environment B — `bundlesdf` (main environment)
@@ -376,7 +378,9 @@ python setup_weights.py --tool depthpro   # places depth_pro.pt in third_party/m
 
 **Step 1 — Create the environment**
 ```bash
-conda create -n bundlesdf python=3.9 -y
+# ⚠️  Must be Python 3.10 — NOT 3.9
+# pytorch3d 0.7.5 pre-built wheel is py310 only; nvdiffrast ABI also requires 3.10
+conda create -n bundlesdf python=3.10 -y
 conda activate bundlesdf
 conda install -c conda-forge cmake ninja -y  # ← required for FoundationPose CUDA build
 pip install "numpy<2.0"                      # ← pin FIRST before other packages
@@ -479,6 +483,46 @@ FP_ROOT = "/path/to/FoundationPose"
 DATA_HUB   = "/path/to/data_hub"
 HAPTIC_DIR = "/path/to/HaPTIC"
 FP_ROOT    = "/path/to/FoundationPose"
+```
+
+### 3c. Environment D — `hawor` (Phase 1B Step E2)
+
+> ⚠️ **Do NOT follow `third_party/hawor/README.md` for the conda setup.**
+> HaWoR's own README specifies `torch==1.13+cu117`. That is its original dev environment.
+> We run on **CUDA 12.1** and need `torch==2.1.0+cu121` to match the rest of the pipeline.
+
+```bash
+conda create -n hawor python=3.10 -y
+conda activate hawor
+
+# 1. PyTorch 2.1.0 + CUDA 12.1  (NOT torch 1.13 as HaWoR README says)
+pip install torch==2.1.0 torchvision==0.16.0 \
+    --index-url https://download.pytorch.org/whl/cu121
+
+# 2. torch-scatter — must use pre-built wheel matching torch+CUDA exactly
+#    Building from source against the wrong CUDA (11.7 vs 12.1) will fail
+pip install torch-scatter \
+    -f https://data.pyg.org/whl/torch-2.1.0+cu121.html
+
+# 3. pytorch3d 0.7.5 pre-built for py310+cu121+torch2.1.0
+pip install pytorch3d \
+    -f https://dl.fbaipublicfiles.com/pytorch3d/packaging/wheels/py310_cu121_pyt210/download.html
+
+# 4. HaWoR dependencies (from submodule, skip their torch/scatter lines)
+cd third_party/hawor
+pip install -r requirements.txt   # install remaining deps (excludes torch/scatter above)
+cd ../..
+
+# 5. Verify
+python -c "
+import torch; print('torch:', torch.__version__)
+import torch_scatter; print('torch_scatter:', torch_scatter.__version__)
+import pytorch3d; print('pytorch3d:', pytorch3d.__version__)
+"
+# Expected:
+# torch: 2.1.0+cu121
+# torch_scatter: 2.1.2+pt21cu121
+# pytorch3d: 0.7.5
 ```
 
 ### 4. Data layout
