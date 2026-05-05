@@ -209,6 +209,19 @@ cmake --version                     # confirm cmake present (needed for FP build
 > conda install -c conda-forge cmake ninja -y
 > ```
 
+> **GPU Architecture Compatibility** — check before choosing torch version:
+> ```bash
+> nvidia-smi --query-gpu=name,compute_cap --format=csv
+> ```
+>
+> | Architecture | Examples | sm | torch 2.1.1 | Action |
+> |---|---|---|---|---|
+> | Ampere | A100, A30, RTX 3090 | sm_80/86 | ✅ | Use cu118 or cu121 |
+> | Ada Lovelace | RTX 4080/4090, RTX 6000 Ada | sm_89 | ✅ | Use cu121 |
+> | Blackwell | RTX 5090, RTX 6000 Pro (2025) | sm_120 | ❌ | See T12 below |
+>
+> If `compute_cap` ≥ `12.0` you have a **Blackwell GPU** — see **Troubleshooting T12**.
+
 ### 1. Clone (with all dependencies)
 
 ```bash
@@ -1023,3 +1036,44 @@ sudo apt-get install -y \
 # 3. Python build tools (install in each conda env before other packages)
 pip install "cmake<4.0" ninja pybind11 "setuptools<70" "numpy<2.0"
 ```
+
+### T12 — Blackwell GPU (sm_120): `no kernel image is available for execution on the device`
+
+**Affected GPUs:** RTX 5090, RTX 6000 Pro (2025 Blackwell generation)  
+**Root cause:** `torch 2.1.1` was compiled only up to sm_90. Blackwell (sm_120) kernels are not included.
+
+**Verify your architecture:**
+```bash
+nvidia-smi --query-gpu=name,compute_cap --format=csv
+# compute_cap = 12.0 or higher → you have Blackwell → follow this fix
+```
+
+**Fix: upgrade the entire haptic env torch stack to 2.7+**
+```bash
+conda activate haptic
+
+# Step 1: upgrade torch to Blackwell-compatible build
+pip install torch==2.7.0+cu128 torchvision==0.22.0+cu128 \
+  --index-url https://download.pytorch.org/whl/cu128
+
+# Step 2: upgrade xformers to matching version
+pip install xformers --index-url https://download.pytorch.org/whl/cu128
+
+# Step 3: pytorch3d has no cu128 prebuilt wheel — compile from source (~15 min)
+pip install "git+https://github.com/facebookresearch/pytorch3d.git"
+
+# Step 4: recompile detectron2 (torch ABI change requires rebuild)
+pip install --force-reinstall "setuptools<70"
+git clone --depth 1 https://github.com/facebookresearch/detectron2.git /tmp/det2
+pip install /tmp/det2 --no-build-isolation
+
+# Step 5: re-pin numpy (pytorch3d compile may upgrade it)
+pip install "numpy<2.0"
+```
+
+> **Note on other envs:** `depth-pro` and `bundlesdf` environments can use `cu128` directly  
+> (e.g. `pip install torch==2.7.0+cu128 ...`). FoundationPose CUDA extensions must also be  
+> recompiled with the matching CUDA toolkit.
+
+> **Verified working on:** RTX 4080 SUPER (sm_89) with torch 2.1.1+cu121  
+> **Reported working on Blackwell after upgrade:** RTX 5090 (sm_120) with torch 2.7.0+cu128
