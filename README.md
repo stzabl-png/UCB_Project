@@ -956,6 +956,26 @@ python -c "import xformers; import torch; print(torch.__version__, xformers.__ve
 > **For Blackwell GPUs (sm_120):** Use the T12 upgrade path instead — torch 2.7+cu128 with
 > matching xformers from `--index-url https://download.pytorch.org/whl/cu128`.
 
+### T14 — HaPTIC: `No module named 'manopth'`
+
+```
+ModuleNotFoundError: No module named 'manopth'
+```
+
+**Root cause:** `manopth` is not on PyPI. It must be installed directly from GitHub.
+
+**Fix:**
+```bash
+conda activate haptic
+pip install git+https://github.com/hassony2/manopth.git
+
+# Verify
+python -c "import manopth; print(manopth.__file__)"
+```
+
+> Verified version: `0.0.1` from `hassony2/manopth` — no MANO model files needed for install,
+> but MANO `.pkl` files must still be placed manually (see T7).
+
 ### T5 — HaPTIC `gdown` fails: `output/` directory not found
 ```
 FileNotFoundError: [Errno 2] No such file or directory: 'output/'
