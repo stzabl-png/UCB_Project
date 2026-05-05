@@ -1084,6 +1084,72 @@ except ImportError:
 # mmengine: not installed (correct)
 ```
 
+### T16 — FoundationPose: `bundlesdf` Python 3.9 incompatibility (pytorch3d / nvdiffrast)
+
+**Symptoms:**
+```
+# pytorch3d missing in bundlesdf:
+ModuleNotFoundError: No module named 'pytorch3d'
+
+# nvdiffrast crashes on import:
+ImportError: /lib/x86_64-linux-gnu/libstdc++.so.6: version CXXABI_1.3.15 not found
+```
+
+**Root cause:** `batch_obj_pose.py` requires `bundlesdf` to have **both** `pytorch3d` and
+`nvdiffrast`. Our reference environment uses **Python 3.10**. If `bundlesdf` was created
+with Python 3.9, pytorch3d wheels and compiled `.so` files are ABI-incompatible — you
+cannot copy them between versions.
+
+**Verified working stack:**
+
+| Package | Version | Notes |
+|---------|---------|-------|
+| Python | **3.10** | NOT 3.9 — ABI incompatible |
+| torch | 2.1.1+cu121 | same as haptic env |
+| pytorch3d | 0.7.5 | pre-built wheel for py310/cu121/torch2.1.1 |
+| nvdiffrast | latest | build from source to match system libstdc++ |
+
+**Fix — rebuild `bundlesdf` as Python 3.10:**
+```bash
+# Remove old 3.9 env first
+conda env remove -n bundlesdf -y
+
+# Recreate with Python 3.10
+conda create -n bundlesdf python=3.10 -y
+conda activate bundlesdf
+
+# PyTorch (match haptic env)
+pip install torch==2.1.1 torchvision==0.16.1 \
+    --index-url https://download.pytorch.org/whl/cu121
+
+# pytorch3d 0.7.5 pre-built for py310+cu121+torch2.1.1
+pip install pytorch3d \
+    -f https://dl.fbaipublicfiles.com/pytorch3d/packaging/wheels/py310_cu121_pyt211/download.html
+
+# nvdiffrast from source (avoids CXXABI mismatch from binary wheels)
+pip install git+https://github.com/NVlabs/nvdiffrast.git
+
+# FoundationPose requirements
+cd /path/to/FoundationPose
+pip install -r requirements.txt
+
+# Compile mycpp (must run inside FP directory)
+conda run -n bundlesdf bash -c "cmake -B build && cmake --build build -j$(nproc)"
+
+# Verify all three
+conda run -n bundlesdf python -c "
+import sys; sys.path.insert(0, '.')
+import pytorch3d; print('pytorch3d:', pytorch3d.__version__)
+import nvdiffrast.torch; print('nvdiffrast: ok')
+from mycpp import *; print('mycpp: ok')
+"
+```
+
+> **Why not just install pytorch3d into the existing 3.9 env?**
+> The pre-built wheel URL above is `py310` only. Building from source on 3.9 is
+> possible but takes ~30 min and often fails on older CUDA toolchains. Rebuilding
+> the env as 3.10 is faster and matches the reference machine exactly.
+
 ### T5 — HaPTIC `gdown` fails: `output/` directory not found
 ```
 FileNotFoundError: [Errno 2] No such file or directory: 'output/'
