@@ -337,7 +337,9 @@ def main():
     parser.add_argument("--dataset",    default=None,
                         choices=["arctic", "oakink", "ho3d_v3", "dexycb"])
     parser.add_argument("--seq",        default=None, help="seq_id 子串过滤")
-    parser.add_argument("--limit",      type=int, default=0, help="最多处理几个序列（0=全部）")
+    parser.add_argument("--limit",      type=int, default=0, help="最多处理几个序列（0=全部，smoke test用）")
+    parser.add_argument("--start",      type=int, default=0, help="分片起始索引（含），多GPU并行用")
+    parser.add_argument("--end",        type=int, default=0, help="分片结束索引（不含），0=处理到末尾")
     parser.add_argument("--redo",       action="store_true")
     parser.add_argument("--est-iter",   type=int, default=5)
     parser.add_argument("--track-iter", type=int, default=2)
@@ -363,6 +365,10 @@ def main():
         seqs = [(ds, sid, mds, onm, mp) for ds, sid, mds, onm, mp in seqs if args.seq in sid]
     if args.limit > 0:
         seqs = seqs[:args.limit]
+    if args.start > 0 or args.end > 0:
+        end = args.end if args.end > 0 else len(seqs)
+        seqs = seqs[args.start:end]
+        print(f"[Shard] seqs [{args.start}:{end}] = {len(seqs)}")
 
     print(f"\n{'='*60}")
     print(f" FoundationPose Batch Pose Estimation")

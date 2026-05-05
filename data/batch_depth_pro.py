@@ -287,7 +287,9 @@ def main():
     parser.add_argument("--dataset",    required=True, choices=list(DISCOVERERS.keys()))
     parser.add_argument("--input-dir",  default=None)
     parser.add_argument("--seq",        default=None, help="Substring match for sequence ID")
-    parser.add_argument("--limit",      type=int, default=0, help="Process first N sequences only")
+    parser.add_argument("--limit",      type=int, default=0, help="Process first N sequences only (for smoke tests)")
+    parser.add_argument("--start",      type=int, default=0,  help="Shard start index (inclusive) for multi-GPU parallelism")
+    parser.add_argument("--end",        type=int, default=0,  help="Shard end index (exclusive), 0=process all remaining")
     parser.add_argument("--max-frames", type=int, default=150,
                         help="Max frames per sequence for Pass 2 / normal mode (default 150)")
     parser.add_argument("--cam",        default=None,
@@ -342,6 +344,11 @@ def main():
         sequences = [(sid, imgs) for sid, imgs in sequences if args.seq in sid]
     if args.limit > 0:
         sequences = sequences[:args.limit]
+    # Shard: --start/--end for multi-GPU parallelism
+    if args.start > 0 or args.end > 0:
+        end = args.end if args.end > 0 else len(sequences)
+        sequences = sequences[args.start:end]
+        print(f"[Shard] Processing sequences [{args.start}:{end}] = {len(sequences)} seqs")
 
     print(f"Found {len(sequences)} sequences\n")
 

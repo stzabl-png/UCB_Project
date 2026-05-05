@@ -204,7 +204,9 @@ def main():
     parser.add_argument("--max-frames", type=int, default=300,
                         help="Max frames per sequence to keep (default 300)")
     parser.add_argument("--limit", type=int, default=0,
-                        help="Process only first N sequences (0=all)")
+                        help="Process first N sequences only (for smoke tests)")
+    parser.add_argument("--start", type=int, default=0, help="Shard start index (inclusive)")
+    parser.add_argument("--end",   type=int, default=0, help="Shard end index (exclusive), 0=all remaining")
     parser.add_argument("--skip-existing", action="store_true", default=True,
                         help="Skip sequences that already have cached output")
     parser.add_argument("--only-with-depth-k", action="store_true", default=False,
@@ -238,6 +240,10 @@ def main():
         print(f"  [--only-with-depth-k] {before} → {len(sequences)} sequences (have K.txt)")
     if args.limit > 0:
         sequences = sequences[:args.limit]
+    if args.start > 0 or args.end > 0:
+        end = args.end if args.end > 0 else len(sequences)
+        sequences = sequences[args.start:end]
+        print(f"[Shard] sequences [{args.start}:{end}] = {len(sequences)}")
 
     print(f"Found {len(sequences)} sequences\n")
 

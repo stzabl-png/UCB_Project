@@ -183,6 +183,8 @@ def parse_args():
                    help="Re-run even if output .npz already exists")
     p.add_argument("--timeout",      type=int, default=3600,
                    help="Per-sequence subprocess timeout in seconds")
+    p.add_argument("--start",        type=int, default=0, help="Shard start index (inclusive)")
+    p.add_argument("--end",          type=int, default=0, help="Shard end index (exclusive), 0=all remaining")
     return p.parse_args()
 
 
@@ -210,6 +212,10 @@ def main():
                      if "/".join(sid.split("/")[1:]) in wanted]
     elif args.seq:
         sequences = [(sid, imgs, t) for sid, imgs, t in sequences if args.seq in sid]
+    if args.start > 0 or args.end > 0:
+        end = args.end if args.end > 0 else len(sequences)
+        sequences = sequences[args.start:end]
+        print(f"[Shard] sequences [{args.start}:{end}] = {len(sequences)}")
     print(f"Found {len(sequences)} sequences\n")
 
     done = skipped = failed = 0
