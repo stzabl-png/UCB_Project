@@ -513,16 +513,25 @@ cd third_party/hawor
 pip install -r requirements.txt   # install remaining deps (excludes torch/scatter above)
 cd ../..
 
-# 5. Verify
+# 5. Pin pytorch-lightning + torchmetrics AFTER requirements.txt
+#    requirements.txt may pull incompatible versions; these pins override them.
+#    ⚠️  lightning 2.3+ has breaking changes; torchmetrics must match lightning 2.2.x
+pip install pytorch-lightning==2.2.4 torchmetrics==1.4.0
+
+# 6. Verify all key packages
 python -c "
 import torch; print('torch:', torch.__version__)
 import torch_scatter; print('torch_scatter:', torch_scatter.__version__)
 import pytorch3d; print('pytorch3d:', pytorch3d.__version__)
+import pytorch_lightning as pl; print('pytorch_lightning:', pl.__version__)
+import torchmetrics; print('torchmetrics:', torchmetrics.__version__)
 "
 # Expected:
 # torch: 2.1.0+cu121
 # torch_scatter: 2.1.2+pt21cu121
 # pytorch3d: 0.7.5
+# pytorch_lightning: 2.2.4
+# torchmetrics: 1.4.0
 ```
 
 ### 4. Data layout
@@ -1250,6 +1259,33 @@ MANO cannot be redistributed. Download manually:
    - `third_party/haptic/assets/mano/MANO_UV_left.obj`
    - `third_party/hawor/_DATA/data/mano/MANO_RIGHT.pkl`
    - `third_party/hawor/_DATA/data_left/mano_left/MANO_LEFT.pkl`
+
+### T7.3 — HaWoR: `pytorch-lightning` / `torchmetrics` version mismatch
+
+**Symptom:** Error during HaWoR training/inference involving `torchmetrics` or `Callback` API:
+```
+AttributeError: ... has no attribute ...   # lightning 2.3+ broke API
+TypeError: ... unexpected keyword argument  # torchmetrics incompatible with lightning 2.2
+```
+
+**Root cause:** `third_party/hawor/requirements.txt` does not pin lightning/torchmetrics
+versions. `pip install -r requirements.txt` may pull the latest (e.g. lightning 2.3+),
+which has breaking changes incompatible with HaWoR's training code.
+
+**Verified compatible versions:**
+
+| Package | Version |
+|---------|---------|
+| pytorch-lightning | **2.2.4** |
+| torchmetrics | **1.4.0** |
+
+**Fix — always run this AFTER `pip install -r requirements.txt`:**
+```bash
+conda activate hawor
+pip install pytorch-lightning==2.2.4 torchmetrics==1.4.0
+```
+
+> The `requirements.txt` install may silently upgrade these. Always re-pin after.
 
 ### T7.5 — HaPTIC: `No module named 'webdataset'`
 
