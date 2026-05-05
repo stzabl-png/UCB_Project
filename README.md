@@ -915,6 +915,47 @@ pip install /tmp/detectron2_src --no-build-isolation
 > **Note:** Any subsequent `pip install` may upgrade setuptools back to ≥70.
 > Always re-run `pip install --force-reinstall "setuptools<70"` after installing new packages in the `haptic` env.
 
+### T13 — HaPTIC xformers: `No module named 'xformers'` or version conflict
+
+```
+ModuleNotFoundError: No module named 'xformers'
+# or after installing latest xformers:
+ERROR: xformers 0.0.35 requires torch >= 2.10, but you have torch 2.1.1
+```
+
+**Root cause:** `xformers` must be pinned to match the exact `torch` version.
+The latest `xformers` (≥ 0.0.29) requires `torch ≥ 2.4`, which is incompatible with haptic's `torch 2.1.1`.
+
+**Verified working combination** (confirmed on RTX 4080 SUPER):
+
+| Package | Version |
+|---------|---------|
+| `torch` | `2.1.1+cu121` |
+| `xformers` | **`0.0.23`** |
+| `torchvision` | `0.16.1+cu121` |
+| `numpy` | `1.26.4` |
+| `detectron2` | `0.6` |
+| `pytorch3d` | `0.7.5` |
+
+**Fix:**
+```bash
+conda activate haptic
+
+# Install exact matching versions
+pip install torch==2.1.1+cu121 torchvision==0.16.1+cu121 torchaudio==2.1.1+cu121 \
+    --index-url https://download.pytorch.org/whl/cu121
+
+pip install xformers==0.0.23 \
+    --index-url https://download.pytorch.org/whl/cu121
+
+# Verify
+python -c "import xformers; import torch; print(torch.__version__, xformers.__version__)"
+# Expected: 2.1.1+cu121  0.0.23
+```
+
+> **For Blackwell GPUs (sm_120):** Use the T12 upgrade path instead — torch 2.7+cu128 with
+> matching xformers from `--index-url https://download.pytorch.org/whl/cu128`.
+
 ### T5 — HaPTIC `gdown` fails: `output/` directory not found
 ```
 FileNotFoundError: [Errno 2] No such file or directory: 'output/'
