@@ -364,12 +364,15 @@ pip install natsort tqdm pillow numpy h5py
 python setup_weights.py --tool depthpro   # places depth_pro.pt in third_party/ml-depth-pro/checkpoints/
 
 # Environment C — mega_sam  (Phase 1B Steps 1-2)
-# Follow mega-sam/README for setup
+# ⚠️  DO NOT follow mega-sam/README blindly!
+#     MegaSAM's README specifies torch 2.0.1+cu118. We use torch 2.2.0+cu121.
+#     Also: droid_backends (.so) must be compiled from source via lietorch.
+#     See Section 3d below for the correct setup.
 
 # Environment D — hawor  (Phase 1B Step 3)
 # ⚠️  DO NOT follow third_party/hawor/README blindly!
 #     HaWoR's own README specifies torch 1.13+cu117 which is WRONG for our stack.
-#     We use torch 2.1.0+cu121. See Section 3d below for the correct setup.
+#     We use torch 2.1.0+cu121. See Section 3e below for the correct setup.
 ```
 
 ### 3b. Environment B — `bundlesdf` (main environment)
@@ -485,7 +488,54 @@ HAPTIC_DIR = "/path/to/HaPTIC"
 FP_ROOT    = "/path/to/FoundationPose"
 ```
 
-### 3c. Environment D — `hawor` (Phase 1B Step E2)
+### 3d. Environment C — `mega_sam` (Phase 1B Steps E1)
+
+> ⚠️ **Do NOT follow `mega-sam/README.md` for the conda setup.**
+> MegaSAM's README specifies `torch==2.0.1+cu118`. We use **torch 2.2.0+cu121**.
+> Also, `droid_backends` is a compiled C++ extension from `lietorch` — it is NOT
+> pip-installable and must be built from source.
+
+```bash
+conda create -n mega_sam python=3.10 -y
+conda activate mega_sam
+
+# 1. PyTorch 2.2.0 + CUDA 12.1  (NOT torch 2.0.1 as MegaSAM README says)
+pip install torch==2.2.0 torchvision==0.17.0 \
+    --index-url https://download.pytorch.org/whl/cu121
+
+# 2. xformers — must match torch version exactly
+pip install xformers==0.0.24
+
+# 3. MegaSAM Python dependencies (from submodule)
+cd mega-sam
+pip install -r requirements.txt
+cd ..
+
+# 4. Build lietorch from source (provides droid_backends.cpython-310-*.so)
+#    ⚠️  This is REQUIRED — there is no pip wheel for droid_backends
+#    System deps first:
+sudo apt-get install -y libsuitesparse-dev libeigen3-dev
+cd mega-sam/base/thirdparty/lietorch
+pip install -e . --no-build-isolation   # compiles CUDA extensions (~5 min)
+cd ../../../..
+
+# 5. Verify all key packages
+python -c "
+import torch; print('torch:', torch.__version__)
+import xformers; print('xformers:', xformers.__version__)
+import droid_backends; print('droid_backends: ok')
+"
+# Expected:
+# torch: 2.2.0+cu121
+# xformers: 0.0.24
+# droid_backends: ok
+```
+
+> **Why does `droid_backends` fail?** It is a custom CUDA C++ module compiled
+> by `pip install -e .` inside `mega-sam/base/thirdparty/lietorch/`. If you skip
+> step 4, you get `ModuleNotFoundError: No module named 'droid_backends'`.
+
+### 3e. Environment D — `hawor` (Phase 1B Step E2)
 
 > ⚠️ **Do NOT follow `third_party/hawor/README.md` for the conda setup.**
 > HaWoR's own README specifies `torch==1.13+cu117`. That is its original dev environment.
