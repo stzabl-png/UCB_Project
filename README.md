@@ -235,6 +235,18 @@ cd Affordance2Grasp
 > git submodule update --init --recursive
 > ```
 
+> **⚠️ Required: apply patches after submodule init**
+> The `third_party/haptic` submodule is pinned to the upstream public commit.
+> Our pipeline additions (metric-scale intrinsics injection) are maintained as patches.
+> **You must apply them every time after `git submodule update`:**
+> ```bash
+> cd third_party/haptic
+> git apply ../../patches/haptic-intrinsics-fix.patch
+> cd ../..
+> ```
+> Without this, `batch_haptic.py` will crash with:
+> `TypeError: parse_det_seq() got an unexpected keyword argument 'intrinsics'`
+
 ### 2. Download Model Weights
 
 All weights are hosted on HuggingFace. One script downloads everything:
