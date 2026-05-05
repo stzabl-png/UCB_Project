@@ -255,18 +255,32 @@ python setup_weights.py --tool megasam  # MegaSAM only (21 MB)
 > **⚠️ MANO (license required — manual download)**
 >
 > MANO cannot be redistributed. Register and download from [mano.is.tue.mpg.de](https://mano.is.tue.mpg.de/).
-> You need: `MANO_RIGHT.pkl` and `MANO_LEFT.pkl` from the `mano_v1_2` package.
+> You need **all of the following files** from the MANO package:
 >
-> Place the files in **two locations** (both tools need their own copy):
+> | File | Source |
+> |------|--------|
+> | `MANO_RIGHT.pkl` | `mano_v1_2.zip` → `models/` |
+> | `MANO_LEFT.pkl` | `mano_v1_2.zip` → `models/` |
+> | `MANO_UV_right.obj` | MANO extras / SMPL-X data pack (see note below) |
+> | `MANO_UV_left.obj` | MANO extras / SMPL-X data pack |
 >
-> **HaPTIC:**
+> > **Where to get `MANO_UV_*.obj`:** These UV mesh files are **not** in `mano_v1_2.zip`.
+> > Download the **SMPL-X** or **SMPL+H** package from [smpl-x.is.tue.mpg.de](https://smpl-x.is.tue.mpg.de/)
+> > or look for "Additional body model files" on the MANO download page.
+> > The files are typically under `body_models/mano/` or `extras/` in those archives.
+>
+> Place all files in **two locations**:
+>
+> **HaPTIC** (needs UV mesh + pkl):
 > ```
 > third_party/haptic/assets/mano/
 >     MANO_RIGHT.pkl
 >     MANO_LEFT.pkl
+>     MANO_UV_right.obj        ← required for hand UV rendering
+>     MANO_UV_left.obj
 > ```
 >
-> **HaWoR:**
+> **HaWoR** (pkl only):
 > ```
 > third_party/hawor/_DATA/data/mano/
 >     MANO_RIGHT.pkl
@@ -274,15 +288,17 @@ python setup_weights.py --tool megasam  # MegaSAM only (21 MB)
 >     MANO_LEFT.pkl
 > ```
 >
-> Quick copy commands (after extracting mano_v1_2.zip):
+> Quick copy commands (after extracting mano_v1_2.zip and obtaining UV obj files):
 > ```bash
-> MANO=/path/to/mano_v1_2/models
+> MANO=/path/to/mano_v1_2/models   # contains .pkl files
+> UV=/path/to/mano_extras           # contains MANO_UV_*.obj files
 >
-> # HaPTIC
+> # HaPTIC (pkl + UV mesh)
 > mkdir -p third_party/haptic/assets/mano
 > cp $MANO/MANO_RIGHT.pkl $MANO/MANO_LEFT.pkl third_party/haptic/assets/mano/
+> cp $UV/MANO_UV_right.obj $UV/MANO_UV_left.obj third_party/haptic/assets/mano/
 >
-> # HaWoR
+> # HaWoR (pkl only)
 > mkdir -p third_party/hawor/_DATA/data/mano
 > mkdir -p third_party/hawor/_DATA/data_left/mano_left
 > cp $MANO/MANO_RIGHT.pkl third_party/hawor/_DATA/data/mano/
@@ -1061,10 +1077,17 @@ ln -s /data/5TB/Affordance2Grasp/data_hub data_hub
 ### T7 — MANO download fails / not found
 MANO cannot be redistributed. Download manually:
 1. Register at [mano.is.tue.mpg.de](https://mano.is.tue.mpg.de)
-2. Download `mano_v1_2.zip`
-3. Place `MANO_RIGHT.pkl` and `MANO_LEFT.pkl` in both locations:
-   - `third_party/haptic/assets/mano/`
-   - `third_party/hawor/_DATA/data/mano/`
+2. Download `mano_v1_2.zip` → extract `MANO_RIGHT.pkl` + `MANO_LEFT.pkl`
+3. **Also get `MANO_UV_right.obj` + `MANO_UV_left.obj`** — these are **not** in `mano_v1_2.zip`:
+   - Download the **SMPL-X** or **SMPL+H** package from [smpl-x.is.tue.mpg.de](https://smpl-x.is.tue.mpg.de/)
+   - Look for UV mesh files in `body_models/mano/` or `extras/` inside the archive
+4. Place all files:
+   - `third_party/haptic/assets/mano/MANO_RIGHT.pkl`
+   - `third_party/haptic/assets/mano/MANO_LEFT.pkl`
+   - `third_party/haptic/assets/mano/MANO_UV_right.obj`  ← **required for inference**
+   - `third_party/haptic/assets/mano/MANO_UV_left.obj`
+   - `third_party/hawor/_DATA/data/mano/MANO_RIGHT.pkl`
+   - `third_party/hawor/_DATA/data_left/mano_left/MANO_LEFT.pkl`
 
 ### T8 — DexYCB download (~250 GB)
 DexYCB is not redistributable. Download from [dex-ycb.github.io](https://dex-ycb.github.io).
