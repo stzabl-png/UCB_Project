@@ -178,7 +178,7 @@ def main():
     # 加载模型
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model = PointNet2Seg(num_classes=1, in_channel=7).to(device)
-    ckpt = torch.load(CKPT, map_location=device)
+    ckpt = torch.load(CKPT, map_location=device, weights_only=False)
     model.load_state_dict(ckpt['model_state_dict'])
     model.eval()
     print(f"✅ 模型加载: epoch={ckpt['epoch']}, val_loss={ckpt['val_loss']:.4f}")

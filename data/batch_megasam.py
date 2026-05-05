@@ -235,7 +235,7 @@ def load_depth_anything():
     model = DPT_DINOv2(encoder="vitl", features=256,
                         out_channels=[256, 512, 1024, 1024],
                         localhub=False).cuda()
-    model.load_state_dict(torch.load(DA_CKPT, map_location="cpu"), strict=True)
+    model.load_state_dict(torch.load(DA_CKPT, map_location="cpu", weights_only=False), strict=True)
     model.eval()
     transform = Compose([
         Resize(width=768, height=768, resize_target=False,

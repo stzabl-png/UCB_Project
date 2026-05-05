@@ -67,7 +67,7 @@ def predict(obj_id):
     # 加载模型 (v5 multi-task)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model = PointNet2Seg(num_classes=2, in_channel=7, predict_force_center=True).to(device)
-    ckpt = torch.load(args.ckpt, map_location=device)
+    ckpt = torch.load(args.ckpt, map_location=device, weights_only=False)
     model.load_state_dict(ckpt['model_state_dict'])
     model.eval()
     epoch = ckpt.get('epoch', '?')
