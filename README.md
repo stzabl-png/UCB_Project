@@ -293,7 +293,7 @@ python setup_weights.py --tool megasam  # MegaSAM only (21 MB)
 > MANO=/path/to/mano_v1_2/models   # contains .pkl files
 > UV=/path/to/mano_extras           # contains MANO_UV_*.obj files
 >
-> # HaPTIC (pkl + UV mesh)
+> # HaPTIC (pkl + UV mesh) — default path: third_party/haptic/assets/mano/
 > mkdir -p third_party/haptic/assets/mano
 > cp $MANO/MANO_RIGHT.pkl $MANO/MANO_LEFT.pkl third_party/haptic/assets/mano/
 > cp $UV/MANO_UV_right.obj $UV/MANO_UV_left.obj third_party/haptic/assets/mano/
@@ -303,6 +303,18 @@ python setup_weights.py --tool megasam  # MegaSAM only (21 MB)
 > mkdir -p third_party/hawor/_DATA/data_left/mano_left
 > cp $MANO/MANO_RIGHT.pkl third_party/hawor/_DATA/data/mano/
 > cp $MANO/MANO_LEFT.pkl  third_party/hawor/_DATA/data_left/mano_left/
+> ```
+>
+> **⚠️ `MANO_UV_right.obj` is NOT optional.** HaPTIC's `ManopthWrapper` loads it at
+> startup (before any inference). Missing this file causes an immediate crash even if
+> you never use UV textures. There is no workaround except obtaining the file.
+>
+> The HaPTIC MANO directory defaults to `third_party/haptic/assets/mano/` and is
+> controlled by `config.HAPTIC_MANO_DIR`. To use a custom path without copying files:
+> ```bash
+> export HAPTIC_MANO_DIR=/path/to/your/mano_v1_2/models
+> # That directory must contain: MANO_RIGHT.pkl, MANO_LEFT.pkl,
+> #   MANO_UV_right.obj, MANO_UV_left.obj
 > ```
 
 
