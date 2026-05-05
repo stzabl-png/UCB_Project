@@ -40,8 +40,8 @@ Each dataset contributes a different type of diversity:
 │     └─ batch_align_mano_fp.py ──→ training_fp/{ds}/{obj}.hdf5  (human_prior per object)   │
 │                                                                                              │
 └──────────────────────────────────────────────────────────────────────────────────────────────┘
-                                           │
-┌──────────────────────────────── PHASE 1B: First-Person Data ────────────────────────────────┐
+                       ▲ PARALLEL — runs independently of Phase 1B ▲
+ ┌──────────────────────────────── PHASE 1B: First-Person Data (Egocentric) ────────────────────┐
 │                                                                                              │
 │  EgoDex / TACO Ego                                                                          │
 │     │                                                                                        │
@@ -52,8 +52,12 @@ Each dataset contributes a different type of diversity:
 │     └─ batch_align_ego_mano_fp.py → training_fp_ego/{ds}/{obj}.hdf5  (human_prior)        │
 │                                                                                              │
 └──────────────────────────────────────────────────────────────────────────────────────────────┘
-                                           │
-┌──────────────────────────────── PHASE 2: Aggregate HumanPrior ──────────────────────────────┐
+                       ▲ PARALLEL — runs independently of Phase 1A ▲
+                    ┌──────────────────────────────────────────────┐
+                    │  Both feed into Phase 2 independently        │
+                    └──────────────────────────────────────────────┘
+                                            │
+ ┌──────────────────────────────── PHASE 2: Aggregate HumanPrior ──────────────────────────────┐
 │                                                                                              │
 │  training_fp/ + training_fp_ego/  ──→  data_hub/human_prior/{obj}.hdf5                    │
 │     point_cloud (4096, 3) · normals (4096, 3) · human_prior (4096,) · force_center (3,)   │
