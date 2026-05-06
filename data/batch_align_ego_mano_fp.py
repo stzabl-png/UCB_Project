@@ -75,6 +75,8 @@ def load_registry():
         for key, cfg in jreg.items():
             if cfg.get("skipped"):
                 continue
+            if "obj_name" not in cfg:   # skip _README / placeholder entries
+                continue
             obj  = cfg["obj_name"]
             ds   = cfg["dataset"]
             sid  = cfg["seq_id"]   # e.g. "add_remove_lid/22"

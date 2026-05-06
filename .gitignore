@@ -44,3 +44,17 @@ Thumbs.db
 assets/scene/
 sim/assets_scene/
 PIPELINE_INSTRUCTIONS.md
+
+# Claude Code internal state
+.claude/
+
+# HuggingFace staging (used by upload scripts)
+.hf_staging/
+
+# Symlinks to data dirs
+/checkpoints
+
+# External git clones (users clone these per README)
+third_party/FoundationPose/
+third_party/sam-3d-objects/
+third_party/sam2/

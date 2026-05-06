@@ -49,7 +49,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config
 
 # ── FoundationPose 路径 (与第三人称共用) ──────────────────────────────────────
-FP_ROOT = "/home/lyh/Project/FoundationPose"
+FP_ROOT = os.environ.get("FP_ROOT", getattr(config, "FP_ROOT", "/home/lyh/Project/FoundationPose"))
 # NOTE: sys.path is injected lazily inside init_fp_models() / run_fp()
 #       to avoid interfering with the top-level 'import torch'
 
