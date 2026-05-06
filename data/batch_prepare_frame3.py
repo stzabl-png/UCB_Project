@@ -21,9 +21,10 @@ from PIL import Image
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config
 
-DEPTH_BASE = os.path.join(config.DATA_HUB, "ProcessedData", "third_depth")
-RAW_BASE   = os.path.join(config.DATA_HUB, "RawData", "ThirdPersonRawData")
-OUT_BASE   = os.path.join(config.DATA_HUB, "ProcessedData", "obj_recon_input")
+DEPTH_BASE     = os.path.join(config.DATA_HUB, "ProcessedData", "third_depth")
+RAW_BASE       = os.path.join(config.DATA_HUB, "RawData", "ThirdPersonRawData")
+OUT_BASE       = os.path.join(config.DATA_HUB, "ProcessedData", "obj_recon_input")
+TACO_ALLOC_DIR = os.path.join(RAW_BASE, "taco", "Allocentric_RGB_Videos")
 
 FRAME_IDX  = 2   # 第3帧（0-indexed）
 
@@ -70,11 +71,42 @@ def discover_dexycb(input_dir):
                 imgs = natsorted(glob(os.path.join(cam_dir, "color_*.jpg")))
                 if imgs: yield f"{subj}__{dt}__{serial}", imgs
 
+def discover_taco_allocentric(input_dir):
+    """
+    Discover all (triplet, session, cam_serial) combos that have extracted jpg frames.
+    seq_id = '{triplet}__{session}__{cam_serial}'  (safe for filesystem)
+    Requires pre-extraction via:
+        python tools/extract_taco_frames.py --mode pipeline --cam <serial>
+    """
+    base = TACO_ALLOC_DIR
+    if not os.path.isdir(base):
+        return
+    for triplet in natsorted(os.listdir(base)):
+        triplet_path = os.path.join(base, triplet)
+        if not os.path.isdir(triplet_path):
+            continue
+        for session in natsorted(os.listdir(triplet_path)):
+            session_path = os.path.join(triplet_path, session)
+            if not os.path.isdir(session_path):
+                continue
+            for cam_serial in natsorted(os.listdir(session_path)):
+                cam_dir = os.path.join(session_path, cam_serial)
+                if not os.path.isdir(cam_dir):
+                    continue
+                imgs = natsorted(glob(os.path.join(cam_dir, "*.jpg")))
+                if imgs:
+                    # encode path as safe seq_id
+                    safe_triplet = triplet.replace("/", "|")  # triplets can have spaces, keep ()s
+                    seq_id = f"{safe_triplet}__{session}__{cam_serial}"
+                    yield seq_id, imgs
+
+
 DISCOVERERS = {
-    "arctic":  (discover_arctic,  "arctic"),
-    "oakink":  (discover_oakink,  "oakink_v1"),
-    "ho3d_v3": (discover_ho3d,    "ho3d_v3"),
-    "dexycb":  (discover_dexycb,  "dexycb"),
+    "arctic":           (discover_arctic,           "arctic"),
+    "oakink":           (discover_oakink,           "oakink_v1"),
+    "ho3d_v3":          (discover_ho3d,             "ho3d_v3"),
+    "dexycb":           (discover_dexycb,           "dexycb"),
+    "taco_allocentric": (discover_taco_allocentric, "taco"),
 }
 
 # ── 深度前景 mask ─────────────────────────────────────────────────────────────

@@ -38,8 +38,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
-OUT_BASE  = os.path.join(config.DATA_HUB, "ProcessedData", "obj_recon_input")
-RAW_BASE  = os.path.join(config.DATA_HUB, "RawData", "ThirdPersonRawData")
+OUT_BASE       = os.path.join(config.DATA_HUB, "ProcessedData", "obj_recon_input")
+RAW_BASE       = os.path.join(config.DATA_HUB, "RawData", "ThirdPersonRawData")
+TACO_ALLOC_DIR = os.path.join(RAW_BASE, "taco", "Allocentric_RGB_Videos")
 HAWOR_PY  = "/home/lyh/anaconda3/envs/hawor/bin/python"
 SAM2_SRV  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sam2_server.py")
 WIN       = "SAM2 Object Annotator"
@@ -133,11 +134,50 @@ def discover_dexycb(raw_dir):
             yield "ycb", obj_name, frames
 
 
+def discover_taco_allocentric(raw_dir):
+    """
+    TACO Allocentric: groups by triplet name, one representative session per triplet.
+    Yields (ds_out, triplet_name, frames) for each unique triplet.
+    Requires frames to be pre-extracted via:
+        python tools/extract_taco_frames.py --mode pipeline --cam <serial>
+    Output saved to: obj_recon_input/taco_allocentric/{triplet}/0.png
+    """
+    base = TACO_ALLOC_DIR   # raw_dir arg is ignored for TACO (path is hardcoded)
+    if not os.path.isdir(base):
+        return
+
+    for triplet in natsorted(os.listdir(base)):
+        triplet_path = os.path.join(base, triplet)
+        if not os.path.isdir(triplet_path):
+            continue
+
+        # Find first session that has extracted jpg frames
+        best_frames = []
+        for session in natsorted(os.listdir(triplet_path)):
+            session_path = os.path.join(triplet_path, session)
+            if not os.path.isdir(session_path):
+                continue
+            for cam_serial in natsorted(os.listdir(session_path)):
+                cam_dir = os.path.join(session_path, cam_serial)
+                if not os.path.isdir(cam_dir):
+                    continue
+                frames = natsorted(glob(os.path.join(cam_dir, "*.jpg")))
+                if frames:
+                    best_frames = frames
+                    break
+            if best_frames:
+                break
+
+        if best_frames:
+            yield "taco_allocentric", triplet, best_frames
+
+
 DISCOVERERS = {
-    "arctic":  (discover_arctic,  "arctic"),
-    "oakink":  (discover_oakink,  "oakink_v1"),
-    "ho3d_v3": (discover_ho3d,    "ho3d_v3"),
-    "dexycb":  (discover_dexycb,  "dexycb"),
+    "arctic":           (discover_arctic,           "arctic"),
+    "oakink":           (discover_oakink,           "oakink_v1"),
+    "ho3d_v3":          (discover_ho3d,             "ho3d_v3"),
+    "dexycb":           (discover_dexycb,           "dexycb"),
+    "taco_allocentric": (discover_taco_allocentric, "taco"),  # uses TACO_ALLOC_DIR directly
 }
 
 # ── SAM2 client ───────────────────────────────────────────────────────────────
