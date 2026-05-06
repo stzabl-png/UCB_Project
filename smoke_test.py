@@ -165,17 +165,17 @@ def main():
             ["python", "data/batch_depth_pro.py", "--dataset", "dexycb", "--limit", "1"],
             env_name="depth-pro", timeout=600)
 
-        run("1A-hawor",
-            ["python", "data/batch_hawor.py", "--dataset", "dexycb", "--limit", "1"],
+        run("1A-hawor-ego-smoke",
+            ["python", "data/batch_hawor.py", "--dataset", "egodex", "--end", "1"],
             env_name="hawor", timeout=900)
 
         run("1A-haptic",
             ["python", "data/batch_haptic.py", "--dataset", "dexycb", "--limit", "1"],
-            env_name="depth-pro", timeout=600)
+            env_name="haptic", timeout=600)
 
         run("1A-fp-pose",
             ["python", "tools/batch_obj_pose.py", "--dataset", "dexycb", "--limit", "1"],
-            env_name="depth-pro", timeout=1200)
+            env_name="bundlesdf", timeout=1200)
 
     # ── Phase 1B ──────────────────────────────────────────────────
     if args.phase in (0, 2) and not args.skip_gpu:
@@ -184,24 +184,26 @@ def main():
         run("1B-megasam",
             ["python", "data/batch_megasam.py", "--dataset", "egodex",
              "--start", "0", "--end", "1"],
-            env_name="depth-pro", timeout=900)
+            env_name="mega_sam", timeout=900)
 
         run("1B-hawor-ego",
-            ["python", "data/batch_hawor.py", "--dataset", "egodex", "--limit", "1"],
+            ["python", "data/batch_hawor.py", "--dataset", "egodex", "--end", "1"],
             env_name="hawor", timeout=900)
 
         run("1B-fp-ego",
             ["python", "tools/batch_obj_pose_ego.py",
              "--dataset", "egodex", "--limit", "1"],
-            env_name="depth-pro", timeout=1200)
+            env_name="bundlesdf", timeout=1200)
 
     # ── Phase 2 ───────────────────────────────────────────────────
     if args.phase in (0, 3) and not args.skip_gpu:
         print("\n[PHASE 2] Aggregate HumanPrior (DexYCB subset)")
 
         run("2-align-mano-fp",
-            ["python", "data/batch_align_mano_fp.py", "--dataset", "dexycb", "--limit", "1"],
-            env_name="depth-pro", timeout=600)
+            # batch_align_mano_fp has no --limit; use --obj to limit to one object
+            ["python", "data/batch_align_mano_fp.py", "--dataset", "dexycb",
+             "--obj", "003_cracker_box"],
+            env_name="bundlesdf", timeout=600)
 
     # ── Phase 4 ───────────────────────────────────────────────────
     if args.phase in (0, 4):
@@ -216,11 +218,12 @@ def main():
         if n_hp > 0 and not args.skip_gpu:
             run("4-build-dataset",
                 ["python", "data/build_dataset.py", "--gtfree"],
-                env_name="depth-pro", timeout=600)
+                env_name="bundlesdf", timeout=600)
 
             run("4-train-1epoch",
-                ["python", "train.py", "--epochs", "1", "--batch-size", "4"],
-                env_name="depth-pro", timeout=600)
+                # model/train.py uses --batch_size (underscore), not --batch-size
+                ["python", "-m", "model.train", "--epochs", "1", "--batch_size", "4"],
+                env_name="bundlesdf", timeout=600)
 
     # ── Report ────────────────────────────────────────────────────
     print("\n" + "=" * 60)
