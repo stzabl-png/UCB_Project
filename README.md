@@ -428,8 +428,6 @@ cd ../..
 git apply patches/haptic-intrinsics-fix.patch
 ```
 
-```
-
 **Step 3 — Clone and build FoundationPose**
 
 > FoundationPose requires compiling CUDA C++ extensions. A simple `pip install` is not sufficient.
@@ -505,20 +503,57 @@ weights/
 └── 2024-01-11-20-02-45/model_best.pth   ← scorer
 ```
 
-**Step 5 — Set path in `config.py`**
-```python
-FP_ROOT = "/path/to/FoundationPose"
+```bash
+# Register FP_ROOT so pipeline scripts can find it (add to ~/.bashrc for persistence)
+export FP_ROOT="$(pwd)"
+echo "export FP_ROOT=\"$(pwd)\"" >> ~/.bashrc
 ```
 
-### 3. Configure paths in `config.py`
+### 3c. Environment A — `depth-pro` (Phase 1A Step 1)
 
-```python
-DATA_HUB   = "/path/to/data_hub"
-HAPTIC_DIR = "/path/to/HaPTIC"
-FP_ROOT    = "/path/to/FoundationPose"
+```bash
+conda create -n depth-pro python=3.9 -y
+conda activate depth-pro
+
+# Install from submodule (avoids Apple CDN firewall issues on remote servers)
+pip install -e third_party/ml-depth-pro
+pip install natsort tqdm pillow numpy h5py
+
+# Download checkpoint via HuggingFace (recommended — Apple CDN may be blocked)
+python setup_weights.py --tool depthpro
+# places depth_pro.pt in: third_party/ml-depth-pro/checkpoints/
+
+# Verify
+python -c "import depth_pro; print('depth_pro: ok')"
 ```
 
-### 3d. Environment C — `mega_sam` (Phase 1B Step E1)
+### 3f. Configure paths via environment variables
+
+> **Do not edit `config.py` directly.** All external paths are read from environment variables.
+> The `.env` file in the project root is a template — copy it and fill in your values.
+
+```bash
+# Edit .env with your actual paths:
+cat .env   # see all available variables
+
+# Required for Phase 1A:
+export ARCTIC_ROOT=/path/to/arctic/unpack   # only if running ARCTIC sequences
+export FP_ROOT=/path/to/FoundationPose
+
+# Required for Phase 1B:
+export HAWOR_DIR=/path/to/hawor            # e.g. third_party/hawor (if not using submodule)
+export HAPTIC_DIR=/path/to/haptic          # e.g. third_party/haptic
+export HAPTIC_MANO_DIR=/path/to/mano       # directory containing MANO_RIGHT.pkl etc.
+
+# Optional:
+export SAM2_DIR=/path/to/sam2              # default: ./third_party/sam2
+export SAM3D_USER=yourname                 # cloud server username for rsync commands
+export ISAAC_SIM_PATH=/path/to/isaac-sim   # only for Phase 3 simulation
+
+# DATA_HUB is auto-detected as <project_root>/data_hub — no export needed.
+# Use a symlink if your data is on a different disk:
+#   ln -s /data/5TB/Affordance2Grasp/data_hub data_hub
+```
 
 > ⚠️ **Do NOT follow `mega-sam/README.md` for the conda setup.**
 > MegaSAM's README specifies `torch==2.0.1+cu118`. We use **torch 2.2.0+cu121**.
