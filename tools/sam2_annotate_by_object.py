@@ -41,7 +41,24 @@ import config
 OUT_BASE       = os.path.join(config.DATA_HUB, "ProcessedData", "obj_recon_input")
 RAW_BASE       = os.path.join(config.DATA_HUB, "RawData", "ThirdPersonRawData")
 TACO_ALLOC_DIR = os.path.join(RAW_BASE, "taco", "Allocentric_RGB_Videos")
-HAWOR_PY  = "/home/lyh/anaconda3/envs/hawor/bin/python"
+def _find_hawor_python():
+    if "HAWOR_PY" in os.environ:
+        return os.environ["HAWOR_PY"]
+    if "HAWOR_DIR" in os.environ:
+        return os.path.join(os.environ["HAWOR_DIR"], "bin", "python")
+    for candidate in [
+        os.path.expanduser("~/anaconda3/envs/hawor/bin/python"),
+        os.path.expanduser("~/miniconda3/envs/hawor/bin/python"),
+        os.path.expanduser("~/miniforge3/envs/hawor/bin/python"),
+        "/opt/conda/envs/hawor/bin/python",
+    ]:
+        if os.path.exists(candidate):
+            return candidate
+    raise RuntimeError(
+        "Cannot find hawor Python. Set HAWOR_PY=/path/to/hawor/bin/python "
+        "or HAWOR_DIR=/path/to/hawor/env in your .env or environment."
+    )
+HAWOR_PY  = _find_hawor_python()
 SAM2_SRV  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sam2_server.py")
 WIN       = "SAM2 Object Annotator"
 DISP_H    = 720
