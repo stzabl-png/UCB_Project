@@ -392,12 +392,42 @@ pip install "fast-simplification>=0.1.6"     # ← CRITICAL: without this, conta
 ```
 
 **Step 2 — Install HaPTIC**
+
+> ⚠️  HaPTIC is in a **separate conda environment** (`haptic`), not `bundlesdf`.
+
 ```bash
 conda create -n haptic python=3.10 -y
 conda activate haptic
+
+# 1. PyTorch 2.1.1 + CUDA 12.1
+pip install torch==2.1.1+cu121 torchvision==0.16.1+cu121 \
+    --index-url https://download.pytorch.org/whl/cu121
+pip install xformers==0.0.23 --index-url https://download.pytorch.org/whl/cu121
+pip install "numpy<2.0"   # must be < 2.0
+
+# 2. mmpose 0.24.0 — CRITICAL: must use ViTPose editable install
+#    DO NOT pip install mmpose from PyPI (installs 1.x which requires mmengine)
+#    DO NOT pip install mmengine (incompatible with mmcv 1.x)
+pip install mmcv==1.3.9
+git clone https://github.com/ViTAE-Transformer/ViTPose third_party/haptic/third-party/ViTPose
+pip install -e third_party/haptic/third-party/ViTPose   # installs mmpose 0.24.0 editable
+
+# 3. HaPTIC Python deps
+pip install webdataset manopth git+https://github.com/hassony2/manopth.git
+pip install pytorch3d \
+    -f https://dl.fbaipublicfiles.com/pytorch3d/packaging/wheels/py310_cu121_pyt211/download.html
+
+# 4. Run one_click.sh to download HaPTIC weights
 cd third_party/haptic
-bash scripts/one_click.sh   # downloads HaPTIC weights automatically
+mkdir -p output   # ← one_click.sh assumes this exists
+bash scripts/one_click.sh
+mkdir -p _DATA/data && ln -sf ../../assets/mano _DATA/data/mano   # fix symlink
 cd ../..
+
+# 5. Apply intrinsics fix patch
+git apply patches/haptic-intrinsics-fix.patch
+```
+
 ```
 
 **Step 3 — Clone and build FoundationPose**
@@ -488,38 +518,66 @@ HAPTIC_DIR = "/path/to/HaPTIC"
 FP_ROOT    = "/path/to/FoundationPose"
 ```
 
-### 3d. Environment C — `mega_sam` (Phase 1B Steps E1)
+### 3d. Environment C — `mega_sam` (Phase 1B Step E1)
 
 > ⚠️ **Do NOT follow `mega-sam/README.md` for the conda setup.**
 > MegaSAM's README specifies `torch==2.0.1+cu118`. We use **torch 2.2.0+cu121**.
-> Also, `droid_backends` is a compiled C++ extension from `lietorch` — it is NOT
-> pip-installable and must be built from source.
+> Also, `droid_backends` is a compiled CUDA C++ extension — it is NOT pip-installable.
 
 ```bash
 conda create -n mega_sam python=3.10 -y
 conda activate mega_sam
 
+# 0. Pin setuptools FIRST (required before C++ extension builds)
+pip install 'setuptools<70' 'numpy<2.0'
+
 # 1. PyTorch 2.2.0 + CUDA 12.1  (NOT torch 2.0.1 as MegaSAM README says)
 pip install torch==2.2.0 torchvision==0.17.0 \
     --index-url https://download.pytorch.org/whl/cu121
 
-# 2. xformers — must match torch version exactly
-pip install xformers==0.0.24
+# 2. xformers + torch-scatter (must match torch version exactly)
+pip install xformers==0.0.24 --index-url https://download.pytorch.org/whl/cu121
+pip install torch-scatter -f https://data.pyg.org/whl/torch-2.2.0+cu121.html
 
-# 3. MegaSAM Python dependencies (from submodule)
+# 3. System build dependencies
+sudo apt-get install -y libsuitesparse-dev libeigen3-dev
+export PATH=/usr/local/cuda/bin:$PATH
+export CUDA_HOME=/usr/local/cuda
+
+# 4. Build droid_backends from MegaSAM's own DROID-SLAM base
+#    ⚠️  This is REQUIRED — there is no pip wheel for droid_backends
+#    ⚠️  mega-sam/base/ has its own modified DROID-SLAM, NOT the same as mega-sam/base/thirdparty/
+cd mega-sam/base
+python setup.py build_ext --inplace
+# The .so is compiled in mega-sam/base/, then copy to droid_slam/ for import resolution:
+cp droid_backends.cpython-310-x86_64-linux-gnu.so droid_slam/
+cd ../..
+
+# 5. MegaSAM Python dependencies
 cd mega-sam
 pip install -r requirements.txt
 cd ..
 
-# 4. Build lietorch from source (provides droid_backends.cpython-310-*.so)
-#    ⚠️  This is REQUIRED — there is no pip wheel for droid_backends
-#    System deps first:
-sudo apt-get install -y libsuitesparse-dev libeigen3-dev
-cd mega-sam/base/thirdparty/lietorch
-pip install -e . --no-build-isolation   # compiles CUDA extensions (~5 min)
-cd ../../../..
+# 6. Remaining pip deps (mega-sam has no complete requirements.txt for pip installs)
+pip install opencv-python natsort tqdm imageio h5py scipy matplotlib \
+    einops kornia wandb huggingface-hub timm ninja
 
-# 5. Verify all key packages
+# 7. Download Depth-Anything ViT-L weights (1.28 GB, required at runtime)
+python3 -c "
+from huggingface_hub import hf_hub_download
+import shutil, os
+path = hf_hub_download(
+    repo_id='LiheYoung/depth_anything_vitl14',
+    filename='pytorch_model.bin',
+    local_dir='mega-sam/Depth-Anything/checkpoints'
+)
+dst = 'mega-sam/Depth-Anything/checkpoints/depth_anything_vitl14.pth'
+if not os.path.exists(dst):
+    shutil.copy(path, dst)
+print('done:', dst)
+"
+
+# 8. Verify all key packages
 python -c "
 import torch; print('torch:', torch.__version__)
 import xformers; print('xformers:', xformers.__version__)
@@ -531,9 +589,10 @@ import droid_backends; print('droid_backends: ok')
 # droid_backends: ok
 ```
 
-> **Why does `droid_backends` fail?** It is a custom CUDA C++ module compiled
-> by `pip install -e .` inside `mega-sam/base/thirdparty/lietorch/`. If you skip
-> step 4, you get `ModuleNotFoundError: No module named 'droid_backends'`.
+> **Why does `droid_backends` fail?** It is a custom CUDA C++ module in `mega-sam/base/`.
+> Running `python setup.py build_ext --inplace` compiles the `.so` in-place.
+> The `.so` must be in `mega-sam/base/droid_slam/` for Python imports to resolve.
+
 
 ### 3e. Environment D — `hawor` (Phase 1B Step E2)
 
@@ -545,36 +604,61 @@ import droid_backends; print('droid_backends: ok')
 conda create -n hawor python=3.10 -y
 conda activate hawor
 
+# 0. Pin setuptools + numpy FIRST (required for C++ builds + chumpy)
+pip install 'setuptools<70' 'numpy<2.0'
+
 # 1. PyTorch 2.1.0 + CUDA 12.1  (NOT torch 1.13 as HaWoR README says)
 pip install torch==2.1.0 torchvision==0.16.0 \
     --index-url https://download.pytorch.org/whl/cu121
 
-# 2. torch-scatter — must use pre-built wheel matching torch+CUDA exactly
-#    Building from source against the wrong CUDA (11.7 vs 12.1) will fail
+# 2. torch-scatter + pytorch3d — must use pre-built wheels
 pip install torch-scatter \
     -f https://data.pyg.org/whl/torch-2.1.0+cu121.html
-
-# 3. pytorch3d 0.7.5 pre-built for py310+cu121+torch2.1.0
 pip install pytorch3d \
     -f https://dl.fbaipublicfiles.com/pytorch3d/packaging/wheels/py310_cu121_pyt210/download.html
 
-# 4. HaWoR dependencies (from submodule, skip their torch/scatter lines)
+# 3. Build DROID-SLAM (lietorch) from source
+#    ⚠️  setup.py is in DROID-SLAM root, NOT hawor root
+sudo apt-get install -y libsuitesparse-dev libeigen3-dev
+export PATH=/usr/local/cuda/bin:$PATH
+cd third_party/hawor/thirdparty/DROID-SLAM
+python setup.py install
+cd ../../../..
+
+# 4. HaWoR Python deps (install AFTER torch is confirmed)
 cd third_party/hawor
-pip install -r requirements.txt   # install remaining deps (excludes torch/scatter above)
+pip install -r requirements.txt
 cd ../..
 
-# 5. Pin pytorch-lightning + torchmetrics AFTER requirements.txt
+# 5. Extra packages not in requirements.txt (required at runtime)
+pip install chumpy --no-build-isolation   # chumpy needs setuptools<70
+pip install pytorch-minimize rosbags yapf addict termcolor \
+    dominate omegaconf trimesh pygments python-dateutil pytz \
+    cycler contourpy fonttools kiwisolver packaging pyparsing psutil seaborn \
+    scikit-image --upgrade   # scikit-image: must upgrade to get lazy_loader
+
+# 6. Pin pytorch-lightning + torchmetrics AFTER requirements.txt
 #    requirements.txt may pull incompatible versions; these pins override them.
 #    ⚠️  lightning 2.3+ has breaking changes; torchmetrics must match lightning 2.2.x
-pip install pytorch-lightning==2.2.4 torchmetrics==1.4.0
+pip install pytorch-lightning==2.2.4 torchmetrics==1.4.0 lightning-utilities
 
-# 6. Verify all key packages
+# 7. Fix model_config.yaml symlink
+#    HaWoR looks for weights/hawor/model_config.yaml but file is in checkpoints/ subdir
+cd third_party/hawor
+if [ -f weights/hawor/checkpoints/model_config.yaml ]; then
+    ln -sf weights/hawor/checkpoints/model_config.yaml weights/hawor/model_config.yaml
+    echo "✅ model_config.yaml symlink created"
+fi
+cd ../..
+
+# 8. Verify all key packages
 python -c "
 import torch; print('torch:', torch.__version__)
 import torch_scatter; print('torch_scatter:', torch_scatter.__version__)
 import pytorch3d; print('pytorch3d:', pytorch3d.__version__)
 import pytorch_lightning as pl; print('pytorch_lightning:', pl.__version__)
 import torchmetrics; print('torchmetrics:', torchmetrics.__version__)
+import droid_backends; print('droid_backends: ok')
 "
 # Expected:
 # torch: 2.1.0+cu121
@@ -582,6 +666,7 @@ import torchmetrics; print('torchmetrics:', torchmetrics.__version__)
 # pytorch3d: 0.7.5
 # pytorch_lightning: 2.2.4
 # torchmetrics: 1.4.0
+# droid_backends: ok
 ```
 
 ### 4. Data layout
@@ -1511,3 +1596,309 @@ pip install "numpy<2.0"
 
 > **Verified working on:** RTX 4080 SUPER (sm_89) with torch 2.1.1+cu121  
 > **Reported working on Blackwell after upgrade:** RTX 5090 (sm_120) with torch 2.7.0+cu128
+
+---
+
+## Lab Deployment Record — RTX 3090, Ubuntu 22.04, CUDA 12.1
+
+> Full Phase 1A + 1B smoke tests completed on DexYCB subject-01 × cam 841412060263.  
+> The following issues were encountered and resolved. They are documented here to prevent recurrence.
+
+### T.H1 — HaPTIC: `--seq` filter for DexYCB doesn't match
+
+**Symptom:** `--seq 20200709-subject-01__841412060263` → `Found 0 sequences`
+
+**Root cause:** `seq_id` format is `{subj}__{date}__{serial}`. The `--seq` flag does substring matching, so passing the full ID requires knowing the exact format.
+
+**Fix:** Use the camera serial as a short substring match:
+```bash
+python data/batch_haptic.py --dataset dexycb --seq '__841412060263'
+```
+
+---
+
+### T.H2 — HaPTIC: `MANO_RIGHT.pkl` path hardcoded to cluster
+
+**Symptom:**
+```
+FileNotFoundError: /is/cluster/fast/yye/.../MANO_RIGHT.pkl
+```
+
+**Root cause:** `nnutils/hand_utils.py` defaults `mano_path` to the original author's HPC cluster path.
+
+**Fix (no submodule edit needed):** Override in our batch script via `config.py`:
+```python
+# config.py
+HAPTIC_MANO_DIR = os.environ.get("HAPTIC_MANO_DIR",
+    os.path.join(HAPTIC_DIR, "assets", "mano"))
+```
+Then in `batch_haptic_*.py`:
+```python
+from haptic.nnutils.hand_utils import ManopthWrapper
+hand_wrapper = ManopthWrapper(mano_path=config.HAPTIC_MANO_DIR)
+```
+> This fix is already applied to all `batch_haptic_*.py` scripts (commit 2b00b15).
+
+---
+
+### T.H3 — HaPTIC: `parse_det_seq()` does not accept `intrinsics` argument
+
+**Symptom:**
+```
+TypeError: parse_det_seq() got an unexpected keyword argument 'intrinsics'
+```
+
+**Root cause:** We pass `intrinsics=` to inject Depth Pro focal lengths, but the upstream HaPTIC code does not accept this parameter.
+
+**Fix:** Apply the intrinsics patch:
+```bash
+cd third_party/haptic
+git apply ../../patches/haptic-intrinsics-fix.patch
+```
+This patch adds `intrinsics=None` to `nnutils/det_utils.py::parse_det_seq()`.
+
+---
+
+### T.HW1 — HaWoR: `environment.yml` pip install fails (build isolation)
+
+**Symptom:** `conda env create -f environment.yml` → `CondaEnvException: Pip failed`
+
+**Root cause:** `environment.yml` pip section contains `torch-scatter==2.1.2`, which requires torch already installed. conda's isolated pip subprocess cannot see the torch installed in the same step.
+
+**Fix:** Do **not** use `conda env create -f environment.yml`. Follow Section 3e step-by-step instead.
+
+---
+
+### T.HW2 — HaWoR: `chumpy` fails to install
+
+**Symptom:**
+```
+Failed to build installable wheels for some pyproject.toml based projects (chumpy)
+```
+
+**Root cause:** `chumpy` uses old `setup.py` API incompatible with `setuptools >= 70`.
+
+**Fix:**
+```bash
+pip install 'setuptools<70'
+pip install chumpy --no-build-isolation
+```
+
+---
+
+### T.HW3 — HaWoR: DROID-SLAM `setup.py install` path confusion
+
+**Symptom:** `python setup.py install` from hawor root fails with `No such file or directory`
+
+**Root cause:** `setup.py` is in `thirdparty/DROID-SLAM/`, not the hawor root.
+
+**Fix:**
+```bash
+cd third_party/hawor/thirdparty/DROID-SLAM
+python setup.py install
+cd ../../../..
+```
+
+---
+
+### T.HW4 — HaWoR: `matplotlib` and related packages missing
+
+**Symptom:** `No module named 'cycler'`, `No module named 'dateutil'`, etc.
+
+**Root cause:** `requirements.txt` is incomplete; matplotlib's transitive deps are not listed.
+
+**Fix:**
+```bash
+pip install python-dateutil pytz cycler contourpy fonttools kiwisolver \
+    packaging pyparsing psutil seaborn
+```
+
+---
+
+### T.HW5 — HaWoR: `scikit-image` missing `lazy_loader`
+
+**Symptom:**
+```
+ImportError: cannot import name 'lazy_loader' from 'skimage'
+```
+
+**Root cause:** Older `scikit-image` versions don't include `lazy_loader`. New ones do.
+
+**Fix:**
+```bash
+pip install scikit-image --upgrade
+```
+
+---
+
+### T.HW6 — HaWoR: `weights/hawor/model_config.yaml` not found
+
+**Symptom:**
+```
+FileNotFoundError: weights/hawor/model_config.yaml
+```
+
+**Root cause:** After downloading weights, the config is in `weights/hawor/checkpoints/model_config.yaml` but the code looks one level up.
+
+**Fix:**
+```bash
+cd third_party/hawor
+ln -sf weights/hawor/checkpoints/model_config.yaml weights/hawor/model_config.yaml
+```
+
+---
+
+### T.HW7 — HaWoR: misc missing packages
+
+**Symptom:** Various `No module named 'X'` for: `pytorch_minimize`, `rosbags`, `yapf`, `dominate`, `omegaconf`, `addict`, `termcolor`
+
+**Root cause:** `requirements.txt` does not list all runtime dependencies.
+
+**Fix (install all at once):**
+```bash
+pip install pytorch-minimize rosbags yapf addict termcolor dominate omegaconf trimesh pygments
+```
+
+---
+
+### T.MS1 — MegaSAM: `environment.yml` pip section fails
+
+Same root cause as T.HW1. Do **not** use `conda env create -f environment.yml`. Follow Section 3d step-by-step instead.
+
+---
+
+### T.MS2 — MegaSAM: `droid_backends` build — correct source directory
+
+**Symptom:**
+```
+ModuleNotFoundError: No module named 'droid_backends'
+```
+
+**Root cause:** The Section 3d install builds from `mega-sam/base/` (MegaSAM's own DROID-SLAM fork). The compiled `.so` must be placed where `sys.path` can find it.
+
+**Verified build commands:**
+```bash
+export PATH=/usr/local/cuda/bin:$PATH && export CUDA_HOME=/usr/local/cuda
+pip install 'setuptools<70'
+cd mega-sam/base
+python setup.py build_ext --inplace
+# Copy .so to droid_slam/ (the import path mega-sam uses internally)
+cp droid_backends.cpython-310-x86_64-linux-gnu.so droid_slam/
+cd ../..
+```
+
+> **Alternative:** `pip install -e mega-sam/base/thirdparty/lietorch --no-build-isolation`  
+> also works but installs as an egg into site-packages instead.
+
+---
+
+### T.MS3 — MegaSAM: Depth-Anything ViT-L weights missing
+
+**Symptom:**
+```
+FileNotFoundError: mega-sam/Depth-Anything/checkpoints/depth_anything_vitl14.pth
+```
+
+**Fix:**
+```bash
+python3 -c "
+from huggingface_hub import hf_hub_download
+import shutil, os
+path = hf_hub_download(
+    repo_id='LiheYoung/depth_anything_vitl14',
+    filename='pytorch_model.bin',
+    local_dir='mega-sam/Depth-Anything/checkpoints'
+)
+dst = 'mega-sam/Depth-Anything/checkpoints/depth_anything_vitl14.pth'
+if not os.path.exists(dst):
+    shutil.copy(path, dst)
+print('done:', dst)  # 1.28 GB
+"
+```
+
+---
+
+### T.MS4 — MegaSAM: misc missing pip packages
+
+**Symptom:** Various `No module named 'X'` for: `cv2`, `natsort`, `h5py`, `imageio`, `einops`, `kornia`, `timm`, `ninja`, `wandb`
+
+**Root cause:** `mega-sam` only has `environment.yml` (conda format), no `pip requirements.txt` for our manual install path.
+
+**Fix (install all at once):**
+```bash
+pip install opencv-python natsort tqdm imageio h5py scipy matplotlib \
+    einops kornia wandb huggingface-hub timm ninja
+```
+
+---
+
+## Verified Environment Configurations (Lab RTX 3090, Ubuntu 22.04, CUDA 12.1)
+
+Confirmed working for DexYCB subject-01 × cam 841412060263 (100 sequences, Phase 1A complete + Phase 1B smoke tests).
+
+### `haptic` environment
+
+| Package | Verified Version |
+|---------|-----------------|
+| Python | 3.10.x |
+| torch | **2.1.1+cu121** |
+| xformers | 0.0.23 |
+| pytorch3d | 0.7.5 |
+| mmpose | **0.24.0** (editable from ViTPose) |
+| mmcv | **1.3.9** (NOT mmcv 2.x) |
+| mmengine | ❌ must NOT be installed |
+| manopth | latest (git) |
+| numpy | **< 2.0** (1.26.4) |
+| webdataset | any |
+
+### `bundlesdf` environment
+
+| Package | Verified Version |
+|---------|-----------------|
+| Python | **3.10.x** (NOT 3.9) |
+| torch | 2.1.1+cu121 |
+| pytorch3d | 0.7.5 |
+| nvdiffrast | 0.4.0 (compiled from source) |
+| mycpp | cpython-310 (compiled from source) |
+| fast-simplification | ≥ 0.1.6 |
+| numpy | < 2.0 |
+| cmake | < 4.0 |
+
+### `hawor` environment
+
+| Package | Verified Version |
+|---------|-----------------|
+| Python | 3.10.x |
+| torch | **2.1.0+cu121** |
+| torch_scatter | 2.1.2+pt21cu121 |
+| pytorch3d | 0.7.5 |
+| pytorch-lightning | **2.2.4** (must pin!) |
+| torchmetrics | **1.4.0** (must pin!) |
+| DROID-SLAM / droid_backends | cpython-310 (compiled from source) |
+| numpy | < 2.0 |
+| setuptools | < 70 (for chumpy build) |
+
+### `mega_sam` environment
+
+| Package | Verified Version |
+|---------|-----------------|
+| Python | 3.10.x |
+| torch | **2.2.0+cu121** |
+| xformers | **0.0.24** |
+| torch_scatter | 2.1.2+pt22cu121 |
+| droid_backends | cpython-310 (compiled from `mega-sam/base/`) |
+| numpy | < 2.0 |
+| setuptools | < 70 |
+
+### Completed Pipeline Steps (DexYCB, cam 841412060263)
+
+| Step | Script | Status |
+|------|--------|--------|
+| 1A Step 1 Depth Pro | `data/batch_depth_pro.py` | ✅ 100/100, fx=591.4 |
+| 1A Step 2 HaPTIC | `data/batch_haptic.py` | ✅ 100/100 |
+| 1A Step 3 FoundationPose | `tools/batch_obj_pose.py` | ✅ 100/100 (~6s/seq) |
+| 1A Step 4 Align | `data/batch_align_mano_fp.py` | ✅ 20 objects, diverged=0 |
+| 1B Step E1 MegaSAM | `data/batch_megasam.py` | ✅ smoke test passed |
+| 1B Step E2 HaWoR | `data/batch_hawor.py` | ✅ smoke test passed (~98s/seq) |
+| 1B Step E5 FP Ego | `tools/batch_obj_pose_ego.py` | ⏳ pending E1+E2 full run |
+| 1B Step E6 Align Ego | `data/batch_align_ego_mano_fp.py` | ⏳ pending E5 |
