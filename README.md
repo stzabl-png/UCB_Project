@@ -472,13 +472,19 @@ export FP_ROOT="$(pwd)"
 Weights are hosted on our HuggingFace repo. Run from inside the FoundationPose directory:
 
 ```bash
+# Recommended: use setup_weights.py (handles all tools automatically)
+python setup_weights.py --tool fp
+```
+
+Or manually (note: weights are in `UCBProject/Affordance2Grasp-Weights`):
+```bash
 cd /path/to/FoundationPose
 
 python3 -c "
-from huggingface_hub import hf_hub_download, snapshot_download
+from huggingface_hub import snapshot_download
 import shutil, os
 
-repo = 'UCBProject/Affordance2Grasp-Data'
+repo = 'UCBProject/Affordance2Grasp-Weights'
 
 for folder in ['2023-10-28-18-33-37', '2024-01-11-20-02-45']:
     snapshot_download(
@@ -487,7 +493,6 @@ for folder in ['2023-10-28-18-33-37', '2024-01-11-20-02-45']:
         allow_patterns=f'FoundationPose/weights/{folder}/*',
         local_dir='.',
     )
-    # Move into weights/
     src = f'FoundationPose/weights/{folder}'
     dst = f'weights/{folder}'
     if os.path.exists(src):
@@ -724,19 +729,38 @@ data_hub/
 
 ### 5. Download preprocessed assets (HuggingFace)
 
+`setup_weights.py` handles all HuggingFace downloads in one place:
+
 ```bash
 pip install huggingface_hub
-python -c "
-from huggingface_hub import snapshot_download
-snapshot_download(
-    repo_id='StZaBL/Affordance2Grasp-ProcessedData',
-    repo_type='dataset',
-    local_dir='data_hub/ProcessedData',
-)
-"
+
+# Model weights + essential data assets (masks + meshes, ~12 GB total)
+python setup_weights.py
+
+# Or download specific assets:
+python setup_weights.py --tool thirdmasks  # Phase 1A FP masks (DexYCB/HO3D/OakInk/TACO, ~30 MB)
+python setup_weights.py --tool egomasks    # Phase 1B FP masks (EgoDex+TACO ego, ~70 MB)
+python setup_weights.py --tool objmeshes   # Object meshes for FP (~1 GB)
+python setup_weights.py --tool egodex      # EgoDex raw videos (~30 GB)
+python setup_weights.py --tool taco        # TACO Alloc+Ego videos (~144 GB)
 ```
 
-Includes: YCB meshes (`obj_meshes/ycb/`) + FoundationPose init masks (`obj_recon_input/ycb/`)
+**HuggingFace repos used:**
+
+| Repo | Content | Used by |
+|---|---|---|
+| `UCBProject/Affordance2Grasp-Weights` | Model weights (FP/HaWoR/HaPTIC/MegaSAM/DepthPro) | `setup_weights.py` |
+| `UCBProject/ThirdDataMask` | Phase 1A FP init masks (DexYCB/HO3D/OakInk/TACO, 278 items) | `batch_obj_pose.py` |
+| `UCBProject/EgoDataMask` | Phase 1B FP init masks (EgoDex+TACO ego, 490 items) | `batch_obj_pose_ego.py` |
+| `UCBProject/Affordance2Grasp-Mesh` | Object meshes YCB+EgoDex+OakInk (56 sets) | FP + scale estimation |
+| `UCBProject/Affordance2Grasp-EgoDex` | EgoDex raw videos (129k frames, 3051 seqs) | Phase 1B |
+| `UCBProject/Affordance2Grasp-TACO` | TACO Allocentric + Ego raw videos | Phase 1A+1B |
+| `UCBProject/Affordance2Grasp-OakInk` | OakInk raw data | Phase 1A |
+| `UCBProject/ARCTIC-Archive` | ARCTIC raw data | Phase 1A |
+
+> **DexYCB / HO3D** must be downloaded from their official sites (license restricted):
+> - DexYCB: [dex-ycb.github.io](https://dex-ycb.github.io) (~250 GB)
+> - HO3D v3: [www.tugraz.at/...](https://www.tugraz.at/index.php?id=57823) (~6 GB)
 
 ---
 
@@ -1480,12 +1504,17 @@ and are stored in our HuggingFace repo. They are NOT generated automatically.
 
 **Fix — download from HuggingFace:**
 ```bash
+# Recommended (handles path placement automatically):
+python setup_weights.py --tool thirdmasks   # DexYCB/HO3D/OakInk/TACO masks
+python setup_weights.py --tool objmeshes    # object meshes
+
+# Or manually:
 python3 -c "
 from huggingface_hub import snapshot_download
-# UCBProject/ObjMesh contains: 28 YCB + 89 EgoDex + 100 OakInk meshes,
-# plus obj_recon_input/ycb/ initial masks needed by FoundationPose.
+# UCBProject/Affordance2Grasp-Mesh: 56 object sets (28 YCB + OakInk + EgoDex tasks)
+# includes obj_recon_input/ycb/ initial masks + obj_meshes/ycb/ meshes
 snapshot_download(
-    repo_id='UCBProject/ObjMesh',
+    repo_id='UCBProject/Affordance2Grasp-Mesh',
     repo_type='dataset',
     local_dir='data_hub/ProcessedData',
     allow_patterns=['obj_recon_input/ycb/**', 'obj_meshes/ycb/**'],
