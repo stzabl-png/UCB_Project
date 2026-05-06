@@ -589,13 +589,11 @@ cp droid_backends.cpython-310-x86_64-linux-gnu.so droid_slam/
 cd ../..
 
 # 5. MegaSAM Python dependencies
-cd mega-sam
-pip install -r requirements.txt
-cd ..
+#    ⚠️  mega-sam has NO requirements.txt — it only ships environment.yml (conda format).
+#    Install the required packages directly:
+pip install 'numpy<2.0' opencv-python natsort tqdm imageio h5py \
+    scipy matplotlib einops kornia wandb 'huggingface-hub>=0.23' timm ninja
 
-# 6. Remaining pip deps (mega-sam has no complete requirements.txt for pip installs)
-pip install opencv-python natsort tqdm imageio h5py scipy matplotlib \
-    einops kornia wandb huggingface-hub timm ninja
 
 # 7. Download Depth-Anything ViT-L weights (1.28 GB, required at runtime)
 python3 -c "
@@ -661,8 +659,10 @@ python setup.py install
 cd ../../../..
 
 # 4. HaWoR Python deps (install AFTER torch is confirmed)
+#    ⚠️  hawor's requirements.txt contains 'pytorch3d @ git+...' which conflicts with
+#       the pre-built 0.7.5 wheel installed in Step 2. Skip that line:
 cd third_party/hawor
-pip install -r requirements.txt
+grep -v 'pytorch3d' requirements.txt | pip install -r /dev/stdin
 cd ../..
 
 # 5. Extra packages not in requirements.txt (required at runtime)
@@ -1482,17 +1482,19 @@ and are stored in our HuggingFace repo. They are NOT generated automatically.
 ```bash
 python3 -c "
 from huggingface_hub import snapshot_download
+# UCBProject/ObjMesh contains: 28 YCB + 89 EgoDex + 100 OakInk meshes,
+# plus obj_recon_input/ycb/ initial masks needed by FoundationPose.
 snapshot_download(
-    repo_id='UCBProject/Affordance2Grasp-Mesh',
+    repo_id='UCBProject/ObjMesh',
     repo_type='dataset',
     local_dir='data_hub/ProcessedData',
     allow_patterns=['obj_recon_input/ycb/**', 'obj_meshes/ycb/**'],
-    token='YOUR_HF_TOKEN',
 )
 "
 # Downloads:
-#   obj_recon_input/ycb/ycb_dex_01~20/0.png  (initial masks, 12 MB)
-#   obj_meshes/ycb/ycb_dex_01~20/mesh.ply    (object meshes, 999 MB)
+#   obj_recon_input/ycb/ycb_dex_01~20/0.png  (initial masks, ~12 MB)
+#   obj_meshes/ycb/ycb_dex_01~20/mesh.ply    (object meshes, ~999 MB)
+# Note: repo is public — no token required.
 ```
 
 ### T8 — DexYCB download (~250 GB)
@@ -1822,8 +1824,9 @@ cp droid_backends.cpython-310-x86_64-linux-gnu.so droid_slam/
 cd ../..
 ```
 
-> **Alternative:** `pip install -e mega-sam/base/thirdparty/lietorch --no-build-isolation`  
-> also works but installs as an egg into site-packages instead.
+> **Do NOT use:** `pip install -e mega-sam/base/thirdparty/lietorch --no-build-isolation`
+> That only compiles `lietorch`, **not** `droid_backends`. The `.so` will not be created.
+> Always use `mega-sam/base/setup.py` as shown above.
 
 ---
 
