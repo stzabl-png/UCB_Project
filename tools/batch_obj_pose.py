@@ -16,7 +16,7 @@ batch_obj_pose.py — 通用物体位姿估计脚本 (FoundationPose)
 
 用法:
   conda activate bundlesdf
-  cd /home/lyh/Project/Affordance2Grasp
+  cd $PROJ
 
   # 验证：跑 3 个 arctic/box 序列
   python tools/batch_obj_pose.py --dataset arctic --limit 3

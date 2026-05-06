@@ -1,0 +1,21 @@
+{
+  "source": "/home/lyh/Project/arctic/unpack/arctic_data/data/cropped_images/s05/notebook_grab_01/1",
+  "total_frames": 942,
+  "fps": 24,
+  "keyframes": [
+    2,
+    25,
+    22,
+    36
+  ],
+  "obj": {
+    "start": 2,
+    "end": 25,
+    "n_frames": 24
+  },
+  "mano": {
+    "start": 22,
+    "end": 36,
+    "n_frames": 15
+  }
+}

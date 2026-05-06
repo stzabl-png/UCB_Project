@@ -20,7 +20,7 @@ annotate_egodex_batch.py — EgoDex 全量物体批量标注工具
 
 用法:
   conda activate base
-  cd /home/lyh/Project/Affordance2Grasp
+  cd $PROJ  # your project root
   python tools/annotate_egodex_batch.py
 
   # 只标注某个 task:
@@ -48,7 +48,7 @@ OBJ_INPUT   = os.path.join(DATA_HUB, "ProcessedData", "obj_recon_input", "egocen
 UPLOAD_DIR  = "/tmp/sam3d_upload"
 REGISTRY_F  = os.path.join(PROJ, "tools", "egodex_sequence_registry.json")
 
-HAWOR_PY = "/home/lyh/anaconda3/envs/hawor/bin/python"
+HAWOR_PY = _find_hawor_python()
 SAM2_SRV = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sam2_server.py")
 WIN      = "EgoDex Batch Annotator"
 DISP_H   = 720
@@ -384,7 +384,7 @@ def main():
     print(f"Registry: {len(done_keys)} egodex 序列已注册")
     print(f"\n下一步:")
     print(f"  1. 上传 SAM3D:")
-    print(f"     rsync -avz {UPLOAD_DIR}/ root@<SAM3D_IP>:/mnt/data/lyh/sam3d_input/")
+    print(f"     rsync -avz {UPLOAD_DIR}/ <CLOUD_SERVER>:/mnt/data/{config.SAM3D_USER}/sam3d_input/")
     print(f"  2. 下载 mesh 后放到:")
     print(f"     {MESH_BASE}/{{obj_name}}/mesh.ply")
     print(f"  3. 估计 scale:")

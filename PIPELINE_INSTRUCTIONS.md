@@ -107,7 +107,7 @@ data_hub/
   meshes/v1/    <A0xxxx>.obj ← OakInk 物体
 
 # 云服务器 (ssh sam3d-gpu)
-SSH: <ALIYUN_NLB_HOST>:<PORT>  user=$SAM3D_USER   # 联系 lyh 获取实际地址
+SSH: <CLOUD_SERVER_HOST>:<PORT>  user=$SAM3D_USER   # 联系 lyh 获取实际地址
 SAM3D 代码: /root/$SAM3D_USER/sam-3d-objects/  (必须在此目录运行!)
 输入:       /mnt/data/$SAM3D_USER/sam3d_input/
 输出:       /mnt/data/$SAM3D_USER/sam3d_mesh_output/
@@ -264,7 +264,7 @@ python $PROJ/tools/batch_fp_register.py --all
 
 ```bash
 conda activate hawor
-cd /home/lyh/Project/Affordance2Grasp
+cd $PROJ
 
 python tools/batch_contact.py                           # 全部序列
 python tools/batch_contact.py --seq s05_scissors_grab_01  # 单个
@@ -314,7 +314,7 @@ output/affordance_batch/s05_<seq>/
 
 ```bash
 conda activate hawor
-cd /home/lyh/Project/Affordance2Grasp
+cd $PROJ
 
 python tools/export_arctic_prior.py           # 全部 10 个物体
 python tools/export_arctic_prior.py --obj scissors   # 单个
@@ -373,7 +373,7 @@ data_hub/human_prior/{obj}.hdf5
 
 ```bash
 conda activate base
-cd /home/lyh/Project/Affordance2Grasp
+cd $PROJ
 
 python3 tools/random_grasp_sampler.py --all            # OakInk 全部物体
 python3 tools/random_grasp_sampler.py --obj scissors   # OakInk 单个
@@ -484,7 +484,7 @@ bash scripts/batch_arctic_sim.sh
 
 ```bash
 conda activate base
-cd /home/lyh/Project/Affordance2Grasp
+cd $PROJ
 
 python3 data/aggregate_robot_gt.py
 ```
@@ -513,7 +513,7 @@ data_hub/training/{obj}.hdf5
 
 ```bash
 conda activate base
-cd /home/lyh/Project/Affordance2Grasp
+cd $PROJ
 
 python3 model/train.py            # 使用 data_hub/training/ 下所有 HDF5
 python3 model/train.py --epochs 50  # 快速 finetune
@@ -526,7 +526,7 @@ python3 model/train.py --epochs 50  # 快速 finetune
 
 ```bash
 conda activate base
-cd /home/lyh/Project/Affordance2Grasp
+cd $PROJ
 
 # 自动读取 data_hub/human_prior/{obj}.hdf5 作为第7通道输入
 python -m inference.grasp_pose \
@@ -549,7 +549,7 @@ python -m inference.grasp_pose \
 ## 14. 常用调试命令
 
 ```bash
-cd /home/lyh/Project/Affordance2Grasp
+cd $PROJ
 
 # 检查各步骤输出完整性
 ls output/fp_register_batch/*_T_obj_cam1.npy | wc -l    # 应为 10

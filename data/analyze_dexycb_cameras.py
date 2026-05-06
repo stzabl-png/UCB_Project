@@ -20,7 +20,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'third_party', 
 import config
 
 RAW = os.path.join(config.DATA_HUB, 'RawData', 'ThirdPersonRawData', 'dexycb')
-OUT = '/home/lyh/.gemini/antigravity/brain/38f12756-e2e9-4dea-99f2-5ceaa1708c40'
+import sys as _sys, os as _os; _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+import config as _cfg
+OUT = _os.path.join(_cfg.OUTPUT_DIR, 'analyze_dexycb_cameras')
 
 # DexYCB GT focal length: all cameras are RealSense D415/D435 at 640×480
 # Published in DexYCB paper: fx ≈ 607-617 depending on exact serial

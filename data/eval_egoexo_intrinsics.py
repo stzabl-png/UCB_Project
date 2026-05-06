@@ -95,7 +95,9 @@ def estimate_fx_unidepth(img):
     Mirrors the run_unidepth_on_dir logic in batch_megasam.py.
     """
     import torch, sys as _sys
-    _mega = "/home/lyh/Project/Affordance2Grasp/mega-sam"
+    import sys as _sys, os as _os; _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+import config as _cfg
+_mega = _cfg.MEGASAM_DIR
     for _p in [_mega, f"{_mega}/UniDepth", f"{_mega}/unidepth"]:
         if _p not in _sys.path: _sys.path.insert(0, _p)
 

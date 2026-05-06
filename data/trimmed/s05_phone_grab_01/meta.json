@@ -1,0 +1,21 @@
+{
+  "source": "/home/lyh/Project/arctic/unpack/arctic_data/data/cropped_images/s05/phone_grab_01/1",
+  "total_frames": 819,
+  "fps": 24,
+  "keyframes": [
+    2,
+    32,
+    29,
+    48
+  ],
+  "obj": {
+    "start": 2,
+    "end": 32,
+    "n_frames": 31
+  },
+  "mano": {
+    "start": 29,
+    "end": 48,
+    "n_frames": 20
+  }
+}

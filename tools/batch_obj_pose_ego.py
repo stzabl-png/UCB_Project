@@ -21,7 +21,7 @@ batch_obj_pose_ego.py — 第一人称（自中心）视频物体位姿估计 (F
 
 用法:
   conda activate bundlesdf
-  cd /home/lyh/Project/Affordance2Grasp
+  cd $PROJ  # your project root
 
   # 验证两条序列
   python tools/batch_obj_pose_ego.py
@@ -49,7 +49,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config
 
 # ── FoundationPose 路径 (与第三人称共用) ──────────────────────────────────────
-FP_ROOT = os.environ.get("FP_ROOT", getattr(config, "FP_ROOT", "/home/lyh/Project/FoundationPose"))
+import sys as _sys, os as _os; _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+import config as _cfg
+FP_ROOT = _cfg.FP_ROOT
 # NOTE: sys.path is injected lazily inside init_fp_models() / run_fp()
 #       to avoid interfering with the top-level 'import torch'
 

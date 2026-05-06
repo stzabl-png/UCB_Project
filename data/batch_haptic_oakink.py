@@ -12,7 +12,7 @@ batch_haptic_oakink.py — OakInk 序列 HaPTIC 批量推理 (Step 1)
 
 用法:
   conda activate haptic
-  cd /home/lyh/Project/Affordance2Grasp
+  cd $PROJ
   python data/batch_haptic_oakink.py                          # 全部
   python data/batch_haptic_oakink.py --seq A01001_0001_0000  # 单序列
   python data/batch_haptic_oakink.py --cam north_west        # 指定摄像机

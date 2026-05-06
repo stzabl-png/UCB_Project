@@ -19,11 +19,11 @@ annotate_egocentric_obj.py — 为自中心视频序列标注物体 mask 并上�
 
 用法:
   conda activate base
-  cd /home/lyh/Project/Affordance2Grasp
+  cd $PROJ  # your project root
   python tools/annotate_egocentric_obj.py
 
   # 标完后 rsync 到云端:
-  rsync -avz /tmp/sam3d_upload/ root@<SAM3D_IP>:/mnt/data/lyh/sam3d_input/
+  rsync -avz /tmp/sam3d_upload/ <CLOUD_SERVER>:/mnt/data/{SAM3D_USER}/sam3d_input/
 """
 
 import os, sys, json, shutil, subprocess
@@ -35,7 +35,7 @@ from glob import glob
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 UPLOAD_DIR = "/tmp/sam3d_upload"
-HAWOR_PY   = "/home/lyh/anaconda3/envs/hawor/bin/python"
+HAWOR_PY   = _find_hawor_python()
 SAM2_SRV   = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sam2_server.py")
 WIN        = "EgoCentric Object Annotator"
 DISP_H     = 720
@@ -44,13 +44,13 @@ DISP_H     = 720
 TARGETS = [
     {
         "obj_name":   "assemble_tile",           # SAM3D 物体目录名
-        "frames_dir": "/home/lyh/Project/Affordance2Grasp/data_hub/RawData/ThirdPersonRawData"
+        "frames_dir": os.path.join(config.DATA_HUB, "RawData", "ThirdPersonRawData")
                       "/egodex/test/assemble_disassemble_tiles/1/extracted_images",
         "start_frame": 0,                         # 建议从哪帧开始看（物体出现帧）
     },
     {
         "obj_name":   "orange",
-        "frames_dir": "/home/lyh/Project/Affordance2Grasp/data_hub/RawData/ThirdPersonRawData"
+        "frames_dir": os.path.join(config.DATA_HUB, "RawData", "ThirdPersonRawData")
                       "/ph2d/1407-picking_orange_tj_2025-03-12_16-42-19"
                       "/processed_episode_3/extracted_images",
         "start_frame": 50,
@@ -255,7 +255,7 @@ def main():
         print(f"  {t['obj_name']:25s} → {od}/frame.jpg + mask.png")
     print()
     print("下一步 — 上传到 SAM3D 云端:")
-    print(f"  rsync -avz {UPLOAD_DIR}/ root@<SAM3D_IP>:/mnt/data/lyh/sam3d_input/")
+    print(f"  rsync -avz {UPLOAD_DIR}/ <CLOUD_SERVER>:/mnt/data/{config.SAM3D_USER}/sam3d_input/")
     print(f"  # 然后在云端运行 SAM3D（见 batch_infer.py）")
 
 

@@ -159,7 +159,7 @@ conda run -n mega_sam python ...
 
 ```python
 # config.py 必须正确设置
-DATA_HUB   = "/home/lyh/Project/Affordance2Grasp/data_hub"
+DATA_HUB   = os.path.join(os.path.dirname(__file__), "data_hub")  # auto-detected, no hardcoding
 HAPTIC_DIR = "/path/to/HaPTIC"    # 独立 repo，不是 submodule
 FP_ROOT    = "/path/to/FoundationPose"  # 也通过 env var 设置
 ```

@@ -20,7 +20,9 @@ import sys, os, json, tempfile, traceback
 import numpy as np
 import torch
 
-SAM2_ROOT   = "/home/lyh/Project/sam2"
+import sys; sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import config
+SAM2_ROOT   = config.SAM2_DIR
 SAM2_CKPT   = os.path.join(SAM2_ROOT, "checkpoints/sam2.1_hiera_tiny.pt")
 SAM2_CFGDIR = os.path.join(SAM2_ROOT, "sam2", "configs")
 SAM2_CFGNAME = "sam2.1/sam2.1_hiera_t.yaml"

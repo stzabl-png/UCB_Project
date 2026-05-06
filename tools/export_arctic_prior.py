@@ -23,7 +23,9 @@ import h5py
 from scipy.spatial import cKDTree
 
 PROJ   = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-ARCTIC = '/home/lyh/Project/arctic/unpack'
+import sys as _sys, os as _os; _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+import config as _cfg
+ARCTIC = _cfg.ARCTIC_ROOT
 AFF    = os.path.join(PROJ, 'output', 'affordance_batch')
 HP_DIR = os.path.join(PROJ, 'data_hub', 'human_prior')
 os.makedirs(HP_DIR, exist_ok=True)

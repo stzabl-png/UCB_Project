@@ -37,7 +37,7 @@ estimate_obj_scale.py — 估计 SAM3D Mesh 的尺度校正因子 (通用，所�
 用法:
     # 需要 depth-pro 环境（有 Depth Pro 模型）
     conda activate depth-pro
-    cd /home/lyh/Project/Affordance2Grasp
+    cd $PROJ
 
     python data/estimate_obj_scale.py              # 所有数据集所有物体
     python data/estimate_obj_scale.py --dataset arctic

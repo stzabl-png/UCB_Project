@@ -51,7 +51,9 @@ from tqdm import tqdm
 
 # ── 路径 ─────────────────────────────────────────────────────────────────────
 PROJ     = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-HAWOR    = "/home/lyh/Project/Video2MANO&Mesh/hawor"
+import sys as _sys, os as _os; _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+import config as _cfg
+HAWOR    = _cfg.HAWOR_DIR
 MANO_R   = os.path.join(HAWOR, "_DATA/data/mano/MANO_RIGHT.pkl")
 MANO_L   = os.path.join(HAWOR, "_DATA/data_left/mano_left/MANO_LEFT.pkl")
 

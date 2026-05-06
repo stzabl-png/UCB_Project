@@ -5,9 +5,9 @@
 | 项目 | 值 |
 |------|-----|
 | SSH 连接 | `ssh sam3d-gpu` |
-| 实例 | 阿里云 PAI DSW |
+| 实例 | Cloud GPU (e.g. PAI DSW / any GPU server) |
 | GPU | 2× NVIDIA A800 80GB（GPU 0 通常空闲）|
-| OSS 挂载 | `/mnt/data/lyh/` |
+| OSS 挂载 | `/mnt/data/$SAM3D_USER/` |
 | SAM3D 代码 | `/root/lyh/sam-3d-objects/` |
 | Conda 环境 | `sam3d-objects` |
 
@@ -40,7 +40,7 @@
 
 ```bash
 conda activate base
-cd /home/lyh/Project/Affordance2Grasp
+cd $PROJ
 
 # 标注单个 task（推荐）
 python tools/annotate_egodex_batch.py --task slot_batteries
@@ -99,7 +99,7 @@ done
 
 ```bash
 # 在本地机器
-cd /home/lyh/Project/Affordance2Grasp
+cd $PROJ
 python tools/prep_sam3d_input.py --dataset egodex
 
 # 打包后 rsync 到云端
@@ -156,16 +156,16 @@ python batch_infer.py --input-dir ~/input --output-dir ~/output \
 ```bash
 # 在本地机器
 rsync -avz sam3d-gpu:~/output/egodex/ \
-    /home/lyh/Project/Affordance2Grasp/data_hub/ProcessedData/obj_meshes/egocentric/
+    $PROJ/data_hub/ProcessedData/obj_meshes/egocentric/
 
 # 验证
-ls /home/lyh/Project/Affordance2Grasp/data_hub/ProcessedData/obj_meshes/egocentric/
+ls $PROJ/data_hub/ProcessedData/obj_meshes/egocentric/
 ```
 
 ### Step 5 — 本地：Scale 估计（meter 尺度校正）
 
 ```bash
-cd /home/lyh/Project/Affordance2Grasp
+cd $PROJ
 conda activate hawor
 python data/estimate_obj_scale_ego.py --obj battery
 # 输出: obj_meshes/egocentric/battery/scale.json

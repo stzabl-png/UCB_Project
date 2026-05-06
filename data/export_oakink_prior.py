@@ -13,7 +13,7 @@ export_oakink_prior.py — OakInk 接触聚合 → Human Prior HDF5 (Step 5)
 
 用法:
   conda activate hawor
-  cd /home/lyh/Project/Affordance2Grasp
+  cd $PROJ
   python data/export_oakink_prior.py
   python data/export_oakink_prior.py --obj_id A01001
 """

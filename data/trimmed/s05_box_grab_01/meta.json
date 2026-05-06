@@ -1,0 +1,21 @@
+{
+  "source": "/home/lyh/Project/arctic/unpack/arctic_data/data/cropped_images/s05/box_grab_01/1",
+  "total_frames": 677,
+  "fps": 24,
+  "keyframes": [
+    2,
+    25,
+    18,
+    39
+  ],
+  "obj": {
+    "start": 2,
+    "end": 25,
+    "n_frames": 24
+  },
+  "mano": {
+    "start": 18,
+    "end": 39,
+    "n_frames": 22
+  }
+}

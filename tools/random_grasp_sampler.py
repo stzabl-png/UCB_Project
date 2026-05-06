@@ -29,7 +29,9 @@ OUTPUT_DIR    = os.path.join(PROJ, 'output', 'grasps_random')
 INFER_OUT_DIR = os.path.join(PROJ, 'output', 'grasps_infer')         # 纯推理输出
 
 # ARCTIC 物体列表 & mesh 路径（单位 mm，加载后需 /1000）
-ARCTIC_ROOT = '/home/lyh/Project/arctic/unpack'
+import sys as _sys, os as _os; _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+import config as _cfg
+ARCTIC_ROOT = _cfg.ARCTIC_ROOT
 ARCTIC_OBJS = ('box capsulemachine espressomachine ketchup microwave '
                'mixer notebook phone scissors waffleiron').split()
 ARCTIC_MESH_DIR = os.path.join(ARCTIC_ROOT, 'meta', 'object_vtemplates')

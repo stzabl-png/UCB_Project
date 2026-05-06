@@ -33,7 +33,7 @@ batch_align_mano_fp.py — MANO × FoundationPose 对齐 → 接触标签 → �
 用法
 ====
   conda activate bundlesdf          # trimesh / scipy 可用即可
-  cd /home/lyh/Project/Affordance2Grasp
+  cd $PROJ
 
   # 验证: arctic/box
   python data/batch_align_mano_fp.py --dataset arctic --obj box

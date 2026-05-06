@@ -79,6 +79,11 @@ CONTACT_VIS_DIR = os.path.join(OUTPUT_DIR, "contact_region_vis")
 SAM3D_DIR = os.environ.get("SAM3D_DIR", "")
 SAM3D_CACHE = os.path.join(OUTPUT_DIR, "sam3d_obj_cache")   # triangle mesh .obj files
 SAM3D_PLY_CACHE = os.path.join(OUTPUT_DIR, "sam3d_mesh_cache")  # raw Gaussian Splat .ply files
+# Cloud server username for SAM3D (used in rsync commands)
+SAM3D_USER = os.environ.get("SAM3D_USER", os.environ.get("USER", "user"))
+
+# SAM2 interactive segmentation
+SAM2_DIR = os.environ.get("SAM2_DIR", os.path.join(PROJECT_DIR, "third_party", "sam2"))
 
 # MegaSAM camera tracking (focal + per-frame poses + depth)
 MEGASAM_DIR = os.path.join(PROJECT_DIR, "mega-sam")
