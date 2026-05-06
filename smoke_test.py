@@ -103,8 +103,9 @@ def main():
               (PROJECT / "data_hub" / "ProcessedData" / "obj_recon_input" / "egocentric").exists(),
               "run: python setup_weights.py --tool egomasks")
 
+        fp_root_env = os.environ.get("FP_ROOT", str(PROJECT / "third_party" / "FoundationPose"))
         check("FoundationPose weights",
-              (PROJECT / "third_party" / "FoundationPose" / "weights" / "2023-10-28-18-33-37" / "model_best.pth").exists(),
+              (Path(fp_root_env) / "weights" / "2023-10-28-18-33-37" / "model_best.pth").exists(),
               "run: python setup_weights.py --tool fp")
 
         check("HaWoR weights",
