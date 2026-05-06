@@ -222,7 +222,7 @@ Even if you only want `egodex`, the script eagerly enumerates `ph2d_avp` / `taco
 `--start N --end M` instead of `--seq-ids`.
 
 ### 5.2 EgoDex registry uses absolute paths from another machine
-`tools/egodex_sequence_registry.json` had original entries with `/home/lyh/...` paths
+`tools/egodex_sequence_registry.json` had original entries with hardcoded absolute paths
 hardcoded. Many entries are also marked `skipped: true`. Add new entries for sequences
 you want to process, with **your** absolute paths and `skipped` removed.
 
