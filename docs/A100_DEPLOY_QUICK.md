@@ -1,11 +1,28 @@
 # A100 Deployment Guide — Extending HumanPrior with EgoDex + OakInk
 
-> **Scenario**: The company team already has HumanPrior from DexYCB and HO3D.
-> This guide adds EgoDex (egocentric) and OakInk (third-person) to produce a
-> merged HumanPrior across all four datasets for policy training.
->
-> **Target**: 8×A100, Ubuntu 22.04, CUDA 12.x
-> **Estimated total runtime**: ~16–17 hours with 8 GPUs in parallel.
+## 🤖 Context for Deployment Agent
+
+**What this run does:**
+This pipeline extends an existing HumanPrior dataset.
+The company team already processed **DexYCB** and **HO3D** through the full pipeline
+and has their HumanPrior HDF5 files ready. This deployment adds two new datasets:
+
+| Dataset | View | Pipeline |
+|---|---|---|
+| **OakInk** (new) | Third-person | DepthPro → HaPTIC → FoundationPose → Align |
+| **EgoDex** (new) | Egocentric (first-person) | MegaSAM → HaWoR → FoundationPose → Align |
+
+**End goal:** Merge all four datasets into a single unified HumanPrior:
+```
+DexYCB    (existing) ─┐
+HO3D      (existing) ─┤  aggregate_prior.py  →  data_hub/human_prior/{obj}.hdf5
+OakInk    (new)      ─┤
+EgoDex    (new)      ─┘
+```
+This HumanPrior is then used to train the PointNet++ affordance model (`model/train.py`).
+
+**Hardware target:** 8×A100, Ubuntu 22.04, CUDA 12.x  
+**Estimated runtime:** ~16–17 hours total with all 8 GPUs running in parallel.
 
 ---
 

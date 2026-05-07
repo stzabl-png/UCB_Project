@@ -1624,44 +1624,130 @@ pip install "cmake<4.0" ninja pybind11 "setuptools<70" "numpy<2.0"
 
 ### T12 — Blackwell GPU (sm_120): `no kernel image is available for execution on the device`
 
-**Affected GPUs:** RTX 5090, RTX 6000 Pro (2025 Blackwell generation)  
-**Root cause:** `torch 2.1.1` was compiled only up to sm_90. Blackwell (sm_120) kernels are not included.
+**Affected GPUs:** RTX 5090, RTX 4090 Ti, RTX 6000 Pro (2025 Blackwell, sm_120)  
+**Root cause:** `torch 2.1.x` was compiled only up to sm_90. Blackwell kernels are not included.
 
 **Verify your architecture:**
 ```bash
 nvidia-smi --query-gpu=name,compute_cap --format=csv
-# compute_cap = 12.0 or higher → you have Blackwell → follow this fix
+# compute_cap = 12.0 or higher → Blackwell → follow this fix
 ```
 
-**Fix: upgrade the entire haptic env torch stack to 2.7+**
-```bash
-conda activate haptic
+#### T12.1 — `bundlesdf` + `haptic` envs: upgrade to cu128
 
-# Step 1: upgrade torch to Blackwell-compatible build
+```bash
+conda activate haptic   # repeat for bundlesdf
+
+# Step 1: upgrade torch
 pip install torch==2.7.0+cu128 torchvision==0.22.0+cu128 \
   --index-url https://download.pytorch.org/whl/cu128
 
-# Step 2: upgrade xformers to matching version
+# Step 2: upgrade xformers
 pip install xformers --index-url https://download.pytorch.org/whl/cu128
 
-# Step 3: pytorch3d has no cu128 prebuilt wheel — compile from source (~15 min)
-pip install "git+https://github.com/facebookresearch/pytorch3d.git"
+# Step 3: pytorch3d — no cu128 prebuilt wheel, compile from source (~15 min)
+export FORCE_CUDA=1
+export TORCH_CUDA_ARCH_LIST="12.0"
+pip install --no-build-isolation 'git+https://github.com/facebookresearch/pytorch3d.git'
 
-# Step 4: recompile detectron2 (torch ABI change requires rebuild)
+# Step 4: recompile detectron2 (torch ABI change)
 pip install --force-reinstall "setuptools<70"
-git clone --depth 1 https://github.com/facebookresearch/detectron2.git /tmp/det2
-pip install /tmp/det2 --no-build-isolation
+pip install --no-build-isolation 'git+https://github.com/facebookresearch/detectron2'
 
-# Step 5: re-pin numpy (pytorch3d compile may upgrade it)
+# Step 5: re-pin numpy
 pip install "numpy<2.0"
+
+# Step 6: recompile mmcv-full with sm_120
+export CUDA_HOME=$CONDA_PREFIX
+export CPATH=$CONDA_PREFIX/targets/x86_64-linux/include:$CPATH
+pip install --no-build-isolation 'mmcv-full>=1.7.0,<1.8.0'
 ```
 
-> **Note on other envs:** `depth-pro` and `bundlesdf` environments can use `cu128` directly  
-> (e.g. `pip install torch==2.7.0+cu128 ...`). FoundationPose CUDA extensions must also be  
-> recompiled with the matching CUDA toolkit.
+FoundationPose CUDA extensions (`nvdiffrast`, `mycpp`) must also be recompiled
+after upgrading torch. Run `bash build_all_conda.sh` from the FP directory.
 
-> **Verified working on:** RTX 4080 SUPER (sm_89) with torch 2.1.1+cu121  
-> **Reported working on Blackwell after upgrade:** RTX 5090 (sm_120) with torch 2.7.0+cu128
+#### T12.2 — `hawor` + `mega_sam` envs: same upgrade + DROID-SLAM rebuild
+
+Apply the same `pip install torch==2.7.0+cu128 ...` steps, then:
+
+**hawor env — DROID-SLAM:**
+```bash
+# In third_party/hawor/thirdparty/DROID-SLAM/setup.py,
+# add '-gencode=arch=compute_120,code=sm_120' to nvcc_args, then:
+cd third_party/hawor/thirdparty/DROID-SLAM
+conda run -n hawor python setup.py install
+```
+
+**mega_sam env — droid_slam + torch_scatter:**
+```bash
+# mega-sam/base/setup.py: add sm_120 gencode line, then rebuild
+cd mega-sam/base
+conda run -n mega_sam python setup.py install
+
+# Delete stale .so committed at old ABI:
+rm mega-sam/base/droid_slam/droid_backends.cpython-310-x86_64-linux-gnu.so
+
+# torch_scatter for cu128
+pip install --force-reinstall torch_scatter \
+  -f https://data.pyg.org/whl/torch-2.11.0+cu128.html
+```
+
+#### T12.3 — xformers `memory_efficient_attention` fails on sm_120
+
+Error: `` `fa3F@0.0.0` ... requires device with capability <= (9,0) but yours is (12,0) ``
+
+Wrap the call in `try/except` and fall back to `torch.nn.functional.scaled_dot_product_attention`.
+
+Three call sites that need patching:
+- `third_party/haptic/haptic/models/components/pose_transformer.py:145`
+- `mega-sam/UniDepth/unidepth/models/backbones/metadinov2/attention.py:79`
+- `~/.cache/torch/hub/facebookresearch_dinov2_main/dinov2/layers/attention.py:94`
+
+For UniDepth: set `XFORMERS_AVAILABLE = False` in the module — clean PyTorch fallbacks exist.  
+For `NystromAttention` (removed in xformers 0.0.28): provide a small SDPA-based stub.
+
+#### T12.4 — SAM3D: kaolin / spconv / gsplat on Blackwell
+
+- **kaolin**: No cu128 wheel. Build CPU-only (SAM3D only uses rendering, no CUDA kernels):
+  ```bash
+  git clone --recurse-submodules https://github.com/NVIDIAGameWorks/kaolin
+  FORCE_CUDA=0 IGNORE_TORCH_VER=1 pip install --no-build-isolation -e kaolin/
+  ```
+- **spconv**: Use `spconv-cu126` — PTX forward-compat works on sm_120:
+  ```bash
+  pip install spconv-cu126
+  ```
+- **gsplat**: Source build from SAM3D-pinned commit with `TORCH_CUDA_ARCH_LIST="12.0"`.
+- **flash_attn**: Skip entirely — set env var `ATTN_BACKEND=sdpa`.
+
+#### T12.5 — Nvidia driver not loaded after kernel update
+
+```bash
+# Check if kernel module is loaded
+lsmod | grep nvidia   # empty = not loaded
+
+# If previous kernel still works, boot into it via GRUB:
+sudo grub-reboot 'Advanced options for Ubuntu>Ubuntu, with Linux <prev-kernel>-generic'
+sudo reboot
+# Long-term fix: install dkms so the driver rebuilds on each kernel update
+```
+
+#### T12.6 — Verified Blackwell Configuration
+
+| Component | Version |
+|---|---|
+| GPU | RTX 5090 (sm_120, 32 GB) |
+| Driver | 580.126.09, Kernel 6.17.0-22 (Ubuntu 24.04) |
+| `torch` | 2.11.0+cu128 |
+| `xformers` | 0.0.35 |
+| `pytorch3d` | 0.7.9 (source built) |
+| `mmcv-full` | 1.7.2 (source built) |
+| `detectron2` | 0.6 (source built) |
+| `spconv` | spconv-cu126 2.3.8 |
+| `kaolin` | 0.18.0 (CPU build) |
+| Phase 1A end-to-end | ✅ 72 frames, ~25 s total |
+| Phase 1B end-to-end | ✅ 5 episodes × 60 frames |
+| SAM3D 217-object batch | ✅ 5.7 s / object, 0 failures |
 
 ---
 
