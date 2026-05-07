@@ -1624,13 +1624,18 @@ pip install "cmake<4.0" ninja pybind11 "setuptools<70" "numpy<2.0"
 
 ### T12 — Blackwell GPU (sm_120): `no kernel image is available for execution on the device`
 
-**Affected GPUs:** RTX 5090, RTX 4090 Ti, RTX 6000 Pro (2025 Blackwell, sm_120)  
+> **⚠️ Blackwell-only.** A100, A30, RTX 3090 (Ampere) and RTX 4080/4090 (Ada Lovelace)
+> work out-of-the-box with `torch 2.1.x+cu121` — **skip this entire section.**
+> Only follow T12 if `nvidia-smi` reports `compute_cap >= 12.0` (RTX 5090, RTX 6000 Pro 2025, etc.)
+
+**Affected GPUs:** RTX 5090, RTX 6000 Pro 2025 (Blackwell, sm_120)  
 **Root cause:** `torch 2.1.x` was compiled only up to sm_90. Blackwell kernels are not included.
 
 **Verify your architecture:**
 ```bash
 nvidia-smi --query-gpu=name,compute_cap --format=csv
 # compute_cap = 12.0 or higher → Blackwell → follow this fix
+# compute_cap < 12.0 (e.g. 8.0=A100, 8.9=RTX 4090) → skip T12 entirely
 ```
 
 #### T12.1 — `bundlesdf` + `haptic` envs: upgrade to cu128
