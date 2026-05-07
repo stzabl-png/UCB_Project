@@ -188,33 +188,12 @@ def discover_taco_allocentric(raw_dir):
         if best_frames:
             yield "taco_allocentric", triplet, best_frames
 
-
-
-def discover_egocentric(raw_dir):
-    """Re-annotate egocentric tasks using the saved image.png as the source frame.
-
-    raw_dir is ignored — reads directly from obj_recon_input/egocentric/.
-    Yields (ds_out, task_name, [image_path]) for every task directory that
-    already has an image.png reference frame.
-    """
-    ego_dir = os.path.join(OUT_BASE, "egocentric")
-    if not os.path.isdir(ego_dir):
-        print(f"  ⚠️  egocentric: {ego_dir} not found")
-        return
-    for task in natsorted(os.listdir(ego_dir)):
-        task_dir = os.path.join(ego_dir, task)
-        img = os.path.join(task_dir, "image.png")
-        if os.path.isdir(task_dir) and os.path.exists(img):
-            yield "egocentric", task, [img]
-
-
 DISCOVERERS = {
     "arctic":           (discover_arctic,           "arctic"),
     "oakink":           (discover_oakink,           "oakink_v1"),
     "ho3d_v3":          (discover_ho3d,             "ho3d_v3"),
     "dexycb":           (discover_dexycb,           "dexycb"),
     "taco_allocentric": (discover_taco_allocentric, "taco"),  # uses TACO_ALLOC_DIR directly
-    "egocentric":       (discover_egocentric,       ""),       # uses OUT_BASE directly
 }
 
 # ── SAM2 client ───────────────────────────────────────────────────────────────
@@ -301,8 +280,6 @@ def draw_ui(frame_d, fi, total, obj_idx, total_objs, ds, obj_name,
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", default=None, choices=list(DISCOVERERS.keys()))
-    parser.add_argument("--task",    default=None,
-                        help="Only annotate this specific task/object name (substring match)")
     parser.add_argument("--redo",    action="store_true")
     parser.add_argument("--start",   type=int, default=0)
     args = parser.parse_args()
@@ -314,13 +291,10 @@ def main():
     datasets = [args.dataset] if args.dataset else list(DISCOVERERS.keys())
     for ds_key in datasets:
         fn, folder = DISCOVERERS[ds_key]
-        raw_dir = os.path.join(RAW_BASE, folder) if folder else ""
-        if folder and not os.path.isdir(raw_dir):
+        raw_dir = os.path.join(RAW_BASE, folder)
+        if not os.path.isdir(raw_dir):
             print(f"  ⚠️  {ds_key}: {raw_dir} not found, skipping"); continue
         for ds_out, obj_name, frames in fn(raw_dir):
-            # --task filter: substring match
-            if args.task and args.task not in obj_name:
-                continue
             out_dir = os.path.join(OUT_BASE, ds_out, obj_name)
             img_out = os.path.join(out_dir, "image.png")
             if not args.redo and os.path.exists(img_out):
