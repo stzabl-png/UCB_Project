@@ -270,6 +270,27 @@ def download_obj_meshes():
     print(f"✅ Object meshes: {n} categories → {dest}")
 
 
+def download_oakink():
+    """Download OakInk v1 raw data from UCBProject/Affordance2Grasp-OakInk (~25 GB).
+
+    Places data at: data_hub/RawData/ThirdPersonRawData/oakink/
+    """
+    print("\n📥 OakInk v1 raw data — UCBProject/Affordance2Grasp-OakInk (~25 GB)...")
+    dest = PROJECT / "data_hub" / "RawData" / "ThirdPersonRawData" / "oakink"
+    if dest.exists() and any(dest.iterdir()):
+        n = sum(1 for _ in dest.iterdir() if _.is_dir())
+        print(f"   ⏭️  {dest} already has {n} seq dirs, skipping")
+        return
+    dest.mkdir(parents=True, exist_ok=True)
+    snapshot_download(
+        repo_id="UCBProject/Affordance2Grasp-OakInk",
+        repo_type="dataset",
+        local_dir=str(dest),
+    )
+    n = sum(1 for _ in dest.iterdir() if _.is_dir())
+    print(f"✅ OakInk: {n} sequence directories → {dest}")
+
+
 def download_egodex():
     """Download EgoDex raw dataset from UCBProject/Affordance2Grasp-EgoDex (~30 GB)."""
     print("\n📥 EgoDex raw dataset (~30 GB, 101 tasks, 3051 sequences)...")
@@ -342,7 +363,8 @@ DATA_TOOLS = {
     "egomasks":    download_egomasks,    # ~70 MB
     "thirdmasks":  download_third_masks, # ~30 MB — needed for Phase 1A FP
     "objmeshes":   download_obj_meshes,  # ~1 GB  — needed for Phase 1A+1B FP
-    "egodex":      download_egodex,      # ~30 GB
+    "oakink":      download_oakink,      # ~25 GB — Phase 1A (third-person)
+    "egodex":      download_egodex,      # ~30 GB — Phase 1B (egocentric)
     "taco":        download_taco,        # ~144 GB
 }
 
