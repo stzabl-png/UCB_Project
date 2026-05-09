@@ -49,7 +49,7 @@ def _sync_runner():
 
 _sync_runner()
 
-OUT_BASE    = os.path.join(config.DATA_HUB, "ProcessedData", "ego_mano")
+OUT_BASE    = os.path.join(config.DATA_HUB, "ProcessedData", "egocentric")
 
 # Egocentric raw data root
 EGO_BASE    = os.path.join(config.DATA_HUB, "RawData", "EgoRawData")
@@ -129,13 +129,14 @@ def frames_to_temp_video(img_paths, fps=15):
 
 
 def load_megasam_focal(seq_id, dataset):
-    """Try to load focal length from MegaSAM K.npy output."""
+    """Try to load focal length from MegaSAM K.npy output (new egocentric/ layout)."""
     try:
         import numpy as np
         parts = seq_id.split("/")  # e.g. ["egodex", "slot_batteries", "1"]
-        rel   = "/".join(parts[1:])  # "slot_batteries/1"
-        k_path = os.path.join(config.DATA_HUB, "ProcessedData", "egocentric_depth",
-                               dataset, rel, "K.npy")
+        ds    = parts[0]
+        rel   = "__".join(parts[1:])  # "slot_batteries__1"
+        k_path = os.path.join(config.DATA_HUB, "ProcessedData", "egocentric",
+                               ds, rel, "K.npy")
         if not os.path.exists(k_path):
             return None
         K = np.load(k_path)
@@ -240,10 +241,14 @@ def main():
     done = skipped = failed = 0
 
     for seq_id, img_src, src_type in tqdm(sequences, desc=f"HaWoR/{args.dataset}"):
-        # Output path: OUT_BASE/dataset/{seq_id_without_dataset_prefix}.npz
-        # seq_id format: "egodex/slot_batteries/1"  →  strip first component
-        rel = "/".join(seq_id.split("/")[1:])  # "slot_batteries/1"
-        out_npz = os.path.join(output_dir, f"{rel}.npz")
+        # Output: egocentric/{ds}/{task}__{ep}/mano.npz
+        # seq_id format: "egodex/slot_batteries/1"  →  ds=egodex, rel="slot_batteries__1"
+        parts = seq_id.split("/")
+        ds_name = parts[0]
+        rel = "__".join(parts[1:])   # "slot_batteries__1"
+        seq_dir = os.path.join(OUT_BASE, ds_name, rel)
+        os.makedirs(seq_dir, exist_ok=True)
+        out_npz = os.path.join(seq_dir, "mano.npz")
 
         if os.path.exists(out_npz) and not args.force_rerun:
             tqdm.write(f"  ⏭  {seq_id}: cached")

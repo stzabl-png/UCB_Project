@@ -10,14 +10,14 @@ Pipeline (models loaded ONCE, reused across all episodes):
   Step 5  Save outputs   → standardised .npz format
 
 Output layout:
-  <DATA_HUB>/ProcessedData/egocentric_depth/
-    ph2d_avp/{task}/{episode}/
+  <DATA_HUB>/ProcessedData/egocentric/
+    ph2d_avp/{task}__{episode}/
       depth.npz        depths (N,H,W) float32 [metres]
       cam_c2w.npy      camera-to-world (N,4,4)
       K.npy            intrinsic matrix (3,3)
       motion_prob.npy  dynamic-object probability (N,H,W)
       meta.json        {seq_id, n_frames, hw, motion_score, calibrated_fx}
-    egodex/{task}/{episode}/
+    egodex/{task}__{episode}/
       (same structure)
 
 Usage:
@@ -59,8 +59,8 @@ PH2D_META      = os.path.join(DATA_ROOT, "ph2d", "ph2d_metadata.json")
 EGODEX_ROOT    = os.path.join(EGO_ROOT,  "egodex", "test")
 TACO_EGO_ROOT  = os.path.join(EGO_ROOT,  "taco",   "Egocentric_RGB_Videos")
 HOI4D_ROOT     = os.path.join(EGO_ROOT,  "hoi4d",  "HOI4D_release")
-OUT_BASE    = os.path.join(proj_cfg.DATA_HUB, "ProcessedData", "egocentric_depth")
-WORK_DIR    = os.path.join(OUT_BASE, "_workdir")   # temp frames + DA/UD outputs
+OUT_BASE    = os.path.join(proj_cfg.DATA_HUB, "ProcessedData", "egocentric")
+WORK_DIR    = os.path.join(proj_cfg.DATA_HUB, "ProcessedData", "_egocentric_workdir")   # temp frames + DA/UD outputs
 
 DA_CKPT     = os.path.join(MEGASAM_DIR, "Depth-Anything", "checkpoints",
                             "depth_anything_vitl14.pth")
@@ -476,7 +476,11 @@ def run_droid(frame_dir, da_dir, ud_dir, seq_id, calibrated_fx,
 def save_outputs(ep, depths, motion_prob, K, cam_c2w, n_frames, hw,
                  motion_score, calibrated_fx):
     """Save all outputs in standardised format under OUT_BASE."""
-    out_dir = os.path.join(OUT_BASE, ep["seq_id"])
+    # seq_id e.g. "egodex/stack_unstack_cups/11" → "egodex/stack_unstack_cups__11"
+    parts   = ep["seq_id"].split("/")          # ["egodex", "task", "ep"]
+    ds      = parts[0]
+    rel     = "__".join(parts[1:])             # "task__ep"
+    out_dir = os.path.join(OUT_BASE, ds, rel)
     os.makedirs(out_dir, exist_ok=True)
 
     np.savez_compressed(os.path.join(out_dir, "depth.npz"),
@@ -501,9 +505,12 @@ def save_outputs(ep, depths, motion_prob, K, cam_c2w, n_frames, hw,
 
 
 def is_done(ep):
-    out_dir = os.path.join(OUT_BASE, ep["seq_id"])
+    parts   = ep["seq_id"].split("/")
+    ds      = parts[0]
+    rel     = "__".join(parts[1:])
+    out_dir = os.path.join(OUT_BASE, ds, rel)
     return (os.path.exists(os.path.join(out_dir, "depth.npz")) and
-            os.path.exists(os.path.join(out_dir, "meta.json")))
+            os.path.join(out_dir, "meta.json"))
 
 
 # ══════════════════════════════════════════════════════════════════════════════

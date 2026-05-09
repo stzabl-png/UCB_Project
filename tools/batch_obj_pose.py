@@ -10,7 +10,7 @@ batch_obj_pose.py — 通用物体位姿估计脚本 (FoundationPose)
     → 保存 track_vis/{frame_id}.png (可视化)
 
 输出结构:
-  data_hub/ProcessedData/obj_poses/{dataset}/{seq_id}/
+  data_hub/ProcessedData/third/{dataset}/{seq_id}/
     ob_in_cam/000001.txt  ...
     track_vis/000001.png  ...
 
@@ -50,10 +50,10 @@ sys.path.insert(0, FP_ROOT)
 
 # ── 数据路径 ──────────────────────────────────────────────────────────────────
 MESH_BASE   = os.path.join(config.DATA_HUB, "ProcessedData", "obj_meshes")
-DEPTH_BASE  = os.path.join(config.DATA_HUB, "ProcessedData", "third_depth")
+DEPTH_BASE  = os.path.join(config.DATA_HUB, "ProcessedData", "third")
 RAW_BASE    = os.path.join(config.DATA_HUB, "RawData", "ThirdPersonRawData")
 OBJ_INPUT   = os.path.join(config.DATA_HUB, "ProcessedData", "obj_recon_input")
-OUT_BASE    = os.path.join(config.DATA_HUB, "ProcessedData", "obj_poses")
+OUT_BASE    = os.path.join(config.DATA_HUB, "ProcessedData", "third")
 SCENE_TMP   = "/tmp/fp_scenes"
 
 SHORTER_SIDE = 480   # downscale to fit in GPU memory (OOM if 1000×1000)
@@ -164,14 +164,14 @@ def prepare_scene(dataset, seq_id, obj_ds, obj_name, scene_dir, shorter_side=480
     depth_dir = os.path.join(DEPTH_BASE, dataset, seq_id)
     npz_path  = os.path.join(depth_dir, "depths.npz")
     fid_path  = os.path.join(depth_dir, "frame_ids.txt")
-    K_path    = os.path.join(depth_dir, "K.txt")
+    K_path    = os.path.join(depth_dir, "K.npy")   # new: .npy
 
     if not os.path.exists(npz_path):
         return None
     data      = np.load(npz_path)
     depths    = data["depths"].astype(np.float32)
     frame_ids = open(fid_path).read().strip().split("\n")
-    K_orig    = np.loadtxt(K_path)
+    K_orig    = np.load(K_path)                     # new: np.load
 
     ann_mask = os.path.join(OBJ_INPUT, obj_ds, obj_name, "0.png")
     if not os.path.exists(ann_mask):

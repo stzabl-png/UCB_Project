@@ -17,9 +17,9 @@ Usage:
   python data/batch_depth_pro.py --dataset ho3d_v3 --seq ABF10
 
 Output per sequence:
-  data_hub/ProcessedData/third_depth/{dataset}/{seq_id}/
+  data_hub/ProcessedData/third/{dataset}/{seq_id}/
     depths.npz      — depth maps, shape (N, H, W), float32, metric metres
-    K.txt           — 3x3 camera intrinsic matrix (estimated or fixed fx)
+    K.npy           — 3x3 camera intrinsic matrix (estimated or fixed fx)
     frame_ids.txt   — original frame filenames in order
 
 Two-pass self-calibration (no GT required):
@@ -42,7 +42,7 @@ DEPTH_PRO_DIR = os.path.join(config.PROJECT_DIR, "third_party", "ml-depth-pro", 
 sys.path.insert(0, DEPTH_PRO_DIR)
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
-OUT_BASE = os.path.join(config.DATA_HUB, "ProcessedData", "third_depth")
+OUT_BASE = os.path.join(config.DATA_HUB, "ProcessedData", "third")
 RAW_BASE = os.path.join(config.DATA_HUB, "RawData", "ThirdPersonRawData")
 
 
@@ -259,7 +259,7 @@ def run_batch(sequences, model, transform, output_dir, dataset_name,
             )
             os.makedirs(seq_out, exist_ok=True)
             np.savez_compressed(depths_path, depths=depths)
-            np.savetxt(os.path.join(seq_out, "K.txt"), K, fmt="%.6f")
+            np.save(os.path.join(seq_out, "K.npy"), K)          # .npy for consistency
             with open(os.path.join(seq_out, "frame_ids.txt"), "w") as f:
                 f.write("\n".join(frame_ids))
             tqdm.write(f"  ✅ {seq_id}: depths {depths.shape}  K fx={K[0,0]:.1f}")

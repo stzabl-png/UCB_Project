@@ -9,7 +9,7 @@ and has their HumanPrior HDF5 files ready. This deployment adds two new datasets
 
 | Dataset | View | Pipeline |
 |---|---|---|
-| **OakInk** (new) | Third-person | DepthPro → HaPTIC → FoundationPose → Align |
+| **OakInk** (new) | Third-person | DepthPro → HaWoR → FoundationPose → Align |
 | **EgoDex** (new) | Egocentric (first-person) | MegaSAM → HaWoR → FoundationPose → Align |
 
 **End goal:** Merge all four datasets into a single unified HumanPrior:
@@ -23,6 +23,53 @@ This HumanPrior is then used to train the PointNet++ affordance model (`model/tr
 
 **Hardware target:** 8×A100, Ubuntu 22.04, CUDA 12.x  
 **Estimated runtime:** ~16–17 hours total with all 8 GPUs running in parallel.
+
+---
+
+## Phase 1 Output — Unified ProcessedData Structure
+
+> **⚠️ Critical:** `data_hub/ProcessedData/` is the most important Phase 1 output.
+> All downstream pipeline steps (HaPTIC, FoundationPose alignment, model training) depend on it.
+> **Upload to HuggingFace after each run completes.**
+
+After running Steps 1 and 2 below, `ProcessedData/` will contain:
+
+```
+data_hub/ProcessedData/
+├── egocentric/                    ← Phase 1B outputs (MegaSAM + HaWoR ego)
+│   └── egodex/
+│       └── {task}__{episode}/
+│           ├── depth.npz          MegaSAM metric depth  (N, H, W)  metres
+│           ├── cam_c2w.npy        camera-to-world poses (N, 4, 4)
+│           ├── K.npy              camera intrinsics     (3, 3)
+│           ├── mano.npz           HaWoR hand params     right/left verts + MANO
+│           └── ob_in_cam/         FoundationPose object poses
+│               ├── 000000.npy     (4, 4)  per frame
+│               └── ...
+└── third/                         ← Phase 1A outputs (DepthPro + HaWoR third)
+    └── oakink/
+        └── {seq_id}/
+            ├── depths.npz         Depth Pro metric depth (N, H, W)  metres
+            ├── K.npy              camera intrinsics      (3, 3)
+            ├── mano.npz           HaWoR hand params
+            └── ob_in_cam/
+                ├── 000000.npy     (4, 4)
+                └── ...
+```
+
+**Upload command (run after each step completes):**
+```bash
+python -c "
+from huggingface_hub import HfApi
+api = HfApi()
+api.upload_folder(
+    folder_path='data_hub/ProcessedData',
+    repo_id='UCBProject/ProcessedData',
+    repo_type='dataset',
+    commit_message='Phase1 output: egocentric + third',
+)
+"
+```
 
 ---
 
@@ -53,7 +100,7 @@ python setup_weights.py --tool egodex
 ## Step 1 · OakInk — Third-Person Pipeline (Phase 1A)
 
 OakInk uses the same third-person pipeline as DexYCB:
-DepthPro → HaPTIC → FoundationPose → Align.
+DepthPro → HaWoR → FoundationPose → Align.
 
 ### 1a · Depth Pro (intrinsics + metric depth)
 
@@ -65,7 +112,7 @@ TOTAL=$(python -c "
 import sys; sys.path.insert(0,'.')
 from data.batch_depth_pro import discover_oakink
 import config
-seqs = discover_oakink(config.DATA_HUB)
+seqs = list(discover_oakink(config.DATA_HUB + '/RawData/ThirdPersonRawData/oakink_v1'))
 print(len(seqs))
 ")
 echo "OakInk total sequences: $TOTAL"
@@ -80,31 +127,23 @@ done
 wait
 ```
 
-Output: `data_hub/ProcessedData/third_depth/oakink/{seq_id}/`
+Output: `data_hub/ProcessedData/third/oakink/{seq_id}/depths.npz + K.npy`
 
-### 1b · HaPTIC (hand pose estimation)
+### 1b · HaWoR (hand pose estimation)
 
 ```bash
-conda activate haptic
-
-TOTAL=$(python -c "
-import sys; sys.path.insert(0,'.')
-from data.batch_haptic import discover_oakink
-import config
-seqs = discover_oakink(config.DATA_HUB)
-print(len(seqs))
-")
+conda activate hawor
 
 for GPU in 0 1 2 3 4 5 6 7; do
   START=$(( GPU * TOTAL / 8 ))
   END=$(( (GPU + 1) * TOTAL / 8 ))
-  CUDA_VISIBLE_DEVICES=$GPU python data/batch_haptic.py \
+  CUDA_VISIBLE_DEVICES=$GPU python data/batch_hawor.py \
     --dataset oakink --start $START --end $END &
 done
 wait
 ```
 
-Output: `data_hub/ProcessedData/third_mano/oakink/{seq_id}.npz`
+Output: `data_hub/ProcessedData/third/oakink/{seq_id}/mano.npz`
 
 ### 1c · FoundationPose (object pose)
 
@@ -123,7 +162,7 @@ done
 wait
 ```
 
-Output: `data_hub/ProcessedData/obj_poses/oakink/{seq_id}/`
+Output: `data_hub/ProcessedData/third/oakink/{seq_id}/ob_in_cam/`
 
 ### 1d · Align (generate HumanPrior)
 
@@ -145,23 +184,24 @@ Output:
 EgoDex uses the egocentric pipeline:
 MegaSAM → HaWoR → FoundationPose → Align.
 
-### 2a · MegaSAM (depth + SLAM intrinsics)
+### 2a · MegaSAM (depth + SLAM camera poses)
 
 ```bash
 conda activate mega_sam
+cd mega-sam
 
 # EgoDex has 3051 sequences total
 TOTAL=3051
 for GPU in 0 1 2 3 4 5 6 7; do
   START=$(( GPU * TOTAL / 8 ))
   END=$(( (GPU + 1) * TOTAL / 8 ))
-  CUDA_VISIBLE_DEVICES=$GPU python data/batch_megasam.py \
+  CUDA_VISIBLE_DEVICES=$GPU python ../data/batch_megasam.py \
     --dataset egodex --start $START --end $END &
 done
 wait
 ```
 
-Output: `data_hub/ProcessedData/ego_depth/egodex/{seq_id}/`
+Output: `data_hub/ProcessedData/egocentric/egodex/{task}__{episode}/depth.npz + cam_c2w.npy + K.npy`
 
 ### 2b · HaWoR (egocentric hand tracking)
 
@@ -177,7 +217,7 @@ done
 wait
 ```
 
-Output: `data_hub/ProcessedData/ego_mano/egodex/{seq_id}/`
+Output: `data_hub/ProcessedData/egocentric/egodex/{task}__{episode}/mano.npz`
 
 ### 2c · FoundationPose (object pose, egocentric)
 
@@ -190,13 +230,13 @@ conda activate bundlesdf
 for GPU in 0 1 2 3 4 5 6 7; do
   START=$(( GPU * TOTAL / 8 ))
   END=$(( (GPU + 1) * TOTAL / 8 ))
-  CUDA_VISIBLE_DEVICES=$GPU python tools/batch_obj_pose_ego.py \
+  CUDA_VISIBLE_DEVICES=$GPU python tools/batch_obj_pose.py \
     --dataset egodex --start $START --end $END &
 done
 wait
 ```
 
-Output: `data_hub/ProcessedData/obj_poses_ego/egodex/{seq_id}/`
+Output: `data_hub/ProcessedData/egocentric/egodex/{task}__{episode}/ob_in_cam/`
 
 ### 2d · Align (generate HumanPrior)
 
@@ -270,14 +310,13 @@ python -m model.train \
 
 | Tool | Repo | Size | Purpose |
 |------|------|------|---------|
-| Model weights | `UCBProject/Affordance2Grasp-Weights` | ~10 GB | FP/HaWoR/HaPTIC/MegaSAM/DepthPro |
-| Third-person FP masks | `UCBProject/ThirdDataMask` | ~30 MB | Phase 1A init masks (YCB/OakInk/TACO) |
-| Egocentric FP masks | `UCBProject/EgoDataMask` | ~70 MB | Phase 1B init masks (EgoDex/TACO) |
-| Object meshes | `UCBProject/Affordance2Grasp-Mesh` | ~1 GB | FP + scale estimation |
-| OakInk raw data | `UCBProject/Affordance2Grasp-OakInk` | ~25 GB | Phase 1A input |
-| EgoDex raw data | `UCBProject/Affordance2Grasp-EgoDex` | ~30 GB | Phase 1B input |
-| DexYCB | Official: [dex-ycb.github.io](https://dex-ycb.github.io) | ~250 GB | Already available |
-| HO3D v3 | Official: [tugraz.at](https://www.tugraz.at/index.php?id=57823) | ~6 GB | Already available |
+| Model weights | `UCBProject/Weights` | ~10 GB | FP/HaWoR/HaPTIC/MegaSAM/DepthPro |
+| Third-person FP masks | `UCBProject/ThirdDataMask` | ~30 MB | Phase 1A init masks |
+| Egocentric FP masks | `UCBProject/EgoDataMask` | ~70 MB | Phase 1B init masks |
+| Object meshes | `UCBProject/ObjMesh` | ~1 GB | FP + scale estimation |
+| OakInk raw data | `UCBProject/OakInk` | ~25 GB | Phase 1A input |
+| EgoDex raw data | `UCBProject/EgoDex` | ~30 GB | Phase 1B input |
+| **ProcessedData** | `UCBProject/ProcessedData` | ~TBD | **⚠️ Phase 1 unified output — upload after each run** |
 
 One-command download (skip DexYCB/HO3D):
 
@@ -294,7 +333,7 @@ python setup_weights.py --tool egodex
 | Step | OakInk | EgoDex |
 |------|--------|--------|
 | DepthPro / MegaSAM | ~4 h | ~50 h |
-| HaPTIC / HaWoR | ~3 h | ~40 h |
+| HaWoR | ~3 h | ~40 h |
 | FoundationPose | ~3 h | ~30 h |
 | Align | ~5 min | ~1 h |
 | **Total** | **~10 h** | **~121 h** |

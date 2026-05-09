@@ -37,7 +37,9 @@ from model.metrics import compute_metrics, threshold_search, save_visualization
 # ============================================================
 
 class MultiTaskDataset(Dataset):
-    """HDF5 dataset with contact labels + force centers."""
+    """HDF5 dataset with contact labels + force centers.
+    Input: xyz(3) + normals(3) = 6ch. Supervision: robot_gt labels.
+    """
 
     def __init__(self, h5_path, obj_ids_to_use=None, augment=True):
         self.augment = augment
@@ -45,42 +47,31 @@ class MultiTaskDataset(Dataset):
         with h5py.File(h5_path, 'r') as f:
             all_points = f['data/points'][:]
             all_normals = f['data/normals'][:]
-            all_labels = f['data/labels'][:]       # robot_gt: 监督标签
+            all_labels = f['data/labels'][:]   # robot_gt supervision labels
             all_obj_ids = f['data/obj_ids'][:]
-            # Human prior (第 7 通道输入特征)
-            if 'data/human_priors' in f:
-                all_hp = f['data/human_priors'][:]
-            else:
-                all_hp = np.zeros(all_labels.shape, dtype=np.float32)
-            # Force centers (可能不存在于旧数据)
             if 'data/force_centers' in f:
                 all_fc = f['data/force_centers'][:]
             else:
                 all_fc = np.zeros((len(all_points), 3), dtype=np.float32)
 
-        # 按物体筛选
         if obj_ids_to_use is not None:
             decoded_ids = [s.decode() if isinstance(s, bytes) else s for s in all_obj_ids]
             mask = np.array([oid in obj_ids_to_use for oid in decoded_ids])
             self.points = all_points[mask]
             self.normals = all_normals[mask]
-            self.human_priors = all_hp[mask]
             self.labels = all_labels[mask]
             self.force_centers = all_fc[mask]
         else:
             self.points = all_points
             self.normals = all_normals
-            self.human_priors = all_hp
             self.labels = all_labels
             self.force_centers = all_fc
 
         self.num_samples = len(self.points)
         n_objs = len(obj_ids_to_use) if obj_ids_to_use else "all"
         n_fc_valid = (np.linalg.norm(self.force_centers, axis=1) > 0.001).sum()
-        n_hp_valid = (self.human_priors.sum(axis=1) > 0).sum()
         print(f"    Loaded {self.num_samples} samples ({n_objs} objects), "
-              f"force_centers: {n_fc_valid}/{self.num_samples}, "
-              f"human_prior: {n_hp_valid}/{self.num_samples} valid")
+              f"force_centers: {n_fc_valid}/{self.num_samples}")
 
     def __len__(self):
         return self.num_samples
@@ -88,12 +79,11 @@ class MultiTaskDataset(Dataset):
     def __getitem__(self, idx):
         pts = self.points[idx].copy()
         nrm = self.normals[idx].copy()
-        hp = self.human_priors[idx].copy()   # (num_points,)
         lbl = self.labels[idx].copy()
         fc = self.force_centers[idx].copy()
 
         if self.augment:
-            # SO(3) 随机旋转
+            # SO(3) random rotation
             z = np.random.randn(3, 3).astype(np.float32)
             q, r = np.linalg.qr(z)
             d = np.diagonal(r)
@@ -103,22 +93,22 @@ class MultiTaskDataset(Dataset):
                 R[:, 0] *= -1
             pts = pts @ R.T
             nrm = nrm @ R.T
-            fc = fc @ R.T  # 受力中心同步旋转
+            fc = fc @ R.T
 
-            # 随机缩放
+            # Random scale
             scale = np.random.uniform(0.8, 1.2)
             pts *= scale
-            fc *= scale  # 受力中心同步缩放
+            fc *= scale
 
-            # 随机平移
+            # Random shift
             shift = np.random.uniform(-0.02, 0.02, size=(1, 3)).astype(np.float32)
             pts += shift
-            fc += shift.flatten()  # 受力中心同步平移
+            fc += shift.flatten()
 
-            # 随机抖动 (仅点云, 不影响受力中心)
+            # Random jitter (points only)
             pts += np.random.normal(0, 0.002, size=pts.shape).astype(np.float32)
 
-            # 随机丢点 (30%)
+            # Random point dropout (30%)
             if np.random.rand() < 0.3:
                 n = len(pts)
                 keep = np.random.choice(n, int(n * 0.9), replace=False)
@@ -126,12 +116,10 @@ class MultiTaskDataset(Dataset):
                 fill = np.random.choice(keep, len(drop), replace=True)
                 pts[drop] = pts[fill]
                 nrm[drop] = nrm[fill]
-                hp[drop] = hp[fill]    # human_prior 同步
                 lbl[drop] = lbl[fill]
 
-        # 7 通道: xyz(3) + normals(3) + human_prior(1)
-        features = np.concatenate([pts, nrm, hp.reshape(-1, 1)], axis=-1)
-        # Binarize continuous labels: threshold at 0.5
+        # 6ch input: xyz(3) + normals(3). Supervision: robot_gt labels.
+        features = np.concatenate([pts, nrm], axis=-1)
         lbl_binary = (lbl > 0.5).astype(np.int64)
         return (
             torch.from_numpy(pts),
@@ -270,17 +258,19 @@ def eval_epoch_mt(model, loader, seg_criterion, fc_lambda, device):
 # ============================================================
 
 def main():
-    parser = argparse.ArgumentParser(description="Train PointNet++ Affordance v5 (Multi-Task)")
+    parser = argparse.ArgumentParser(
+        description="Train PointNet++ Affordance v5 (Multi-Task). "
+                    "Input: xyz+normals (6ch). Supervision: robot_gt.")
     parser.add_argument("--epochs", type=int, default=200)
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--lr", type=float, default=0.001)
     parser.add_argument("--weight_decay", type=float, default=1e-4)
     parser.add_argument("--fc_lambda", type=float, default=10.0,
-                        help="受力中心回归 loss 权重 (default: 10.0)")
+                        help="Force center regression loss weight (default: 10.0)")
     parser.add_argument("--val_ratio", type=float, default=0.2)
     parser.add_argument("--save_dir", type=str, default=None)
     parser.add_argument("--dataset_dir", type=str, default=None,
-                        help="训练数据目录 (default: output/dataset)")
+                        help="Training data directory (default: output/dataset)")
     args = parser.parse_args()
 
     # 数据目录
@@ -304,7 +294,7 @@ def main():
     print("=" * 70)
     print("PointNet++ Affordance Training v5 — Multi-Task")
     print("=" * 70)
-    print(f"  ⭐ Multi-Task: 接触分割 + 受力中心回归")
+    print(f"  Input: xyz + normals (6ch) | Supervision: robot_gt")
     print(f"  Device:      {device}")
     if torch.cuda.is_available():
         print(f"  GPU:         {torch.cuda.get_device_name(0)}")
@@ -341,29 +331,27 @@ def main():
     print(f"  Loading val data (from train.h5)...")
     val_from_train = MultiTaskDataset(train_h5, val_obj_ids, augment=False)
 
-    # 合并 val 数据
+    # Merge val datasets
     val_from_val.points = np.concatenate([val_from_val.points, val_from_train.points])
     val_from_val.normals = np.concatenate([val_from_val.normals, val_from_train.normals])
-    val_from_val.human_priors = np.concatenate([val_from_val.human_priors, val_from_train.human_priors])
     val_from_val.labels = np.concatenate([val_from_val.labels, val_from_train.labels])
     val_from_val.force_centers = np.concatenate([val_from_val.force_centers, val_from_train.force_centers])
     val_from_val.num_samples = len(val_from_val.points)
     val_dataset = val_from_val
 
-    # 补充 train: val.h5 中属于 train 物体的数据
+    # Supplement train with val.h5 samples belonging to train objects
     print(f"  Loading extra train data (from val.h5)...")
     train_from_val = MultiTaskDataset(val_h5, train_obj_ids, augment=True)
     train_dataset.points = np.concatenate([train_dataset.points, train_from_val.points])
     train_dataset.normals = np.concatenate([train_dataset.normals, train_from_val.normals])
-    train_dataset.human_priors = np.concatenate([train_dataset.human_priors, train_from_val.human_priors])
     train_dataset.labels = np.concatenate([train_dataset.labels, train_from_val.labels])
     train_dataset.force_centers = np.concatenate([train_dataset.force_centers, train_from_val.force_centers])
     train_dataset.num_samples = len(train_dataset.points)
 
-    contact_ratio_train = (train_dataset.labels > 0.5).sum() / train_dataset.labels.size * 100
-    contact_ratio_val = (val_dataset.labels > 0.5).sum() / val_dataset.labels.size * 100
+    contact_ratio_train = (train_dataset.labels > 0.5).mean() * 100
+    contact_ratio_val   = (val_dataset.labels > 0.5).mean() * 100
     fc_valid_train = (np.linalg.norm(train_dataset.force_centers, axis=1) > 0.001).sum()
-    fc_valid_val = (np.linalg.norm(val_dataset.force_centers, axis=1) > 0.001).sum()
+    fc_valid_val   = (np.linalg.norm(val_dataset.force_centers, axis=1) > 0.001).sum()
 
     print(f"\n  Summary:")
     print(f"    Train: {len(train_dataset)} samples, {len(train_obj_ids)} objects, "
@@ -380,7 +368,7 @@ def main():
     # ============================================================
     # Model (Multi-Task)
     # ============================================================
-    model = PointNet2Seg(num_classes=2, in_channel=7, predict_force_center=True).to(device)
+    model = PointNet2Seg(num_classes=2, in_channel=6, predict_force_center=True).to(device)
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"\n  Model params:  {n_params:,}")
 
