@@ -1,82 +1,239 @@
 # Affordance2Grasp
 
-**Learning robot grasp poses from human hand-object interaction videos.**
-
-Pipeline: `Video → Depth + Pose → Human Contact Prior → Sim Filtering → Train Policy → Robot Grasp`
+> **Learning "where to grasp" from human hand-object interaction videos — no depth sensor, no object calibration needed.**
 
 ---
 
-## Pipeline Philosophy
+## What is this project?
 
-This pipeline is **object-agnostic by design**.
+Robots need to learn how to grasp objects. Traditional approaches require expensive robotic demonstrations or manually engineered grasp databases. We take a different route: **we learn from videos of humans interacting with objects**.
 
-The PointNet++ model does not learn "how to grasp object X". Instead, it learns a general principle: **where humans tend to make contact on an object's surface, and where the force center lies**. This geometric pattern transfers across object categories.
+The core insight is that **humans naturally grasp objects at mechanically sound contact points**. By extracting these contact regions from large-scale video datasets and filtering them through physics simulation, we can teach a robot *where* to grasp any object — without ever collecting a single robot demonstration.
 
-**Why use so many different datasets?**
-Each dataset contributes a different type of diversity:
-
-| Dataset | Object Category | What it contributes |
-|---------|----------------|---------------------|
-| DexYCB / HO3D | YCB household items | High-quality multi-view contact data; used as evaluation benchmark |
-| OakInk | 100 diverse household objects | Broadens object category coverage for better generalization |
-| TACO Allocentric | 100+ tool-object pairs | Tool grasping patterns; multi-camera 3rd-person view |
-| EgoDex | Manipulation task objects | First-person viewpoint; diverse action-driven grasping |
-| TACO Ego | Tool-object interactions | Egocentric complement to TACO Allocentric |
-
-**The 7 YCB objects in DexYCB are an evaluation benchmark, not a deployment limit.** The model can be applied to any object given its mesh. Adding more diverse datasets is an ongoing process — more data leads to stronger generalization.
+**Key advantage:** Unlike trajectory-based imitation learning, we predict **contact points** (object-level, geometry-aware), not full arm trajectories. This makes the model object-agnostic and generalizable across unseen objects.
 
 ---
 
-## Pipeline Overview
+## Pipeline at a Glance
 
 ```
-┌──────────────────────────────── PHASE 1A: Third-Person Data ────────────────────────────────┐
-│                                                                                              │
-│  DexYCB / HO3D v3 / OakInk / TACO Allocentric                                              │
-│     │                                                                                        │
-│     ├─ Depth Pro (two-pass) ─────→ K.txt + depths.npz  (metric depth, ~0.2–8% K error)    │
-│     ├─ HaPTIC ──────────────────→ third_mano/{ds}/{seq}.npz  (MANO verts, camera space)   │
-│     ├─ FoundationPose ──────────→ obj_poses/{ds}/{seq}/ob_in_cam/*.txt                     │
-│     └─ batch_align_mano_fp.py ──→ training_fp/{ds}/{obj}.hdf5  (human_prior per object)   │
-│                                                                                              │
-└──────────────────────────────────────────────────────────────────────────────────────────────┘
-                       ▲ PARALLEL — runs independently of Phase 1B ▲
- ┌──────────────────────────────── PHASE 1B: First-Person Data (Egocentric) ────────────────────┐
-│                                                                                              │
-│  EgoDex / TACO Ego                                                                          │
-│     │                                                                                        │
-│     ├─ calibrate_dataset_fx.py ─→ CALIB_FX  (SLAM opt-intr ×1.10, no GT, ~1% error)      │
-│     ├─ MegaSAM ─────────────────→ egocentric_depth/{ds}/{seq}/  K + depth + cam_c2w       │
-│     ├─ HaWoR ──────────────────→ ego_mano/{ds}/{seq}.npz  (MANO verts, world frame)       │
-│     ├─ FoundationPose ──────────→ obj_poses_ego/{ds}/{seq}/ob_in_cam/*.txt                 │
-│     └─ batch_align_ego_mano_fp.py → training_fp_ego/{ds}/{obj}.hdf5  (human_prior)        │
-│                                                                                              │
-└──────────────────────────────────────────────────────────────────────────────────────────────┘
-                       ▲ PARALLEL — runs independently of Phase 1A ▲
-                    ┌──────────────────────────────────────────────┐
-                    │  Both feed into Phase 2 independently        │
-                    └──────────────────────────────────────────────┘
-                                            │
- ┌──────────────────────────────── PHASE 2: Aggregate HumanPrior ──────────────────────────────┐
-│                                                                                              │
-│  training_fp/ + training_fp_ego/  ──→  data_hub/human_prior/{obj}.hdf5                    │
-│     point_cloud (4096, 3) · normals (4096, 3) · human_prior (4096,) · force_center (3,)   │
-│                                                                                              │
-└──────────────────────────────────────────────────────────────────────────────────────────────┘
-                                           │
-┌──────────────────────────────── PHASE 3: Robot Ground Truth ────────────────────────────────┐
-│                                                                                              │
-│  human_prior ──→ Grasp Candidates ──→ Isaac Sim ──→ robot_gt  (success / fail per pose)   │
-│                                                                                              │
-└──────────────────────────────────────────────────────────────────────────────────────────────┘
-                                           │
-┌──────────────────────────────── PHASE 4: Train Policy ──────────────────────────────────────┐
-│                                                                                              │
-│  human_prior + robot_gt ──→ Build HDF5 ──→ Train PointNet++ ──→ Checkpoint                │
-│  New object mesh ─────────→ Predict Affordance ──→ Grasp Pose ──→ Sim Verify              │
-│                                                                                              │
-└──────────────────────────────────────────────────────────────────────────────────────────────┘
+ ┌─────────────────────────────────────────────────────────────────────────────┐
+ │                         UPSTREAM: Human Prior                               │
+ │                                                                             │
+ │   Egocentric Video               Third-Person Video                         │
+ │   (EgoDex, TACO-Ego)             (DexYCB, HO3D, OakInk, TACO)             │
+ │          │                               │                                  │
+ │     MegaSAM                         Depth Pro                               │
+ │  (depth + intrinsics)            (depth + intrinsics)                       │
+ │          │                               │                                  │
+ │        HaWoR                          HaPTIC                                │
+ │   (hand reconstruction)          (hand reconstruction)                      │
+ │          │                               │                                  │
+ │          └──────────────┬────────────────┘                                  │
+ │                         ▼                                                   │
+ │             Contact Point Extraction                                        │
+ │          human_prior: per-vertex grasp probability (4096 pts)               │
+ │                         +                                                   │
+ │                 force_center: optimal grasp force point                     │
+ └─────────────────────────────────────────────────────────────────────────────┘
+                                 │
+                                 ▼
+ ┌─────────────────────────────────────────────────────────────────────────────┐
+ │                        DOWNSTREAM: Robot Posterior                          │
+ │                                                                             │
+ │  Object Mesh + Human Prior                                                  │
+ │          │                                                                  │
+ │    Grasp Candidate Generation  (guided by human contact regions)            │
+ │          │                                                                  │
+ │     Isaac Sim + cuRobo                                                      │
+ │  • Plan: home → pre-grasp → grasp                                          │
+ │  • Execute physically                                                       │
+ │  • Record: contact point + force center if grasp succeeds                  │
+ │          │                                                                  │
+ │    Robot GT Labels  (per-vertex binary: success / fail)                     │
+ │          │                                                                  │
+ │     Train PointNet++ (6-channel: xyz + normals)                            │
+ │     • Output 1: graspable region per vertex  (segmentation)                │
+ │     • Output 2: force center 3D coordinate   (regression)                  │
+ │          │                                                                  │
+ │     Deploy: Sim → Real Robot (SimToReal)                                    │
+ └─────────────────────────────────────────────────────────────────────────────┘
 ```
+
+---
+
+## Upstream: Human Prior Extraction
+
+The upstream stage answers: **"Where do humans touch this object?"**
+
+Two parallel pipelines handle different video viewpoints:
+
+### Path A — Egocentric (First-Person) Video
+
+Used for: `EgoDex`, `TACO-Ego`
+
+```
+RGB Video (first-person, head-mounted camera)
+    ↓ MegaSAM
+    Camera intrinsics (K) + metric depth map  (~1% error, no GT needed)
+    ↓ HaWoR
+    MANO hand mesh in world frame (per-frame)
+    ↓ FoundationPose
+    Object pose in camera frame
+    ↓ batch_align_ego_mano_fp.py
+    Human Prior HDF5:
+        point_cloud  (4096, 3)   — object surface points (mesh-sampled)
+        normals      (4096, 3)   — surface normals
+        human_prior  (4096,)     — per-point grasp probability [0,1]
+        force_center (3,)        — optimal force center in object frame
+```
+
+### Path B — Allocentric (Third-Person) Video
+
+Used for: `DexYCB`, `HO3D`, `OakInk`, `TACO`
+
+```
+RGB Video (third-person, fixed or handheld camera)
+    ↓ Depth Pro
+    Camera intrinsics (K) + metric depth map  (~0.2–8% error)
+    ↓ HaPTIC
+    MANO hand mesh in camera frame (per-frame)
+    ↓ FoundationPose
+    Object pose in camera frame
+    ↓ batch_align_mano_fp.py
+    Human Prior HDF5  (same format as Path A)
+```
+
+> **Why avoid real depth sensors?** Real-world depth cameras have limited range, calibration requirements, and don't exist in most internet videos. By estimating depth from monocular RGB, we unlock **internet-scale video data** as robot training signal.
+
+---
+
+## Downstream: Sim Filtering & Model Training
+
+The downstream stage answers: **"Which human-identified contact points are actually graspable by a robot?"**
+
+### Step 1 — Grasp Candidate Generation
+
+For each object, generate N candidate grasp poses guided by the human prior:
+- Sample grasp centers from high-probability contact regions
+- Apply 6 canonical approach directions (±X, ±Y, ±Z)
+- Score candidates by antipodal quality, surface flatness, and CoM alignment
+
+### Step 2 — Isaac Sim Physical Validation (cuRobo)
+
+```
+cuRobo: plan home → pre-grasp → grasp → lift
+    ↓ physical execution (Franka arm)
+    ↓ lift check: Δz > 3 cm = SUCCESS
+    ✅  save contact point + force center as Robot GT label
+    ❌  discard failed candidates
+```
+
+### Step 3 — PointNet++ Training
+
+```
+Input:    Object point cloud (4096 × 6):  xyz(3) + normals(3)
+Output 1: Per-vertex grasp label (4096,): 0=fail / 1=success
+Output 2: Force center (3,):             optimal grasp position
+
+Loss = Focal Loss + Tversky Loss (segmentation)
+     + MSE × λ            (force center regression)
+```
+
+The model learns a **geometry-based** grasp affordance representation that transfers to unseen objects.
+
+### Step 4 — Deployment (Sim → Real)
+
+```
+New object (mesh only — no demonstrations required)
+    ↓ PointNet++ inference
+    Predicted graspable regions + force center
+    ↓ cuRobo motion planning
+    Full arm trajectory to grasp pose
+    ↓ Execute on Franka (Isaac Sim or Real Robot)
+```
+
+---
+
+## Baselines
+
+To validate that contact-point prediction generalizes better than trajectory imitation:
+
+| | **Ours (Affordance2Grasp)** | Baseline 1: Human Retarget DP | Baseline 2: Robot DP (Sim) |
+|---|---|---|---|
+| Training data | Human video | Same human video | Isaac Sim only |
+| What it learns | Contact regions | Full EE trajectory (MANO → Franka retarget) | Full EE trajectory (random grasps) |
+| Human prior | ✅ | ✅ (implicit, via retargeting) | ❌ |
+| Object-agnostic | ✅ | ❌ | ❌ |
+
+---
+
+## Datasets
+
+| Dataset | Viewpoint | Objects | Role |
+|---------|-----------|---------|------|
+| DexYCB | Third-person | 20 YCB items | Evaluation benchmark |
+| HO3D v3 | Third-person | 10 YCB items | Training + evaluation |
+| OakInk | Third-person | 100 household objects | Category diversity |
+| TACO (Allocentric) | Third-person | 100+ tool-object pairs | Tool grasping patterns |
+| EgoDex | **First-person** | 850+ sequences | Egocentric diversity |
+| TACO (Ego) | **First-person** | Tool interactions | Egocentric tool data |
+
+> The model is **not limited** to these objects. Any new object with a mesh can be evaluated after training.
+
+---
+
+## Core Design Decisions
+
+**1. Contact points, not trajectories**
+We predict *where* to grasp (object-centric), not *how* to move the arm (robot-centric). This decouples the affordance model from the specific robot platform.
+
+**2. Monocular depth estimation, not real sensors**
+MegaSAM and Depth Pro allow us to extract 3D hand-object interactions from any video — unlocking internet-scale training data without any depth camera.
+
+**3. Sim-filtering bridges the embodiment gap**
+Human contact points are physically validated in Isaac Sim. Only robot-verified grasps become training labels, handling the human-to-robot morphology gap.
+
+**4. Object-agnostic generalization**
+The model operates on raw geometry (xyz + normals), not object identity. Given any mesh, it immediately predicts graspable regions without retraining.
+
+---
+
+## Quick Start
+
+```bash
+# Train (after preparing human priors and robot GT labels)
+python -m model.train
+
+# Inference on a new object mesh
+python inference/grasp_pose.py --mesh path/to/object.obj
+
+# Run Isaac Sim grasp validation
+sim45 sim/run_grasp_sim.py --hdf5 output/grasps_random/mug_grasp.hdf5
+```
+
+---
+
+## Repository Structure
+
+```
+Affordance2Grasp/
+├── model/              # PointNet++ model + training (python -m model.train)
+├── sim/                # Isaac Sim execution + cuRobo planning
+├── inference/          # Deploy: predict affordance → plan → execute
+├── tools/              # Data processing, frame extraction, contact alignment
+├── Baseline2/          # Robot DP (Sim) baseline implementation
+├── data_hub/
+│   ├── meshes/         # Object meshes (v1: OakInk; SAM3DMesh: egodex/ycb/oakink)
+│   └── human_prior/    # Aggregated contact prior HDF5 files
+└── output/             # Grasp candidates, robot GT labels, model checkpoints
+```
+
+---
+
+*For detailed setup instructions, per-phase commands, GPU compatibility, and troubleshooting, see the sections below.*
+
+---
 
 ---
 
