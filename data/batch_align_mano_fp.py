@@ -47,6 +47,7 @@ batch_align_mano_fp.py — MANO × FoundationPose 对齐 → 接触标签 → �
 import os, sys, re, json, argparse
 import numpy as np
 import h5py
+import multiprocessing as mp
 from glob import glob
 from natsort import natsorted
 from tqdm import tqdm
@@ -537,6 +538,25 @@ def process_object(ds, obj_ds, obj_name, seqs, mesh_path, threshold,
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
+def _align_one_object(work_item):
+    """Top-level worker for multiprocessing.Pool. Processes one object end-to-end.
+    Each worker writes its own HDF5 file → fully independent, no shared state."""
+    (ds, mesh_ds, obj_name, seqs, mesh_path, threshold_m,
+     out_train_base, out_prior_base, redo) = work_item
+    try:
+        ok = process_object(ds, mesh_ds, obj_name, seqs, mesh_path,
+                            threshold=threshold_m,
+                            out_train_base=out_train_base,
+                            out_prior_base=out_prior_base,
+                            redo=redo)
+        return obj_name, bool(ok)
+    except Exception as e:
+        import traceback
+        print(f"❌ [{obj_name}] worker exception: {e}")
+        traceback.print_exc()
+        return obj_name, False
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Align MANO vertices with FoundationPose mesh poses → contact labels → HDF5")
@@ -547,6 +567,10 @@ def main():
                         help="Contact distance threshold in mm (default: 30mm)")
     parser.add_argument("--redo",      action="store_true",
                         help="Recompute even if output exists")
+    parser.add_argument("--n-workers", type=int, default=1,
+                        help="Number of parallel object-level workers (default 1 = sequential). "
+                             "Each worker processes one object end-to-end; outputs are independent. "
+                             "Recommended ≈ number of physical CPU cores (e.g. 16 on Ryzen 9 9950X).")
     parser.add_argument("--out_suffix", default=None,
                         help="输出目录后缀，用于和原始数据对比。\n"
                              "例如: --out_suffix v2 → training_fp_v2/ human_prior_fp_v2/\n"
@@ -608,20 +632,40 @@ def main():
 
     done = failed = 0
 
-    for (ds, mesh_ds, obj_name, mesh_path), seqs in tqdm(
-            obj_to_seqs.items(), desc="Objects"):
-        tqdm.write(f"\n──────────────────────────────────────────────────────────")
-        tqdm.write(f"▶ {ds}/{obj_name}  ({len(seqs)} sequences)")
+    # build worklist once — each item is one (object, all its seqs)
+    work = [(ds, mesh_ds, obj_name, seqs, mesh_path, threshold_m,
+             out_train_base, out_prior_base, args.redo)
+            for (ds, mesh_ds, obj_name, mesh_path), seqs in obj_to_seqs.items()]
 
-        ok = process_object(ds, mesh_ds, obj_name, seqs, mesh_path,
-                            threshold=threshold_m,
-                            out_train_base=out_train_base,
-                            out_prior_base=out_prior_base,
-                            redo=args.redo)
-        if ok:
-            done += 1
-        else:
-            failed += 1
+    n_workers = max(1, int(args.n_workers))
+    if n_workers > 1:
+        n_workers = min(n_workers, len(work))
+        print(f"⚙️  parallel object workers: {n_workers}  (objects to do: {len(work)})\n")
+        # Each worker is independent: writes its own HDF5, no shared mutable state.
+        # spawn ctx avoids inheriting heavy parent state (we re-import scipy/trimesh per worker).
+        ctx = mp.get_context("spawn")
+        with ctx.Pool(processes=n_workers) as pool:
+            for obj_name, ok in tqdm(
+                    pool.imap_unordered(_align_one_object, work),
+                    total=len(work), desc="Objects"):
+                if ok:
+                    done += 1
+                else:
+                    failed += 1
+    else:
+        for (ds, mesh_ds, obj_name, mesh_path), seqs in tqdm(
+                obj_to_seqs.items(), desc="Objects"):
+            tqdm.write(f"\n──────────────────────────────────────────────────────────")
+            tqdm.write(f"▶ {ds}/{obj_name}  ({len(seqs)} sequences)")
+            ok = process_object(ds, mesh_ds, obj_name, seqs, mesh_path,
+                                threshold=threshold_m,
+                                out_train_base=out_train_base,
+                                out_prior_base=out_prior_base,
+                                redo=args.redo)
+            if ok:
+                done += 1
+            else:
+                failed += 1
 
     print(f"\n{'='*60}")
     print(f"✅ Done: {done}  ❌ Failed: {failed}")
