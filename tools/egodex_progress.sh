@@ -5,7 +5,7 @@
 #       (另开一个 terminal 运行，每 10 秒刷新)
 # ════════════════════════════════════════════════════
 
-PROJ="/home/lyh/Project/Affordance2Grasp"
+PROJ="${PROJ:-$(cd "$(dirname "$0")/.." && pwd)}"
 EGODEX_RAW="$PROJ/data_hub/RawData/EgoRawData/egodex/test"
 DEPTH_OUT="$PROJ/data_hub/ProcessedData/egocentric_depth/egodex"
 OBJ_POSE_OUT="$PROJ/data_hub/ProcessedData/obj_poses_ego/egodex"

@@ -1,82 +1,301 @@
 # Affordance2Grasp
 
-**Learning robot grasp poses from human hand-object interaction videos.**
-
-Pipeline: `Video → Depth + Pose → Human Contact Prior → Sim Filtering → Train Policy → Robot Grasp`
+> **Learning "where to grasp" from human hand-object interaction videos — no depth sensor, no object calibration needed.**
 
 ---
 
-## Pipeline Philosophy
+## What is this project?
 
-This pipeline is **object-agnostic by design**.
+Robots need to learn how to grasp objects. Traditional approaches require expensive robotic demonstrations or manually engineered grasp databases. We take a different route: **we learn from videos of humans interacting with objects**.
 
-The PointNet++ model does not learn "how to grasp object X". Instead, it learns a general principle: **where humans tend to make contact on an object's surface, and where the force center lies**. This geometric pattern transfers across object categories.
+The core insight is that **humans naturally grasp objects at mechanically sound contact points**. By extracting these contact regions from large-scale video datasets and filtering them through physics simulation, we can teach a robot *where* to grasp any object — without ever collecting a single robot demonstration.
 
-**Why use so many different datasets?**
-Each dataset contributes a different type of diversity:
-
-| Dataset | Object Category | What it contributes |
-|---------|----------------|---------------------|
-| DexYCB / HO3D | YCB household items | High-quality multi-view contact data; used as evaluation benchmark |
-| OakInk | 100 diverse household objects | Broadens object category coverage for better generalization |
-| TACO Allocentric | 100+ tool-object pairs | Tool grasping patterns; multi-camera 3rd-person view |
-| EgoDex | Manipulation task objects | First-person viewpoint; diverse action-driven grasping |
-| TACO Ego | Tool-object interactions | Egocentric complement to TACO Allocentric |
-
-**The 7 YCB objects in DexYCB are an evaluation benchmark, not a deployment limit.** The model can be applied to any object given its mesh. Adding more diverse datasets is an ongoing process — more data leads to stronger generalization.
+**Key advantage:** Unlike trajectory-based imitation learning, we predict **contact points** (object-level, geometry-aware), not full arm trajectories. This makes the model object-agnostic and generalizable across unseen objects.
 
 ---
 
-## Pipeline Overview
+## Integration State (2026-05-14)
+
+This branch is partially synced with `origin/main`:
+
+- **Adopted** all 18 of the partner's non-refactor commits (docs translations, smoke-test fixes, portability cleanup, `Baseline2/` mirror, new eval scripts, `model/train.py` simplification, `sim/convert_batch_usd.py` SAM3DMesh support).
+- **Rejected (for now)** the `7ee2f96 refactor: unified ProcessedData layout` path renames (`third_depth/` → `third/`, `K.txt` → `K.npy`, `obj_poses/` → `third/`, `egocentric/` root). Reason: that refactor is **partial** — it updates Steps 1 / 3 (`batch_depth_pro.py`, `batch_obj_pose.py`) but not Step 4 (`batch_align_mano_fp.py`, which still reads `obj_poses/` and `K.txt`), so adopting it as-is breaks the pipeline at Step 4. Our 95 GB of Phase 1A intermediate data is in the old layout. Deferred until the refactor is completed upstream — we keep the new docs (`docs/A100_DEPLOY_QUICK.md`) for partner reference but flag here that the layout described there is **aspirational**, not current.
+
+**Current (active) layout — the old / pre-`7ee2f96` one:**
 
 ```
-┌──────────────────────────────── PHASE 1A: Third-Person Data ────────────────────────────────┐
-│                                                                                              │
-│  DexYCB / HO3D v3 / OakInk / TACO Allocentric                                              │
-│     │                                                                                        │
-│     ├─ Depth Pro (two-pass) ─────→ K.txt + depths.npz  (metric depth, ~0.2–8% K error)    │
-│     ├─ HaPTIC ──────────────────→ third_mano/{ds}/{seq}.npz  (MANO verts, camera space)   │
-│     ├─ FoundationPose ──────────→ obj_poses/{ds}/{seq}/ob_in_cam/*.txt                     │
-│     └─ batch_align_mano_fp.py ──→ training_fp/{ds}/{obj}.hdf5  (human_prior per object)   │
-│                                                                                              │
-└──────────────────────────────────────────────────────────────────────────────────────────────┘
-                       ▲ PARALLEL — runs independently of Phase 1B ▲
- ┌──────────────────────────────── PHASE 1B: First-Person Data (Egocentric) ────────────────────┐
-│                                                                                              │
-│  EgoDex / TACO Ego                                                                          │
-│     │                                                                                        │
-│     ├─ calibrate_dataset_fx.py ─→ CALIB_FX  (SLAM opt-intr ×1.10, no GT, ~1% error)      │
-│     ├─ MegaSAM ─────────────────→ egocentric_depth/{ds}/{seq}/  K + depth + cam_c2w       │
-│     ├─ HaWoR ──────────────────→ ego_mano/{ds}/{seq}.npz  (MANO verts, world frame)       │
-│     ├─ FoundationPose ──────────→ obj_poses_ego/{ds}/{seq}/ob_in_cam/*.txt                 │
-│     └─ batch_align_ego_mano_fp.py → training_fp_ego/{ds}/{obj}.hdf5  (human_prior)        │
-│                                                                                              │
-└──────────────────────────────────────────────────────────────────────────────────────────────┘
-                       ▲ PARALLEL — runs independently of Phase 1A ▲
-                    ┌──────────────────────────────────────────────┐
-                    │  Both feed into Phase 2 independently        │
-                    └──────────────────────────────────────────────┘
-                                            │
- ┌──────────────────────────────── PHASE 2: Aggregate HumanPrior ──────────────────────────────┐
-│                                                                                              │
-│  training_fp/ + training_fp_ego/  ──→  data_hub/human_prior/{obj}.hdf5                    │
-│     point_cloud (4096, 3) · normals (4096, 3) · human_prior (4096,) · force_center (3,)   │
-│                                                                                              │
-└──────────────────────────────────────────────────────────────────────────────────────────────┘
-                                           │
-┌──────────────────────────────── PHASE 3: Robot Ground Truth ────────────────────────────────┐
-│                                                                                              │
-│  human_prior ──→ Grasp Candidates ──→ Isaac Sim ──→ robot_gt  (success / fail per pose)   │
-│                                                                                              │
-└──────────────────────────────────────────────────────────────────────────────────────────────┘
-                                           │
-┌──────────────────────────────── PHASE 4: Train Policy ──────────────────────────────────────┐
-│                                                                                              │
-│  human_prior + robot_gt ──→ Build HDF5 ──→ Train PointNet++ ──→ Checkpoint                │
-│  New object mesh ─────────→ Predict Affordance ──→ Grasp Pose ──→ Sim Verify              │
-│                                                                                              │
-└──────────────────────────────────────────────────────────────────────────────────────────────┘
+data_hub/ProcessedData/
+├── third_depth/{dataset}/{seq}/   # Step 1 (DepthPro): depths.npz, K.txt, frame_ids.txt
+├── third_mano/{dataset}/{seq}.npz # Step 2 (HaPTIC verts)
+├── obj_poses/{dataset}/{seq}/     # Step 3 (FoundationPose): ob_in_cam/, track_vis/
+├── obj_meshes/{dataset}/{obj}/    # SAM3D meshes (also on HF: UCBProject/ObjMesh)
+├── obj_recon_input/{dataset}/     # SAM2 masks (FP init + obj recon)
+├── training_fp/{dataset}/{obj}.hdf5   # Step 4 → Phase 2 training data
+└── human_prior_fp/{obj}.hdf5          # Step 4 → Phase 3 inference prior
 ```
+
+Local-only improvements we kept (not in `origin/main` yet):
+
+- `tools/batch_obj_pose.py`: **leak fix** — `shutil.rmtree(scene_dir)` in the per-seq `finally:` block (the 2026-05-13 disk-full incident; `/tmp/fp_scenes/` had accumulated ~243 GB across the DexYCB Step 3 run). Plus a `--keep-scene-dir` debug flag.
+- `data/batch_align_mano_fp.py`: **`--n-workers N`** for object-level parallelism via `multiprocessing.Pool(spawn)`. DexYCB Step 4 went from sequentially-extrapolated ~12-15 h to ~5 h on a 16-core/32-thread machine.
+- `Baseline1/`: **Human Retarget DP** baseline (route A on DexYCB subj 07-10), with v2 SAM3D↔YCB-CAD canonical alignment via ICP (`compute_sam3d_align.py` + `--align-mode sam3d`).
+- `s2r/PLAN.md`: sim-to-real implementation plan (Dexmate Vega + SharpaWave-as-virtual-2-finger).
+
+---
+
+## Phase 1A Outputs — `training_fp/` vs `human_prior_fp/`, when to use which
+
+After Phase 1A finishes for a dataset, Step 4 (`data/batch_align_mano_fp.py`) writes the **same data** to two locations under different directory indexing:
+
+| You are doing… | Read from | Why this indexing |
+|---|---|---|
+| **Phase 2** — train the main method's PointNet++ contact predictor (`model/train.py`) | `training_fp/{dataset}/{object}.hdf5` | Two-level (dataset → object). Lets training code split / balance / hold-out by source dataset (e.g., "train on OakInk + DexYCB, test on HO3D held-out"). |
+| **Phase 3** — inference / grasp sampling / sim execution / Sim2Real (`inference/predictor.py`, `tools/random_grasp_sampler.py`) | `human_prior_fp/{object}.hdf5` | Flat (by object id only). Inference is given an object mesh / id, not a dataset — this is a one-step lookup. |
+
+The **content is byte-identical** between `training_fp/{ds}/{obj}.hdf5` and `human_prior_fp/{obj}.hdf5`: same five keys, same values.
+
+| key | shape | dtype | meaning |
+|---|---|---|---|
+| `point_cloud` | `(4096, 3)` | float32 | 4096 surface samples of the SAM3D object mesh (metric m, mesh-canonical frame) |
+| `normals` | `(4096, 3)` | float32 | unit normals at those points |
+| `human_prior` | `(4096,)` | float32 | per-point contact probability in `[0, 1]` — Gaussian-smoothed, per-object max-normalised |
+| `robot_gt` | `(4096,)` | float32 | all-zero placeholder (no robot ground-truth in this regime) |
+| `force_center` | `(3,)` | float32 | centroid of mesh vertices with `contact_smooth >= 80th percentile` |
+
+Both folders are uploaded to [`UCBProject/ProcessedData`](https://huggingface.co/datasets/UCBProject/ProcessedData) (private, 2026-05-14 snapshot covering OakInk 100 + DexYCB 20 objects):
+
+```bash
+huggingface-cli download UCBProject/ProcessedData \
+    --repo-type dataset \
+    --local-dir data_hub/ProcessedData
+# now training_fp/{oakink,dexycb}/ and human_prior_fp/ are in place;
+# run model/train.py for Phase 2, or inference/predictor.py for Phase 3.
+```
+
+HO3D-v3 / ARCTIC pending — partner pushes to the same HF repo when their runs complete.
+
+---
+
+## Pipeline at a Glance
+
+```
+ ┌─────────────────────────────────────────────────────────────────────────────┐
+ │                         UPSTREAM: Human Prior                               │
+ │                                                                             │
+ │   Egocentric Video               Third-Person Video                         │
+ │   (EgoDex, TACO-Ego)             (DexYCB, HO3D, OakInk, TACO)             │
+ │          │                               │                                  │
+ │     MegaSAM                         Depth Pro                               │
+ │  (depth + intrinsics)            (depth + intrinsics)                       │
+ │          │                               │                                  │
+ │        HaWoR                          HaPTIC                                │
+ │   (hand reconstruction)          (hand reconstruction)                      │
+ │          │                               │                                  │
+ │          └──────────────┬────────────────┘                                  │
+ │                         ▼                                                   │
+ │             Contact Point Extraction                                        │
+ │          human_prior: per-vertex grasp probability (4096 pts)               │
+ │                         +                                                   │
+ │                 force_center: optimal grasp force point                     │
+ └─────────────────────────────────────────────────────────────────────────────┘
+                                 │
+                                 ▼
+ ┌─────────────────────────────────────────────────────────────────────────────┐
+ │                        DOWNSTREAM: Robot Posterior                          │
+ │                                                                             │
+ │  Object Mesh + Human Prior                                                  │
+ │          │                                                                  │
+ │    Grasp Candidate Generation  (guided by human contact regions)            │
+ │          │                                                                  │
+ │     Isaac Sim + cuRobo                                                      │
+ │  • Plan: home → pre-grasp → grasp                                          │
+ │  • Execute physically                                                       │
+ │  • Record: contact point + force center if grasp succeeds                  │
+ │          │                                                                  │
+ │    Robot GT Labels  (per-vertex binary: success / fail)                     │
+ │          │                                                                  │
+ │     Train PointNet++ (6-channel: xyz + normals)                            │
+ │     • Output 1: graspable region per vertex  (segmentation)                │
+ │     • Output 2: force center 3D coordinate   (regression)                  │
+ │          │                                                                  │
+ │     Deploy: Sim → Real Robot (SimToReal)                                    │
+ └─────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Upstream: Human Prior Extraction
+
+The upstream stage answers: **"Where do humans touch this object?"**
+
+Two parallel pipelines handle different video viewpoints:
+
+### Path A — Egocentric (First-Person) Video
+
+Used for: `EgoDex`, `TACO-Ego`
+
+```
+RGB Video (first-person, head-mounted camera)
+    ↓ MegaSAM
+    Camera intrinsics (K) + metric depth map  (~1% error, no GT needed)
+    ↓ HaWoR
+    MANO hand mesh in world frame (per-frame)
+    ↓ FoundationPose
+    Object pose in camera frame
+    ↓ batch_align_ego_mano_fp.py
+    Human Prior HDF5:
+        point_cloud  (4096, 3)   — object surface points (mesh-sampled)
+        normals      (4096, 3)   — surface normals
+        human_prior  (4096,)     — per-point grasp probability [0,1]
+        force_center (3,)        — optimal force center in object frame
+```
+
+### Path B — Allocentric (Third-Person) Video
+
+Used for: `DexYCB`, `HO3D`, `OakInk`, `TACO`
+
+```
+RGB Video (third-person, fixed or handheld camera)
+    ↓ Depth Pro
+    Camera intrinsics (K) + metric depth map  (~0.2–8% error)
+    ↓ HaPTIC
+    MANO hand mesh in camera frame (per-frame)
+    ↓ FoundationPose
+    Object pose in camera frame
+    ↓ batch_align_mano_fp.py
+    Human Prior HDF5  (same format as Path A)
+```
+
+> **Why avoid real depth sensors?** Real-world depth cameras have limited range, calibration requirements, and don't exist in most internet videos. By estimating depth from monocular RGB, we unlock **internet-scale video data** as robot training signal.
+
+---
+
+## Downstream: Sim Filtering & Model Training
+
+The downstream stage answers: **"Which human-identified contact points are actually graspable by a robot?"**
+
+### Step 1 — Grasp Candidate Generation
+
+For each object, generate N candidate grasp poses guided by the human prior:
+- Sample grasp centers from high-probability contact regions
+- Apply 6 canonical approach directions (±X, ±Y, ±Z)
+- Score candidates by antipodal quality, surface flatness, and CoM alignment
+
+### Step 2 — Isaac Sim Physical Validation (cuRobo)
+
+```
+cuRobo: plan home → pre-grasp → grasp → lift
+    ↓ physical execution (Franka arm)
+    ↓ lift check: Δz > 3 cm = SUCCESS
+    ✅  save contact point + force center as Robot GT label
+    ❌  discard failed candidates
+```
+
+### Step 3 — PointNet++ Training
+
+```
+Input:    Object point cloud (4096 × 6):  xyz(3) + normals(3)
+Output 1: Per-vertex grasp label (4096,): 0=fail / 1=success
+Output 2: Force center (3,):             optimal grasp position
+
+Loss = Focal Loss + Tversky Loss (segmentation)
+     + MSE × λ            (force center regression)
+```
+
+The model learns a **geometry-based** grasp affordance representation that transfers to unseen objects.
+
+### Step 4 — Deployment (Sim → Real)
+
+```
+New object (mesh only — no demonstrations required)
+    ↓ PointNet++ inference
+    Predicted graspable regions + force center
+    ↓ cuRobo motion planning
+    Full arm trajectory to grasp pose
+    ↓ Execute on Franka (Isaac Sim or Real Robot)
+```
+
+---
+
+## Baselines
+
+To validate that contact-point prediction generalizes better than trajectory imitation:
+
+| | **Ours (Affordance2Grasp)** | Baseline 1: Human Retarget DP | Baseline 2: Robot DP (Sim) |
+|---|---|---|---|
+| Training data | Human video | Same human video | Isaac Sim only |
+| What it learns | Contact regions | Full EE trajectory (MANO → Franka retarget) | Full EE trajectory (random grasps) |
+| Human prior | ✅ | ✅ (implicit, via retargeting) | ❌ |
+| Object-agnostic | ✅ | ❌ | ❌ |
+
+---
+
+## Datasets
+
+| Dataset | Viewpoint | Objects | Role |
+|---------|-----------|---------|------|
+| DexYCB | Third-person | 20 YCB items | Evaluation benchmark |
+| HO3D v3 | Third-person | 10 YCB items | Training + evaluation |
+| OakInk | Third-person | 100 household objects | Category diversity |
+| TACO (Allocentric) | Third-person | 100+ tool-object pairs | Tool grasping patterns |
+| EgoDex | **First-person** | 850+ sequences | Egocentric diversity |
+| TACO (Ego) | **First-person** | Tool interactions | Egocentric tool data |
+
+> The model is **not limited** to these objects. Any new object with a mesh can be evaluated after training.
+
+---
+
+## Core Design Decisions
+
+**1. Contact points, not trajectories**
+We predict *where* to grasp (object-centric), not *how* to move the arm (robot-centric). This decouples the affordance model from the specific robot platform.
+
+**2. Monocular depth estimation, not real sensors**
+MegaSAM and Depth Pro allow us to extract 3D hand-object interactions from any video — unlocking internet-scale training data without any depth camera.
+
+**3. Sim-filtering bridges the embodiment gap**
+Human contact points are physically validated in Isaac Sim. Only robot-verified grasps become training labels, handling the human-to-robot morphology gap.
+
+**4. Object-agnostic generalization**
+The model operates on raw geometry (xyz + normals), not object identity. Given any mesh, it immediately predicts graspable regions without retraining.
+
+---
+
+## Quick Start
+
+```bash
+# Train (after preparing human priors and robot GT labels)
+python -m model.train
+
+# Inference on a new object mesh
+python inference/grasp_pose.py --mesh path/to/object.obj
+
+# Run Isaac Sim grasp validation
+sim45 sim/run_grasp_sim.py --hdf5 output/grasps_random/mug_grasp.hdf5
+```
+
+---
+
+## Repository Structure
+
+```
+Affordance2Grasp/
+├── model/              # PointNet++ model + training (python -m model.train)
+├── sim/                # Isaac Sim execution + cuRobo planning
+├── inference/          # Deploy: predict affordance → plan → execute
+├── tools/              # Data processing, frame extraction, contact alignment
+├── Baseline2/          # Robot DP (Sim) baseline implementation
+├── data_hub/
+│   ├── meshes/         # Object meshes (v1: OakInk; SAM3DMesh: egodex/ycb/oakink)
+│   └── human_prior/    # Aggregated contact prior HDF5 files
+└── output/             # Grasp candidates, robot GT labels, model checkpoints
+```
+
+---
+
+*For detailed setup instructions, per-phase commands, GPU compatibility, and troubleshooting, see the sections below.*
+
+---
 
 ---
 
@@ -428,8 +647,6 @@ cd ../..
 git apply patches/haptic-intrinsics-fix.patch
 ```
 
-```
-
 **Step 3 — Clone and build FoundationPose**
 
 > FoundationPose requires compiling CUDA C++ extensions. A simple `pip install` is not sufficient.
@@ -474,13 +691,19 @@ export FP_ROOT="$(pwd)"
 Weights are hosted on our HuggingFace repo. Run from inside the FoundationPose directory:
 
 ```bash
+# Recommended: use setup_weights.py (handles all tools automatically)
+python setup_weights.py --tool fp
+```
+
+Or manually (note: weights are in `UCBProject/Affordance2Grasp-Weights`):
+```bash
 cd /path/to/FoundationPose
 
 python3 -c "
-from huggingface_hub import hf_hub_download, snapshot_download
+from huggingface_hub import snapshot_download
 import shutil, os
 
-repo = 'UCBProject/Affordance2Grasp-Data'
+repo = 'UCBProject/Affordance2Grasp-Weights'
 
 for folder in ['2023-10-28-18-33-37', '2024-01-11-20-02-45']:
     snapshot_download(
@@ -489,7 +712,6 @@ for folder in ['2023-10-28-18-33-37', '2024-01-11-20-02-45']:
         allow_patterns=f'FoundationPose/weights/{folder}/*',
         local_dir='.',
     )
-    # Move into weights/
     src = f'FoundationPose/weights/{folder}'
     dst = f'weights/{folder}'
     if os.path.exists(src):
@@ -505,20 +727,57 @@ weights/
 └── 2024-01-11-20-02-45/model_best.pth   ← scorer
 ```
 
-**Step 5 — Set path in `config.py`**
-```python
-FP_ROOT = "/path/to/FoundationPose"
+```bash
+# Register FP_ROOT so pipeline scripts can find it (add to ~/.bashrc for persistence)
+export FP_ROOT="$(pwd)"
+echo "export FP_ROOT=\"$(pwd)\"" >> ~/.bashrc
 ```
 
-### 3. Configure paths in `config.py`
+### 3c. Environment A — `depth-pro` (Phase 1A Step 1)
 
-```python
-DATA_HUB   = "/path/to/data_hub"
-HAPTIC_DIR = "/path/to/HaPTIC"
-FP_ROOT    = "/path/to/FoundationPose"
+```bash
+conda create -n depth-pro python=3.9 -y
+conda activate depth-pro
+
+# Install from submodule (avoids Apple CDN firewall issues on remote servers)
+pip install -e third_party/ml-depth-pro
+pip install natsort tqdm pillow numpy h5py
+
+# Download checkpoint via HuggingFace (recommended — Apple CDN may be blocked)
+python setup_weights.py --tool depthpro
+# places depth_pro.pt in: third_party/ml-depth-pro/checkpoints/
+
+# Verify
+python -c "import depth_pro; print('depth_pro: ok')"
 ```
 
-### 3d. Environment C — `mega_sam` (Phase 1B Step E1)
+### 3f. Configure paths via environment variables
+
+> **Do not edit `config.py` directly.** All external paths are read from environment variables.
+> The `.env` file in the project root is a template — copy it and fill in your values.
+
+```bash
+# Edit .env with your actual paths:
+cat .env   # see all available variables
+
+# Required for Phase 1A:
+export ARCTIC_ROOT=/path/to/arctic/unpack   # only if running ARCTIC sequences
+export FP_ROOT=/path/to/FoundationPose
+
+# Required for Phase 1B:
+export HAWOR_DIR=/path/to/hawor            # e.g. third_party/hawor (if not using submodule)
+export HAPTIC_DIR=/path/to/haptic          # e.g. third_party/haptic
+export HAPTIC_MANO_DIR=/path/to/mano       # directory containing MANO_RIGHT.pkl etc.
+
+# Optional:
+export SAM2_DIR=/path/to/sam2              # default: ./third_party/sam2
+export SAM3D_USER=yourname                 # cloud server username for rsync commands
+export ISAAC_SIM_PATH=/path/to/isaac-sim   # only for Phase 3 simulation
+
+# DATA_HUB is auto-detected as <project_root>/data_hub — no export needed.
+# Use a symlink if your data is on a different disk:
+#   ln -s /data/5TB/Affordance2Grasp/data_hub data_hub
+```
 
 > ⚠️ **Do NOT follow `mega-sam/README.md` for the conda setup.**
 > MegaSAM's README specifies `torch==2.0.1+cu118`. We use **torch 2.2.0+cu121**.
@@ -554,13 +813,11 @@ cp droid_backends.cpython-310-x86_64-linux-gnu.so droid_slam/
 cd ../..
 
 # 5. MegaSAM Python dependencies
-cd mega-sam
-pip install -r requirements.txt
-cd ..
+#    ⚠️  mega-sam has NO requirements.txt — it only ships environment.yml (conda format).
+#    Install the required packages directly:
+pip install 'numpy<2.0' opencv-python natsort tqdm imageio h5py \
+    scipy matplotlib einops kornia wandb 'huggingface-hub>=0.23' timm ninja
 
-# 6. Remaining pip deps (mega-sam has no complete requirements.txt for pip installs)
-pip install opencv-python natsort tqdm imageio h5py scipy matplotlib \
-    einops kornia wandb huggingface-hub timm ninja
 
 # 7. Download Depth-Anything ViT-L weights (1.28 GB, required at runtime)
 python3 -c "
@@ -626,8 +883,10 @@ python setup.py install
 cd ../../../..
 
 # 4. HaWoR Python deps (install AFTER torch is confirmed)
+#    ⚠️  hawor's requirements.txt contains 'pytorch3d @ git+...' which conflicts with
+#       the pre-built 0.7.5 wheel installed in Step 2. Skip that line:
 cd third_party/hawor
-pip install -r requirements.txt
+grep -v 'pytorch3d' requirements.txt | pip install -r /dev/stdin
 cd ../..
 
 # 5. Extra packages not in requirements.txt (required at runtime)
@@ -684,24 +943,49 @@ data_hub/
 │       ├── egodex/test/                 ← EgoDex raw
 │       └── taco/
 │           └── Egocentric_RGB_Videos/   ← TACO Ego (download from taco-group.github.io)
-└── ProcessedData/                       ← generated by pipeline steps below
+└── ProcessedData/                       ← Phase 1 unified output (most important!)
+    ├── egocentric/                        ← Phase 1B: MegaSAM + HaWoR + FP ego
+    │   └── {dataset}/{task}__{ep}/
+    │       ├── depth.npz  cam_c2w.npy  K.npy  mano.npz  ob_in_cam/
+    └── third/                             ← Phase 1A: DepthPro + HaWoR + FP third
+        └── {dataset}/{seq_id}/
+            ├── depths.npz  K.npy  mano.npz  ob_in_cam/
 ```
 
 ### 5. Download preprocessed assets (HuggingFace)
 
+`setup_weights.py` handles all HuggingFace downloads in one place:
+
 ```bash
 pip install huggingface_hub
-python -c "
-from huggingface_hub import snapshot_download
-snapshot_download(
-    repo_id='StZaBL/Affordance2Grasp-ProcessedData',
-    repo_type='dataset',
-    local_dir='data_hub/ProcessedData',
-)
-"
+
+# Model weights + essential data assets (masks + meshes, ~12 GB total)
+python setup_weights.py
+
+# Or download specific assets:
+python setup_weights.py --tool thirdmasks  # Phase 1A FP masks (DexYCB/HO3D/OakInk/TACO, ~30 MB)
+python setup_weights.py --tool egomasks    # Phase 1B FP masks (EgoDex+TACO ego, ~70 MB)
+python setup_weights.py --tool objmeshes   # Object meshes for FP (~1 GB)
+python setup_weights.py --tool egodex      # EgoDex raw videos (~30 GB)
+python setup_weights.py --tool taco        # TACO Alloc+Ego videos (~144 GB)
 ```
 
-Includes: YCB meshes (`obj_meshes/ycb/`) + FoundationPose init masks (`obj_recon_input/ycb/`)
+**HuggingFace repos used:**
+
+| Repo | Content | Used by |
+|---|---|---|
+| `UCBProject/Weights` | Model weights (FP/HaWoR/HaPTIC/MegaSAM/DepthPro) | `setup_weights.py` |
+| `UCBProject/ThirdDataMask` | Phase 1A FP init masks (DexYCB/HO3D/OakInk/TACO, 278 items) | `batch_obj_pose.py` |
+| `UCBProject/EgoDataMask` | Phase 1B FP init masks (EgoDex+TACO ego, 490 items) | `batch_obj_pose.py` |
+| `UCBProject/ObjMesh` | Object meshes YCB+EgoDex+OakInk (SAM3D, 217 objects) | FP + scale estimation |
+| `UCBProject/EgoDex` | EgoDex raw videos (129k frames, 3051 seqs) | Phase 1B |
+| `UCBProject/TACO` | TACO Allocentric + Ego raw videos | Phase 1A+1B |
+| `UCBProject/OakInk` | OakInk raw data | Phase 1A |
+| **`UCBProject/ProcessedData`** | **Phase 1 unified output (depth/mano/poses)** | **All downstream steps** |
+
+> **DexYCB / HO3D** must be downloaded from their official sites (license restricted):
+> - DexYCB: [dex-ycb.github.io](https://dex-ycb.github.io) (~250 GB)
+> - HO3D v3: [www.tugraz.at/...](https://www.tugraz.at/index.php?id=57823) (~6 GB)
 
 ---
 
@@ -729,8 +1013,8 @@ python data/batch_depth_pro.py --dataset oakink --two-pass --max-frames 150
 python data/batch_depth_pro.py --dataset taco_allocentric --two-pass --max-frames 150
 ```
 
-Output: `data_hub/ProcessedData/third_depth/{dataset}/{seq_id}/`
-- `K.txt` — 3×3 intrinsics
+Output: `data_hub/ProcessedData/third/{dataset}/{seq_id}/`
+- `K.npy` — 3×3 intrinsics
 - `depths.npz` — (N, H, W) float32 metric depth in metres
 
 ---
@@ -746,7 +1030,7 @@ python data/batch_haptic.py --dataset oakink           --only-with-depth-k
 python data/batch_haptic.py --dataset taco_allocentric --only-with-depth-k
 ```
 
-Output: `data_hub/ProcessedData/third_mano/{dataset}/{seq_id}.npz`
+Output: `data_hub/ProcessedData/third/{dataset}/{seq_id}/mano.npz`
 - `verts_dict` — MANO vertices (778, 3) per frame, camera space
 
 ---
@@ -762,7 +1046,7 @@ python tools/batch_obj_pose.py --dataset oakink
 python tools/batch_obj_pose.py --dataset taco_allocentric
 ```
 
-Output: `data_hub/ProcessedData/obj_poses/{dataset}/{seq_id}/ob_in_cam/{frame}.txt`
+Output: `data_hub/ProcessedData/third/{dataset}/{seq_id}/ob_in_cam/{frame}.npy`
 - 4×4 object-in-camera transform per frame
 
 ---
@@ -829,7 +1113,7 @@ conda run --no-capture-output -n mega_sam \
   2>&1 | tee output/megasam_taco.log
 ```
 
-Output per sequence: `data_hub/ProcessedData/egocentric_depth/{dataset}/{seq}/`
+Output per sequence: `data_hub/ProcessedData/egocentric/{dataset}/{task}__{ep}/`
 - `depth.npz` — (60, H, W) float32 metric depth
 - `K.npy` — 3×3 camera intrinsic
 - `cam_c2w.npy` — (60, 4, 4) camera-to-world transforms
@@ -849,7 +1133,7 @@ python data/batch_hawor.py --dataset taco_ego
 # Options: --seq "task/ep" --force-rerun --max-frames 120
 ```
 
-Output: `data_hub/ProcessedData/ego_mano/{dataset}/{seq_id}.npz`
+Output: `data_hub/ProcessedData/egocentric/{dataset}/{task}__{ep}/mano.npz`
 - `right_verts` (T, 778, 3) · `left_verts` (T, 778, 3) — world frame
 - `R_w2c` (T, 3, 3) · `t_w2c` (T, 3) — world→camera per frame
 
@@ -1445,19 +1729,26 @@ and are stored in our HuggingFace repo. They are NOT generated automatically.
 
 **Fix — download from HuggingFace:**
 ```bash
+# Recommended (handles path placement automatically):
+python setup_weights.py --tool thirdmasks   # DexYCB/HO3D/OakInk/TACO masks
+python setup_weights.py --tool objmeshes    # object meshes
+
+# Or manually:
 python3 -c "
 from huggingface_hub import snapshot_download
+# UCBProject/Affordance2Grasp-Mesh: 56 object sets (28 YCB + OakInk + EgoDex tasks)
+# includes obj_recon_input/ycb/ initial masks + obj_meshes/ycb/ meshes
 snapshot_download(
     repo_id='UCBProject/Affordance2Grasp-Mesh',
     repo_type='dataset',
     local_dir='data_hub/ProcessedData',
     allow_patterns=['obj_recon_input/ycb/**', 'obj_meshes/ycb/**'],
-    token='YOUR_HF_TOKEN',
 )
 "
 # Downloads:
-#   obj_recon_input/ycb/ycb_dex_01~20/0.png  (initial masks, 12 MB)
-#   obj_meshes/ycb/ycb_dex_01~20/mesh.ply    (object meshes, 999 MB)
+#   obj_recon_input/ycb/ycb_dex_01~20/0.png  (initial masks, ~12 MB)
+#   obj_meshes/ycb/ycb_dex_01~20/mesh.ply    (object meshes, ~999 MB)
+# Note: repo is public — no token required.
 ```
 
 ### T8 — DexYCB download (~250 GB)
@@ -1558,44 +1849,135 @@ pip install "cmake<4.0" ninja pybind11 "setuptools<70" "numpy<2.0"
 
 ### T12 — Blackwell GPU (sm_120): `no kernel image is available for execution on the device`
 
-**Affected GPUs:** RTX 5090, RTX 6000 Pro (2025 Blackwell generation)  
-**Root cause:** `torch 2.1.1` was compiled only up to sm_90. Blackwell (sm_120) kernels are not included.
+> **⚠️ Blackwell-only.** A100, A30, RTX 3090 (Ampere) and RTX 4080/4090 (Ada Lovelace)
+> work out-of-the-box with `torch 2.1.x+cu121` — **skip this entire section.**
+> Only follow T12 if `nvidia-smi` reports `compute_cap >= 12.0` (RTX 5090, RTX 6000 Pro 2025, etc.)
+
+**Affected GPUs:** RTX 5090, RTX 6000 Pro 2025 (Blackwell, sm_120)  
+**Root cause:** `torch 2.1.x` was compiled only up to sm_90. Blackwell kernels are not included.
 
 **Verify your architecture:**
 ```bash
 nvidia-smi --query-gpu=name,compute_cap --format=csv
-# compute_cap = 12.0 or higher → you have Blackwell → follow this fix
+# compute_cap = 12.0 or higher → Blackwell → follow this fix
+# compute_cap < 12.0 (e.g. 8.0=A100, 8.9=RTX 4090) → skip T12 entirely
 ```
 
-**Fix: upgrade the entire haptic env torch stack to 2.7+**
-```bash
-conda activate haptic
+#### T12.1 — `bundlesdf` + `haptic` envs: upgrade to cu128
 
-# Step 1: upgrade torch to Blackwell-compatible build
+```bash
+conda activate haptic   # repeat for bundlesdf
+
+# Step 1: upgrade torch
 pip install torch==2.7.0+cu128 torchvision==0.22.0+cu128 \
   --index-url https://download.pytorch.org/whl/cu128
 
-# Step 2: upgrade xformers to matching version
+# Step 2: upgrade xformers
 pip install xformers --index-url https://download.pytorch.org/whl/cu128
 
-# Step 3: pytorch3d has no cu128 prebuilt wheel — compile from source (~15 min)
-pip install "git+https://github.com/facebookresearch/pytorch3d.git"
+# Step 3: pytorch3d — no cu128 prebuilt wheel, compile from source (~15 min)
+export FORCE_CUDA=1
+export TORCH_CUDA_ARCH_LIST="12.0"
+pip install --no-build-isolation 'git+https://github.com/facebookresearch/pytorch3d.git'
 
-# Step 4: recompile detectron2 (torch ABI change requires rebuild)
+# Step 4: recompile detectron2 (torch ABI change)
 pip install --force-reinstall "setuptools<70"
-git clone --depth 1 https://github.com/facebookresearch/detectron2.git /tmp/det2
-pip install /tmp/det2 --no-build-isolation
+pip install --no-build-isolation 'git+https://github.com/facebookresearch/detectron2'
 
-# Step 5: re-pin numpy (pytorch3d compile may upgrade it)
+# Step 5: re-pin numpy
 pip install "numpy<2.0"
+
+# Step 6: recompile mmcv-full with sm_120
+export CUDA_HOME=$CONDA_PREFIX
+export CPATH=$CONDA_PREFIX/targets/x86_64-linux/include:$CPATH
+pip install --no-build-isolation 'mmcv-full>=1.7.0,<1.8.0'
 ```
 
-> **Note on other envs:** `depth-pro` and `bundlesdf` environments can use `cu128` directly  
-> (e.g. `pip install torch==2.7.0+cu128 ...`). FoundationPose CUDA extensions must also be  
-> recompiled with the matching CUDA toolkit.
+FoundationPose CUDA extensions (`nvdiffrast`, `mycpp`) must also be recompiled
+after upgrading torch. Run `bash build_all_conda.sh` from the FP directory.
 
-> **Verified working on:** RTX 4080 SUPER (sm_89) with torch 2.1.1+cu121  
-> **Reported working on Blackwell after upgrade:** RTX 5090 (sm_120) with torch 2.7.0+cu128
+#### T12.2 — `hawor` + `mega_sam` envs: same upgrade + DROID-SLAM rebuild
+
+Apply the same `pip install torch==2.7.0+cu128 ...` steps, then:
+
+**hawor env — DROID-SLAM:**
+```bash
+# In third_party/hawor/thirdparty/DROID-SLAM/setup.py,
+# add '-gencode=arch=compute_120,code=sm_120' to nvcc_args, then:
+cd third_party/hawor/thirdparty/DROID-SLAM
+conda run -n hawor python setup.py install
+```
+
+**mega_sam env — droid_slam + torch_scatter:**
+```bash
+# mega-sam/base/setup.py: add sm_120 gencode line, then rebuild
+cd mega-sam/base
+conda run -n mega_sam python setup.py install
+
+# Delete stale .so committed at old ABI:
+rm mega-sam/base/droid_slam/droid_backends.cpython-310-x86_64-linux-gnu.so
+
+# torch_scatter for cu128
+pip install --force-reinstall torch_scatter \
+  -f https://data.pyg.org/whl/torch-2.11.0+cu128.html
+```
+
+#### T12.3 — xformers `memory_efficient_attention` fails on sm_120
+
+Error: `` `fa3F@0.0.0` ... requires device with capability <= (9,0) but yours is (12,0) ``
+
+Wrap the call in `try/except` and fall back to `torch.nn.functional.scaled_dot_product_attention`.
+
+Three call sites that need patching:
+- `third_party/haptic/haptic/models/components/pose_transformer.py:145`
+- `mega-sam/UniDepth/unidepth/models/backbones/metadinov2/attention.py:79`
+- `~/.cache/torch/hub/facebookresearch_dinov2_main/dinov2/layers/attention.py:94`
+
+For UniDepth: set `XFORMERS_AVAILABLE = False` in the module — clean PyTorch fallbacks exist.  
+For `NystromAttention` (removed in xformers 0.0.28): provide a small SDPA-based stub.
+
+#### T12.4 — SAM3D: kaolin / spconv / gsplat on Blackwell
+
+- **kaolin**: No cu128 wheel. Build CPU-only (SAM3D only uses rendering, no CUDA kernels):
+  ```bash
+  git clone --recurse-submodules https://github.com/NVIDIAGameWorks/kaolin
+  FORCE_CUDA=0 IGNORE_TORCH_VER=1 pip install --no-build-isolation -e kaolin/
+  ```
+- **spconv**: Use `spconv-cu126` — PTX forward-compat works on sm_120:
+  ```bash
+  pip install spconv-cu126
+  ```
+- **gsplat**: Source build from SAM3D-pinned commit with `TORCH_CUDA_ARCH_LIST="12.0"`.
+- **flash_attn**: Skip entirely — set env var `ATTN_BACKEND=sdpa`.
+
+#### T12.5 — Nvidia driver not loaded after kernel update
+
+```bash
+# Check if kernel module is loaded
+lsmod | grep nvidia   # empty = not loaded
+
+# If previous kernel still works, boot into it via GRUB:
+sudo grub-reboot 'Advanced options for Ubuntu>Ubuntu, with Linux <prev-kernel>-generic'
+sudo reboot
+# Long-term fix: install dkms so the driver rebuilds on each kernel update
+```
+
+#### T12.6 — Verified Blackwell Configuration
+
+| Component | Version |
+|---|---|
+| GPU | RTX 5090 (sm_120, 32 GB) |
+| Driver | 580.126.09, Kernel 6.17.0-22 (Ubuntu 24.04) |
+| `torch` | 2.11.0+cu128 |
+| `xformers` | 0.0.35 |
+| `pytorch3d` | 0.7.9 (source built) |
+| `mmcv-full` | 1.7.2 (source built) |
+| `detectron2` | 0.6 (source built) |
+| `spconv` | spconv-cu126 2.3.8 |
+| `kaolin` | 0.18.0 (CPU build) |
+| Phase 1A end-to-end | ✅ 72 frames, ~25 s total |
+| Phase 1B end-to-end | ✅ 5 episodes × 60 frames |
+| SAM3D 217-object batch | ✅ 5.7 s / object, 0 failures |
 
 ---
 
@@ -1787,8 +2169,9 @@ cp droid_backends.cpython-310-x86_64-linux-gnu.so droid_slam/
 cd ../..
 ```
 
-> **Alternative:** `pip install -e mega-sam/base/thirdparty/lietorch --no-build-isolation`  
-> also works but installs as an egg into site-packages instead.
+> **Do NOT use:** `pip install -e mega-sam/base/thirdparty/lietorch --no-build-isolation`
+> That only compiles `lietorch`, **not** `droid_backends`. The `.so` will not be created.
+> Always use `mega-sam/base/setup.py` as shown above.
 
 ---
 

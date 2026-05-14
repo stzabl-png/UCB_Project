@@ -33,7 +33,9 @@ import config
 # ============================================================
 # ARCTIC paths
 # ============================================================
-ARCTIC_ROOT = os.environ.get("ARCTIC_ROOT", "/home/lyh/Project/arctic/unpack")
+import sys as _sys; _sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import config as _cfg
+ARCTIC_ROOT = _cfg.ARCTIC_ROOT
 MANUAL_VIDEOS = os.path.join(ARCTIC_ROOT, "arctic_manual_videos")
 EGOCAM_VIDEOS = os.path.join(ARCTIC_ROOT, "arctic_egocam_videos")
 OBJECT_MESHES = os.path.join(ARCTIC_ROOT, "meta", "object_vtemplates")

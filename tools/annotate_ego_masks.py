@@ -21,7 +21,7 @@ annotate_ego_masks.py — 为 EgoDex / TACO Ego 任务手工标注物体 mask（
 
 用法:
   conda activate base
-  cd /home/lyh/Project/Affordance2Grasp
+  cd $PROJ
   python tools/annotate_ego_masks.py                    # EgoDex + TACO Ego 全部
   python tools/annotate_ego_masks.py --dataset egodex   # 只跑 EgoDex
   python tools/annotate_ego_masks.py --dataset taco     # 只跑 TACO

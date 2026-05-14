@@ -1,0 +1,21 @@
+{
+  "source": "/home/lyh/Project/arctic/unpack/arctic_data/data/cropped_images/s05/microwave_grab_01/1",
+  "total_frames": 690,
+  "fps": 24,
+  "keyframes": [
+    2,
+    37,
+    30,
+    50
+  ],
+  "obj": {
+    "start": 2,
+    "end": 37,
+    "n_frames": 36
+  },
+  "mano": {
+    "start": 30,
+    "end": 50,
+    "n_frames": 21
+  }
+}

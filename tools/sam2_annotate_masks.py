@@ -38,7 +38,27 @@ WIN       = "SAM2 Mask Annotator"
 DISP_H    = 720
 
 # hawor env python (has SAM2)
-HAWOR_PY  = "/home/lyh/anaconda3/envs/hawor/bin/python"
+# Set HAWOR_PY env var to override, or set HAWOR_DIR to the hawor conda env root
+def _find_hawor_python():
+    if "HAWOR_PY" in os.environ:
+        return os.environ["HAWOR_PY"]
+    if "HAWOR_DIR" in os.environ:
+        return os.path.join(os.environ["HAWOR_DIR"], "bin", "python")
+    # Try common conda locations
+    import shutil
+    for candidate in [
+        os.path.expanduser("~/anaconda3/envs/hawor/bin/python"),
+        os.path.expanduser("~/miniconda3/envs/hawor/bin/python"),
+        os.path.expanduser("~/miniforge3/envs/hawor/bin/python"),
+        "/opt/conda/envs/hawor/bin/python",
+    ]:
+        if os.path.exists(candidate):
+            return candidate
+    raise RuntimeError(
+        "Cannot find hawor Python. Set HAWOR_PY=/path/to/hawor/bin/python "
+        "or HAWOR_DIR=/path/to/hawor/env in your .env or environment."
+    )
+HAWOR_PY  = _find_hawor_python()
 SAM2_SRV  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sam2_server.py")
 
 # ── SAM2 subprocess client ────────────────────────────────────────────────────

@@ -48,7 +48,7 @@ for i in $(seq 0 $((TOTAL-1))); do
 
     echo "  [$N/$TOTAL] $OBJ_ID ..."
 
-    timeout 600 ${ISAAC_SIM_PATH:-/home/lyh/isaac-sim}/python.sh "$SIM_SCRIPT" \
+    timeout 600 ${ISAAC_SIM_PATH:?Set ISAAC_SIM_PATH env var to your Isaac Sim directory}/python.sh "$SIM_SCRIPT" \
         --hdf5 "$HDF5" \
         --save-result \
         --result-dir "$AUTO_GT_DIR" \

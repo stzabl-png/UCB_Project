@@ -11,21 +11,21 @@ This script:
 
 Usage (run BEFORE demo.py):
   conda activate hawor
-  cd /home/lyh/Project/Video2MANO&Mesh/hawor
+  cd $HAWOR_DIR
 
   # EgoDex
   python ../../Affordance2Grasp/tools/megasam_to_hawor_slam.py \\
-    --cam_c2w /home/lyh/Project/Affordance2Grasp/data_hub/ProcessedData/egocentric_depth/egodex/assemble_disassemble_tiles/1/cam_c2w.npy \\
-    --video_path /home/lyh/Project/Affordance2Grasp/data_hub/RawData/EgoRawData/egodex/test/assemble_disassemble_tiles/1.mp4 \\
+    --cam_c2w $PROJ/data_hub/ProcessedData/egocentric_depth/egodex/assemble_disassemble_tiles/1/cam_c2w.npy \\
+    --video_path $PROJ/data_hub/RawData/EgoRawData/egodex/test/assemble_disassemble_tiles/1.mp4 \\
     --img_focal 681.6 \\
-    --out_dir /home/lyh/Project/Affordance2Grasp/data_hub/RawData/EgoRawData/egodex/test/assemble_disassemble_tiles/1/SLAM
+    --out_dir $PROJ/data_hub/RawData/EgoRawData/egodex/test/assemble_disassemble_tiles/1/SLAM
 
   # PH2D
   python ../../Affordance2Grasp/tools/megasam_to_hawor_slam.py \\
-    --cam_c2w /home/lyh/Project/Affordance2Grasp/data_hub/ProcessedData/egocentric_depth/ph2d_avp/1407-picking_orange_tj_2025-03-12_16-42-19/processed_episode_3/cam_c2w.npy \\
-    --video_path /home/lyh/Project/Affordance2Grasp/data_hub/RawData/ThirdPersonRawData/ph2d/1407-picking_orange_tj_2025-03-12_16-42-19/processed_episode_3.mp4 \\
+    --cam_c2w $PROJ/data_hub/ProcessedData/egocentric_depth/ph2d_avp/1407-picking_orange_tj_2025-03-12_16-42-19/processed_episode_3/cam_c2w.npy \\
+    --video_path $PROJ/data_hub/RawData/ThirdPersonRawData/ph2d/1407-picking_orange_tj_2025-03-12_16-42-19/processed_episode_3.mp4 \\
     --img_focal 271.2 \\
-    --out_dir /home/lyh/Project/Affordance2Grasp/data_hub/RawData/ThirdPersonRawData/ph2d/1407-picking_orange_tj_2025-03-12_16-42-19/processed_episode_3/SLAM
+    --out_dir $PROJ/data_hub/RawData/ThirdPersonRawData/ph2d/1407-picking_orange_tj_2025-03-12_16-42-19/processed_episode_3/SLAM
 """
 
 import argparse, os, sys
@@ -157,7 +157,7 @@ def main():
     print(f"     scale       : 1.0 (MegaSAM metric)")
     print(f"\nNow run HaWoR (SLAM file pre-computed, will be skipped):")
     print(f"  conda activate hawor")
-    print(f"  cd /home/lyh/Project/Video2MANO\\&Mesh/hawor")
+    print(f"  cd $HAWOR_DIR")
     print(f"  python demo.py --video_path {args.video_path} --img_focal {args.img_focal} --vis_mode world")
 
 

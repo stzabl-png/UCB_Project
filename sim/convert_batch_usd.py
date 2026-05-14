@@ -7,16 +7,20 @@
 支持:
   - v1 OBJ 文件 (data_hub/meshes/v1/)
   - GRAB PLY 文件 (data_hub/meshes/grab/) — 先转 OBJ 再转 USD
+  - SAM3DMesh PLY 文件 (data_hub/meshes/SAM3DMesh/meshes/{ds}/{obj}/mesh.ply)
 
 用法 (需要 Isaac Sim 环境):
     # Run from project root
-    sim45 Pipeline/convert_batch_usd.py
+    sim45 sim/convert_batch_usd.py
+
+    # 只转 SAM3D 物体 (Baseline2 用)
+    sim45 sim/convert_batch_usd.py --sam3d-only
 
     # 只转 GRAB 物体
-    sim45 Pipeline/convert_batch_usd.py --grab-only
+    sim45 sim/convert_batch_usd.py --grab-only
 
     # 跳过已有 USD 的物体
-    sim45 Pipeline/convert_batch_usd.py --skip-existing
+    sim45 sim/convert_batch_usd.py --skip-existing
 """
 from isaacsim import SimulationApp
 simulation_app = SimulationApp({"headless": True})
@@ -30,9 +34,11 @@ import omni.kit.asset_converter as converter
 
 # ---- Paths ----
 AFFORDANCE_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-MESH_V1_DIR = os.path.join(AFFORDANCE_ROOT, "data_hub", "meshes", "v1")
-MESH_GRAB_DIR = os.path.join(AFFORDANCE_ROOT, "data_hub", "meshes", "grab")
-ASSETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
+MESH_V1_DIR     = os.path.join(AFFORDANCE_ROOT, "data_hub", "meshes", "v1")
+MESH_GRAB_DIR   = os.path.join(AFFORDANCE_ROOT, "data_hub", "meshes", "grab")
+SAM3D_MESH_ROOT = os.path.join(AFFORDANCE_ROOT, "data_hub", "meshes", "SAM3DMesh", "meshes")
+SAM3D_DATASETS  = ["egodex", "oakink", "ycb"]
+ASSETS_DIR      = os.path.join(AFFORDANCE_ROOT, "output", "assets")
 os.makedirs(ASSETS_DIR, exist_ok=True)
 
 
@@ -66,8 +72,25 @@ def ply_to_obj(ply_path, obj_path):
     return obj_path
 
 
-def discover_all_objects(grab_only=False):
+def discover_sam3d_objects():
+    """Discover SAM3DMesh objects. Returns [(obj_id, mesh_path), ...]"""
+    objects = []
+    for ds in SAM3D_DATASETS:
+        ds_dir = os.path.join(SAM3D_MESH_ROOT, ds)
+        if not os.path.isdir(ds_dir):
+            continue
+        for obj_name in sorted(os.listdir(ds_dir)):
+            p = os.path.join(ds_dir, obj_name, "mesh.ply")
+            if os.path.exists(p):
+                objects.append((obj_name, p))
+    return objects
+
+
+def discover_all_objects(grab_only=False, sam3d_only=False):
     """Discover all mesh files. Returns [(obj_id, mesh_path), ...]"""
+    if sam3d_only:
+        return discover_sam3d_objects()
+
     objects = []
 
     if not grab_only:
@@ -105,19 +128,27 @@ def discover_all_objects(grab_only=False):
                 if not any(o[0] == obj_id for o in objects):
                     objects.append((obj_id, os.path.join(cp_dir, f)))
 
+    # SAM3D meshes
+    for obj_id, p in discover_sam3d_objects():
+        if not any(o[0] == obj_id for o in objects):
+            objects.append((obj_id, p))
+
     return objects
 
 
 def main():
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("--grab-only", action="store_true",
+    parser.add_argument("--grab-only",     action="store_true",
                         help="Only convert GRAB objects")
+    parser.add_argument("--sam3d-only",    action="store_true",
+                        help="Only convert SAM3DMesh objects (egodex/oakink/ycb, for Baseline2)")
     parser.add_argument("--skip-existing", action="store_true", default=True,
                         help="Skip objects that already have USD files")
     args = parser.parse_args()
 
-    objects = discover_all_objects(grab_only=args.grab_only)
+    objects = discover_all_objects(grab_only=args.grab_only,
+                                   sam3d_only=args.sam3d_only)
 
     print("=" * 60)
     print("Batch USD Conversion")
@@ -125,10 +156,12 @@ def main():
     print(f"  Objects:    {len(objects)}")
     print(f"  Output:     {ASSETS_DIR}")
     print(f"  Skip exist: {args.skip_existing}")
+    if args.sam3d_only:
+        print(f"  Mode:       SAM3D only (egodex/oakink/ycb)")
 
     success = 0
     skipped = 0
-    failed = []
+    failed  = []
 
     loop = asyncio.get_event_loop()
 
@@ -141,7 +174,7 @@ def main():
 
         print(f"\n  [{i}/{len(objects)}] {obj_id}", end="", flush=True)
 
-        # PLY → OBJ first
+        # PLY → OBJ first (Isaac Sim converter works better with OBJ)
         obj_path = mesh_path
         if mesh_path.endswith('.ply'):
             obj_path = os.path.join(ASSETS_DIR, f"{obj_id}.obj")

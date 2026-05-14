@@ -1,0 +1,21 @@
+{
+  "source": "/home/lyh/Project/arctic/unpack/arctic_data/data/cropped_images/s05/scissors_grab_01/1",
+  "total_frames": 676,
+  "fps": 24,
+  "keyframes": [
+    2,
+    31,
+    24,
+    40
+  ],
+  "obj": {
+    "start": 2,
+    "end": 31,
+    "n_frames": 30
+  },
+  "mano": {
+    "start": 24,
+    "end": 40,
+    "n_frames": 17
+  }
+}

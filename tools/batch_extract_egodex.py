@@ -17,7 +17,9 @@ from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from tqdm import tqdm
 
-EGODEX_ROOT = Path("/home/lyh/Project/Affordance2Grasp/data_hub/RawData/"
+import sys as _sys, os as _os; _sys.path.insert(0, str(Path(__file__).parent.parent))
+import config as _cfg
+EGODEX_ROOT = Path(_cfg.DATA_HUB) / "RawData/"  
                    "EgoRawData/egodex/test")
 
 

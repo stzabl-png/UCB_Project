@@ -1,0 +1,21 @@
+{
+  "source": "/home/lyh/Project/arctic/unpack/arctic_data/data/cropped_images/s05/capsulemachine_grab_01/1",
+  "total_frames": 748,
+  "fps": 24,
+  "keyframes": [
+    2,
+    28,
+    26,
+    47
+  ],
+  "obj": {
+    "start": 2,
+    "end": 28,
+    "n_frames": 27
+  },
+  "mano": {
+    "start": 26,
+    "end": 47,
+    "n_frames": 22
+  }
+}

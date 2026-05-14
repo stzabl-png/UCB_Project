@@ -1,7 +1,7 @@
 # EgoDex 全量处理 Runbook
 # 环境: hawor (MANO/接触图), bundlesdf (FoundationPose)
-# 工作目录: /home/lyh/Project/Affordance2Grasp
-cd /home/lyh/Project/Affordance2Grasp
+# 工作目录: $PROJ
+cd $PROJ
 
 # ═══════════════════════════════════════════════════════════════
 # STEP 0: 帧提取（mp4 → extracted_images/）

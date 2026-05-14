@@ -13,7 +13,7 @@ Evaluation:
 
 Usage:
   conda activate mega_sam
-  cd /home/lyh/Project/Affordance2Grasp
+  cd $PROJ
   python data/eval_unidepth_datasets.py [--quick]
 
   --quick   5 episodes per dataset (fast sanity check)

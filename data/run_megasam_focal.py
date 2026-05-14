@@ -16,7 +16,7 @@ Output:
 
 Usage:
   conda activate mega_sam
-  cd /home/lyh/Project/Affordance2Grasp/mega-sam
+  cd $PROJ/mega-sam
   python ../data/run_megasam_focal.py [--quick]
 
   --quick   process only 1 sequence per camera type (fast test)

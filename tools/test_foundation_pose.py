@@ -7,7 +7,7 @@ test_foundation_pose.py — FoundationPose 管线验证脚本
 
 用法:
   conda activate bundlesdf
-  cd /home/lyh/Project/Affordance2Grasp
+  cd $PROJ
   python tools/test_foundation_pose.py
 
 输出: data_hub/ProcessedData/obj_poses/{dataset}/{seq_id}/
@@ -25,7 +25,9 @@ from PIL import Image
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config
 
-FOUNDATION_POSE_ROOT = "/home/lyh/Project/FoundationPose"
+import sys as _sys, os as _os; _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+import config as _cfg
+FOUNDATION_POSE_ROOT = _cfg.FP_ROOT
 sys.path.insert(0, FOUNDATION_POSE_ROOT)
 
 MESH_BASE  = os.path.join(config.DATA_HUB, "ProcessedData", "obj_meshes")

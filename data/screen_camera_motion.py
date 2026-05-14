@@ -16,7 +16,7 @@ Solution:
 
 Usage:
   conda activate mega_sam          # or depth-pro, only needs cv2 + h5py
-  cd /home/lyh/Project/Affordance2Grasp
+  cd $PROJ
   python data/screen_camera_motion.py [--dataset ph2d_avp|egodex] [--top N]
 
 Output:

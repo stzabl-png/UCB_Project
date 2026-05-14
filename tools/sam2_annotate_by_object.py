@@ -41,7 +41,24 @@ import config
 OUT_BASE       = os.path.join(config.DATA_HUB, "ProcessedData", "obj_recon_input")
 RAW_BASE       = os.path.join(config.DATA_HUB, "RawData", "ThirdPersonRawData")
 TACO_ALLOC_DIR = os.path.join(RAW_BASE, "taco", "Allocentric_RGB_Videos")
-HAWOR_PY  = "/home/lyh/anaconda3/envs/hawor/bin/python"
+def _find_hawor_python():
+    if "HAWOR_PY" in os.environ:
+        return os.environ["HAWOR_PY"]
+    if "HAWOR_DIR" in os.environ:
+        return os.path.join(os.environ["HAWOR_DIR"], "bin", "python")
+    for candidate in [
+        os.path.expanduser("~/anaconda3/envs/hawor/bin/python"),
+        os.path.expanduser("~/miniconda3/envs/hawor/bin/python"),
+        os.path.expanduser("~/miniforge3/envs/hawor/bin/python"),
+        "/opt/conda/envs/hawor/bin/python",
+    ]:
+        if os.path.exists(candidate):
+            return candidate
+    raise RuntimeError(
+        "Cannot find hawor Python. Set HAWOR_PY=/path/to/hawor/bin/python "
+        "or HAWOR_DIR=/path/to/hawor/env in your .env or environment."
+    )
+HAWOR_PY  = _find_hawor_python()
 SAM2_SRV  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sam2_server.py")
 WIN       = "SAM2 Object Annotator"
 DISP_H    = 720
@@ -171,13 +188,29 @@ def discover_taco_allocentric(raw_dir):
         if best_frames:
             yield "taco_allocentric", triplet, best_frames
 
+def discover_egodex(_raw_dir):
+    """EgoDex (egocentric): uses saved image.png as the single annotation frame.
+
+    Reads directly from obj_recon_input/egocentric/ — no raw video needed.
+    Output also goes to obj_recon_input/egocentric/{task}/.
+    """
+    ego_dir = os.path.join(OUT_BASE, "egocentric")
+    if not os.path.isdir(ego_dir):
+        print(f"  ⚠️  egodex: {ego_dir} not found"); return
+    for task in natsorted(os.listdir(ego_dir)):
+        task_dir = os.path.join(ego_dir, task)
+        img = os.path.join(task_dir, "image.png")
+        if os.path.isdir(task_dir) and os.path.exists(img):
+            yield "egocentric", task, [img]
+
 
 DISCOVERERS = {
     "arctic":           (discover_arctic,           "arctic"),
     "oakink":           (discover_oakink,           "oakink_v1"),
     "ho3d_v3":          (discover_ho3d,             "ho3d_v3"),
     "dexycb":           (discover_dexycb,           "dexycb"),
-    "taco_allocentric": (discover_taco_allocentric, "taco"),  # uses TACO_ALLOC_DIR directly
+    "taco_allocentric": (discover_taco_allocentric, "taco"),
+    "egodex":           (discover_egodex,           ""),       # no raw_dir needed
 }
 
 # ── SAM2 client ───────────────────────────────────────────────────────────────
@@ -264,6 +297,8 @@ def draw_ui(frame_d, fi, total, obj_idx, total_objs, ds, obj_name,
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", default=None, choices=list(DISCOVERERS.keys()))
+    parser.add_argument("--task",    default=None,
+                        help="只标注指定任务（支持子字符串匹配），配合 --redo 使用")
     parser.add_argument("--redo",    action="store_true")
     parser.add_argument("--start",   type=int, default=0)
     args = parser.parse_args()
@@ -275,14 +310,16 @@ def main():
     datasets = [args.dataset] if args.dataset else list(DISCOVERERS.keys())
     for ds_key in datasets:
         fn, folder = DISCOVERERS[ds_key]
-        raw_dir = os.path.join(RAW_BASE, folder)
-        if not os.path.isdir(raw_dir):
+        raw_dir = os.path.join(RAW_BASE, folder) if folder else ""
+        if folder and not os.path.isdir(raw_dir):
             print(f"  ⚠️  {ds_key}: {raw_dir} not found, skipping"); continue
         for ds_out, obj_name, frames in fn(raw_dir):
+            if args.task and args.task not in obj_name:
+                continue
             out_dir = os.path.join(OUT_BASE, ds_out, obj_name)
             img_out = os.path.join(out_dir, "image.png")
             if not args.redo and os.path.exists(img_out):
-                continue   # already annotated
+                continue
             all_objs.append((ds_out, obj_name, frames))
 
     total_objs = len(all_objs)

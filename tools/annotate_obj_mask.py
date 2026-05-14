@@ -24,8 +24,11 @@ import os, sys, json, glob, shutil, subprocess
 import cv2
 import numpy as np
 
-TRIMMED    = '/home/lyh/Project/Affordance2Grasp/data/trimmed'
-SAM2_ROOT  = '/home/lyh/Project/sam2'
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import config
+
+TRIMMED    = os.path.join(config.PROJECT_DIR, 'data', 'trimmed')
+SAM2_ROOT  = config.SAM2_DIR
 UPLOAD_DIR = '/tmp/sam3d_upload'
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
@@ -52,7 +55,7 @@ def run_sam2_with_bbox(img_path, bbox, out_dir):
         'python', f'{SAM2_ROOT}/scripts/amg.py',  # or whatever SAM2 script
     ]
     # If SAM2 doesn't have an easy CLI, fall back to our generate_masks_sam2.py
-    script = '/home/lyh/Project/Affordance2Grasp/tools/generate_masks_sam2.py'
+    script = os.path.join(config.PROJECT_DIR, 'tools', 'generate_masks_sam2.py')
     if os.path.exists(script):
         cmd = [
             'python', script,
@@ -63,7 +66,7 @@ def run_sam2_with_bbox(img_path, bbox, out_dir):
         ]
         print(f'  Running SAM2: bbox=[{x1},{y1},{x2},{y2}]')
         r = subprocess.run(cmd, capture_output=True, text=True,
-                           cwd='/home/lyh/Project/Affordance2Grasp')
+                           cwd=config.PROJECT_DIR)
         if r.returncode != 0:
             print(f'  SAM2 error: {r.stderr[-300:]}')
             return None
@@ -189,8 +192,6 @@ for ni, seq in enumerate(seqs):
 
     # Also run SAM2 for refined mask (needs hawor/sam2 env)
     print(f'  Running SAM2 mask refinement...')
-    script = '/home/lyh/Project/Affordance2Grasp/tools/generate_masks_sam2.py'
-    if os.path.exists(script):
         r = subprocess.run([
                 sys.executable, script,
                 '--input_dir', obj_dir,
@@ -198,7 +199,7 @@ for ni, seq in enumerate(seqs):
                 '--bbox'] + [str(v) for v in bbox_orig] +
                 ['--sam2_root', SAM2_ROOT],
             capture_output=True, text=True,
-            cwd='/home/lyh/Project/Affordance2Grasp')
+            cwd=config.PROJECT_DIR)
         if r.returncode == 0:
             print('  ✓ SAM2 mask generated')
         else:
@@ -222,5 +223,5 @@ print(f'完成 {len(results)}/{len(seqs)} 个序列的 mask 标注')
 print(f'上传目录: {UPLOAD_DIR}')
 print()
 print('下一步:')
-print(f'  rsync -avz {UPLOAD_DIR}/ root@<SERVER>:/mnt/data/lyh/sam3d_input/')
+print(f'  rsync -avz {UPLOAD_DIR}/ <CLOUD_SERVER>:/mnt/data/{config.SAM3D_USER}/sam3d_input/')
 print(f'  (然后在云服务器上运行 SAM3D)')

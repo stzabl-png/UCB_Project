@@ -108,8 +108,18 @@ def run_sam2_masks(rgb_dir: str, masks_dir: str, object_name: str = None):
     Requires: conda activate sam2 (or SAM2 installed in current env).
     """
     import sys
-    sam2_dir = '/home/lyh/Project/sam2'
-    if sam2_dir not in sys.path:
+    # Resolve SAM2 directory: env var → common locations → error
+    sam2_dir = os.environ.get("SAM2_DIR", "")
+    if not sam2_dir or not os.path.exists(sam2_dir):
+        for _candidate in [
+            os.path.expanduser("~/Project/sam2"),
+            os.path.expanduser("~/sam2"),
+            "/opt/sam2",
+        ]:
+            if os.path.exists(_candidate):
+                sam2_dir = _candidate
+                break
+    if sam2_dir and sam2_dir not in sys.path:
         sys.path.insert(0, sam2_dir)
 
     os.makedirs(masks_dir, exist_ok=True)
