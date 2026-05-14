@@ -54,6 +54,10 @@ PIPELINE_INSTRUCTIONS.md
 # Symlinks to data dirs
 /checkpoints
 
+# Baseline data (episodes + zarr — generated, not source)
+/Baseline1/data/
+/Baseline2/data/
+
 # External git clones (users clone these per README)
 third_party/FoundationPose/
 third_party/sam-3d-objects/
