@@ -33,7 +33,7 @@ batch_obj_pose.py — 通用物体位姿估计脚本 (FoundationPose)
   dexycb:  s01__20200709__836 → obj_meshes/ycb/ycb_dex_XX/mesh.ply  (TODO: 精确映射)
 """
 
-import os, sys, re, argparse, json, time
+import os, sys, re, argparse, json, time, shutil
 import numpy as np
 import cv2
 from glob import glob
@@ -343,6 +343,9 @@ def main():
     parser.add_argument("--redo",       action="store_true")
     parser.add_argument("--est-iter",   type=int, default=5)
     parser.add_argument("--track-iter", type=int, default=2)
+    parser.add_argument("--keep-scene-dir", action="store_true",
+                        help="don't delete the per-seq scratch dir under /tmp/fp_scenes "
+                             "after FP finishes (default: delete to avoid filling /tmp)")
     parser.add_argument("--debug",      type=int, default=0,
                         help="0=无可视化 1=track_vis")
     args = parser.parse_args()
@@ -418,6 +421,11 @@ def main():
         finally:
             import torch
             torch.cuda.empty_cache()   # 清显存，防止下一轮 OOM
+            # leak fix: scene_dir is pure scratch (rgb/depth/masks copies of data already in
+            # data_hub/); FP's actual outputs live in OUT_BASE. Without this, /tmp/fp_scenes/
+            # accumulates ~54MB per seq until the disk fills (root cause of the 2026-05-13 outage).
+            if not args.keep_scene_dir:
+                shutil.rmtree(scene_dir, ignore_errors=True)
 
     print(f"\n{'='*60}")
     print(f"✅ Done: {done}  ⏭ Skipped: {skipped}  ❌ Failed: {failed}")
