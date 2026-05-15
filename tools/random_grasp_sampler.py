@@ -28,6 +28,11 @@ INFER_HP_DIR  = os.path.join(PROJ, 'data_hub', 'human_prior_infer')  # 纯推理
 OUTPUT_DIR    = os.path.join(PROJ, 'output', 'grasps_random')
 INFER_OUT_DIR = os.path.join(PROJ, 'output', 'grasps_infer')         # 纯推理输出
 
+# Phase 1A 数据路径 (training_fp layout)
+TRAINING_FP_DIR = os.path.join(PROJ, 'data_hub', 'ProcessedData', 'training_fp')
+OBJ_MESHES_DIR  = os.path.join(PROJ, 'data_hub', 'ProcessedData', 'obj_meshes')
+SAM3D_MESH_DIR  = os.path.join(PROJ, 'data_hub', 'meshes', 'SAM3DMesh')
+
 # ARCTIC 物体列表 & mesh 路径（单位 mm，加载后需 /1000）
 import sys as _sys, os as _os; _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
 import config as _cfg
@@ -409,8 +414,10 @@ def visualize_candidates(mesh, candidates, obj_id):
 
 def main():
     parser = argparse.ArgumentParser(description='Grasp Sampler v2 (Scored + Iterative)')
-    parser.add_argument('--obj',    help='单个物体 ID')
-    parser.add_argument('--all',    action='store_true', help='OakInk 全部物体')
+    parser.add_argument('--obj',     help='单个物体 ID')
+    parser.add_argument('--all',     action='store_true', help='OakInk 全部物体 (meshes/v1/ + human_prior/)')
+    parser.add_argument('--oakink',  action='store_true', help='OakInk: training_fp/oakink/ + meshes/SAM3DMesh/oakink/')
+    parser.add_argument('--dexycb',  action='store_true', help='DexYCB: training_fp/dexycb/ + meshes/SAM3DMesh/ycb/')
     parser.add_argument('--arctic',  action='store_true', help='ARCTIC 10个物体 (mm→m 自动缩放)')
     parser.add_argument('--infer',   action='store_true', help='纯推理模式: 从 human_prior_infer/ 读取, 输出到 grasps_infer/')
     parser.add_argument('--force',   action='store_true', help='强制重新生成（覆盖已有）')
@@ -423,84 +430,145 @@ def main():
     _out_dir = args.output_dir or (INFER_OUT_DIR if args.infer else OUTPUT_DIR)
     os.makedirs(_out_dir, exist_ok=True)
 
-    # ── 构建 (obj_id, mesh_path, scale) 列表 ─────────────────
-    obj_list = []   # [(obj_id, mesh_path, mesh_scale)]
+    # ── 构建 obj_list：5元组 (obj_id, mesh_path, scale, hp_name, hp_dir) ──
+    obj_list = []
 
-    if args.arctic:
-        # ARCTIC 模式：mesh 单位 mm，需 /1000 → m
-        # obj_id 加 arctic_ 前缀，与 OakInk 同名物体区分（如 scissors）
+    if args.dexycb:
+        # DexYCB: HP 来自 training_fp/dexycb/, mesh 来自 SAM3DMesh/ycb/
+        hp_src = os.path.join(TRAINING_FP_DIR, 'dexycb')
+        hp_files = sorted(glob.glob(os.path.join(hp_src, '*.hdf5')))
+        if not hp_files:
+            print(f'❌ training_fp/dexycb/ 没有 hdf5: {hp_src}')
+            return
+        sam3d_ycb = os.path.join(SAM3D_MESH_DIR, 'ycb')
+        for hf in hp_files:
+            obj_id = os.path.splitext(os.path.basename(hf))[0]  # e.g. ycb_dex_01
+            if args.obj and args.obj not in obj_id:
+                continue
+            # 搜索 mesh：SAM3DMesh/ycb/{obj_id}.obj 或子目录
+            mesh_path = None
+            for pattern in [f'{obj_id}.obj', f'{obj_id}/*.obj', f'*/{obj_id}.obj']:
+                found = glob.glob(os.path.join(sam3d_ycb, pattern))
+                if found:
+                    mesh_path = found[0]; break
+            if mesh_path is None:
+                print(f'  ⚠️ mesh 未找到: {obj_id} (跳过)')
+                continue
+            obj_list.append((obj_id, mesh_path, 1.0, obj_id, hp_src))
+        print(f'DexYCB: {len(obj_list)} 个物体')
+
+    elif args.oakink:
+        # OakInk: HP 来自 training_fp/oakink/, mesh 来自 SAM3DMesh/oakink/
+        hp_src = os.path.join(TRAINING_FP_DIR, 'oakink')
+        hp_files = sorted(glob.glob(os.path.join(hp_src, '*.hdf5')))
+        if not hp_files:
+            print(f'❌ training_fp/oakink/ 没有 hdf5，请先下载:')
+            print(f'   huggingface-cli download UCBProject/ProcessedData --repo-type dataset --local-dir data_hub/ProcessedData --include "training_fp/oakink/*"')
+            return
+        sam3d_oi = os.path.join(SAM3D_MESH_DIR, 'oakink')
+        for hf in hp_files:
+            obj_id = os.path.splitext(os.path.basename(hf))[0]  # e.g. A01001
+            if args.obj and args.obj != obj_id:
+                continue
+            # 搜索 mesh：SAM3DMesh/oakink/ 优先，fallback 到 meshes/v1/
+            mesh_path = None
+            for pattern in [f'{obj_id}.obj', f'{obj_id}/*.obj']:
+                found = glob.glob(os.path.join(sam3d_oi, pattern))
+                if found:
+                    mesh_path = found[0]; break
+            if mesh_path is None:
+                v1 = os.path.join(MESH_DIR, f'{obj_id}.obj')
+                if os.path.exists(v1):
+                    mesh_path = v1
+            if mesh_path is None:
+                print(f'  ⚠️ mesh 未找到: {obj_id} (跳过)')
+                continue
+            obj_list.append((obj_id, mesh_path, 1.0, obj_id, hp_src))
+        print(f'OakInk: {len(obj_list)} 个物体')
+
+    elif args.arctic:
         objs = [args.obj] if args.obj else ARCTIC_OBJS
         for obj in objs:
             mp = os.path.join(ARCTIC_MESH_DIR, obj, 'mesh_tex.obj')
-            arctic_id = f'arctic_{obj}'   # e.g. arctic_scissors
-            obj_list.append((arctic_id, mp, 1.0 / 1000.0, obj))  # 4th: hp_lookup_name
+            arctic_id = f'arctic_{obj}'
+            obj_list.append((arctic_id, mp, 1.0 / 1000.0, obj, _hp_dir))
+
     elif args.obj:
-        obj_list = [(args.obj, os.path.join(MESH_DIR, f'{args.obj}.obj'), 1.0, args.obj)]
+        obj_list = [(args.obj, os.path.join(MESH_DIR, f'{args.obj}.obj'), 1.0, args.obj, _hp_dir)]
+
     elif args.all:
         all_meshes = sorted(glob.glob(os.path.join(MESH_DIR, '*.obj')))
         obj_list = [(os.path.splitext(os.path.basename(m))[0], m, 1.0,
-                     os.path.splitext(os.path.basename(m))[0]) for m in all_meshes]
+                     os.path.splitext(os.path.basename(m))[0], _hp_dir) for m in all_meshes]
     else:
         print("用法:")
-        print("  python3 tools/random_grasp_sampler.py --all           # OakInk 全部")
-        print("  python3 tools/random_grasp_sampler.py --arctic        # ARCTIC 全部")
-        print("  python3 tools/random_grasp_sampler.py --arctic --obj scissors")
+        print("  python3 tools/random_grasp_sampler.py --oakink   # OakInk (training_fp/oakink/)")
+        print("  python3 tools/random_grasp_sampler.py --dexycb   # DexYCB (training_fp/dexycb/)")
+        print("  python3 tools/random_grasp_sampler.py --all      # OakInk (旧路径 human_prior/)")
+        print("  python3 tools/random_grasp_sampler.py --arctic   # ARCTIC")
         return
 
-    mode = 'ARCTIC' if args.arctic else 'OakInk'
-    print("=" * 60)
-    print(f"  Grasp Sampler v2 [{mode}] (50%HP + 50%rnd)")
-    print(f"  Target: {TARGET_HIGH_QUALITY} candidates ≥ {SCORE_THRESHOLD} pts")
-    print("=" * 60)
+    mode = 'ARCTIC' if args.arctic else ('DexYCB' if args.dexycb else ('OakInk-fp' if args.oakink else 'OakInk'))
+    print('=' * 60)
+    print(f'  Grasp Sampler v2 [{mode}] (50%HP + 50%rnd)')
+    print(f'  Target: {TARGET_HIGH_QUALITY} candidates ≥ {SCORE_THRESHOLD} pts')
+    print('=' * 60)
 
     generated = 0
-    for idx, (obj_id, mesh_path, scale, hp_name) in enumerate(obj_list):
-        print(f"\n[{idx+1}/{len(obj_list)}] {obj_id}")
+    # 支持5元组 (obj_id, mesh_path, scale, hp_name, hp_dir) 和旧4元组
+    for idx, entry in enumerate(obj_list):
+        if len(entry) == 5:
+            obj_id, mesh_path, scale, hp_name, hp_dir_use = entry
+        else:
+            obj_id, mesh_path, scale, hp_name = entry
+            hp_dir_use = _hp_dir
+
+        print(f'\n[{idx+1}/{len(obj_list)}] {obj_id}')
 
         if not args.force:
             out_path = os.path.join(_out_dir, f'{obj_id}_grasp.hdf5')
             if os.path.exists(out_path):
-                print(" ⏭️ (已生成)")
+                print(' ⏭️ (已生成)')
                 continue
 
         if not os.path.exists(mesh_path):
-            print(f" ❌ mesh 不存在: {mesh_path}")
+            print(f' ❌ mesh 不存在: {mesh_path}')
             continue
 
         mesh = trimesh.load(mesh_path, force='mesh')
         if scale != 1.0:
             mesh.vertices *= scale          # mm → m
 
-        # ARCTIC: 应用规范化旋转（与 convert_arctic_to_usd.py 一致）
+        # ARCTIC: 应用规范化旋转
         if args.arctic:
-            obj_bare = obj_id.replace('arctic_', '')  # e.g. 'ketchup'
+            obj_bare = obj_id.replace('arctic_', '')
             R = ARCTIC_CANONICAL_ROT.get(obj_bare)
             if R is not None:
                 mesh.vertices = (R @ mesh.vertices.T).T
-                print(f"     [canonical rot applied: {obj_bare}]")
+                print(f'     [canonical rot applied: {obj_bare}]')
 
         if not mesh.is_watertight:
             trimesh.repair.fill_holes(mesh)
             trimesh.repair.fix_normals(mesh)
 
         ext = mesh.bounding_box.extents * 100
-        print(f"  尺寸: {ext[0]:.1f}×{ext[1]:.1f}×{ext[2]:.1f} cm  ({'arctic mm→m' if scale!=1.0 else 'OakInk'}"  ")")
+        print(f'  尺寸: {ext[0]:.1f}×{ext[1]:.1f}×{ext[2]:.1f} cm')
 
-        # HP lookup: infer 模式从 human_prior_infer/ 读; 否则从 human_prior/
-        candidates = generate_candidates_iterative(mesh, hp_name, hp_dir=_hp_dir)
+        # HP 从指定目录读取（支持 training_fp/ 直接读）
+        candidates = generate_candidates_iterative(mesh, hp_name, hp_dir=hp_dir_use)
 
         if candidates:
             path = save_candidates_hdf5(candidates, obj_id, mesh_path, _out_dir)
-            print(f"  ✅ → {os.path.basename(path)} ({len(candidates)} 候选)")
+            print(f'  ✅ → {os.path.basename(path)} ({len(candidates)} 候选)')
             generated += 1
             if args.vis:
                 visualize_candidates(mesh, candidates, obj_id)
         else:
-            print(f"  ⚠️ 无有效候选")
+            print(f'  ⚠️ 无有效候选')
 
     print(f"\n{'='*60}")
-    print(f"  完成! 生成 {generated}/{len(obj_list)} 个物体的候选")
-    print(f"  输出: {_out_dir}")
+    print(f'  完成! 生成 {generated}/{len(obj_list)} 个物体的候选')
+    print(f'  输出: {_out_dir}')
     print(f"{'='*60}")
 
 

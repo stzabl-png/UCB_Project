@@ -196,9 +196,13 @@ def main():
         all_meshes.extend(oi2_meshes)
         print(f"  发现 {len(oi2_meshes)} 个 OakInk2 物体")
     # ARCTIC meshes
-    import sys as _sys, os as _os; _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
-import config as _cfg
-arctic_mesh_dir = _os.path.join(_cfg.ARCTIC_ROOT, "meta", "object_vtemplates") if _cfg.ARCTIC_ROOT else ""
+    try:
+        import sys as _sys, os as _os
+        _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+        import config as _cfg
+        arctic_mesh_dir = _os.path.join(_cfg.ARCTIC_ROOT, "meta", "object_vtemplates") if _cfg.ARCTIC_ROOT else ""
+    except Exception:
+        arctic_mesh_dir = ""
     if os.path.isdir(arctic_mesh_dir):
         arctic_objs = 'box capsulemachine espressomachine ketchup microwave mixer notebook phone scissors waffleiron'.split()
         # 与 convert_arctic_to_usd.py 一致的规范化旋转
@@ -217,14 +221,21 @@ arctic_mesh_dir = _os.path.join(_cfg.ARCTIC_ROOT, "meta", "object_vtemplates") i
     has_hp = 0
     has_rgt = 0
     has_both = 0
+    skip = set()   # object IDs to skip (e.g. already processed or known bad)
 
     for mp in all_meshes:
-        obj_id = os.path.splitext(os.path.basename(mp))[0]
+        # ARCTIC entries are 4-tuples: (obj_id, src, scale, rot)
+        if isinstance(mp, tuple):
+            obj_id = mp[0]
+            mp = mp[1]   # actual mesh path
+        else:
+            obj_id = os.path.splitext(os.path.basename(mp))[0]
         # ContactPose 物体需要 cp_ 前缀
-        if 'contactpose' in mp:
+        if isinstance(mp, str) and 'contactpose' in mp:
             obj_id = f'cp_{obj_id}'
         if obj_id in skip:
             continue
+
 
         pc, normals, hp, rgt, fc, hp_ok, rgt_ok, n_grasps = process_object(obj_id, mp)
 
