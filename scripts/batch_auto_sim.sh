@@ -12,7 +12,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJ="$(cd "$SCRIPT_DIR/.." && pwd)"          # project root
-AUTO_GRASP_DIR="${GRASP_DIR:-$PROJ/output/grasps_auto}"
+AUTO_GRASP_DIR="${GRASP_DIR:-$PROJ/output/grasps_random}"
 AUTO_GT_DIR="${GT_DIR:-$PROJ/output/robot_gt_auto}"
 LOG_DIR="${LOG_DIR:-$PROJ/output/sim_logs_auto}"
 SIM_SCRIPT="$PROJ/sim/run_grasp_sim.py"
@@ -21,7 +21,7 @@ mkdir -p "$AUTO_GT_DIR" "$LOG_DIR"
 
 export PYTHONUNBUFFERED=1   # 防止 tee 管道吞掉 Python 输出
 
-HDF5_LIST=($(ls "$AUTO_GRASP_DIR"/*_grasps.hdf5 2>/dev/null))
+HDF5_LIST=($(ls "$AUTO_GRASP_DIR"/*_grasp.hdf5 2>/dev/null))
 TOTAL=${#HDF5_LIST[@]}
 
 echo "============================================================"
@@ -36,7 +36,7 @@ SUCCESS=0; FAILED=0; SKIPPED=0
 
 for i in $(seq 0 $((TOTAL-1))); do
     HDF5="${HDF5_LIST[$i]}"
-    OBJ_ID=$(basename "$HDF5" _grasps.hdf5)
+    OBJ_ID=$(basename "$HDF5" _grasp.hdf5)
     N=$((i+1))
 
     RESULT_FILE="$AUTO_GT_DIR/${OBJ_ID}_robot_gt.hdf5"
