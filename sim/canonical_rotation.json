@@ -1,0 +1,9 @@
+{
+  "_comment": "SAM3D mesh \u7684 canonical \u65cb\u8f6c (Euler XYZ, degrees)\uff0c\u4f7f\u7269\u4f53\u5728 Z-up \u4e16\u754c\u4e2d\u81ea\u7136\u7ad6\u7acb",
+  "_convention": "\u65cb\u8f6c\u5e94\u7528\u5230 SAM3D raw mesh * scale_factor \u4e4b\u540e\uff0c\u4f7f\u7269\u4f53\u7684\u529f\u80fd\u6027\u7ad6\u7acb\u65b9\u5411\u5bf9\u9f50 Z+",
+  "A01001": [
+    0.0,
+    0.0,
+    180.0
+  ]
+}

@@ -3,7 +3,6 @@ import numpy as np
 import torch
 
 import omni.kit.commands
-import omni.physxdemos as demo
 import isaacsim.core.utils.prims as prims_utils
 from pxr import Gf, UsdGeom,Sdf, UsdPhysics, PhysxSchema, UsdLux, UsdShade
 from isaacsim.core.api import World

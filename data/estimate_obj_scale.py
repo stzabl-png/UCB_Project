@@ -62,10 +62,11 @@ DEPTH_PRO_DIR = os.path.join(config.PROJECT_DIR, "third_party", "ml-depth-pro", 
 sys.path.insert(0, DEPTH_PRO_DIR)
 
 # ── 路径 ──────────────────────────────────────────────────────────────────────
-OBJ_INPUT  = os.path.join(config.DATA_HUB, "ProcessedData", "obj_recon_input")
-MESH_BASE  = os.path.join(config.DATA_HUB, "ProcessedData", "obj_meshes")
-MANO_BASE  = os.path.join(config.DATA_HUB, "ProcessedData", "third_mano")
-DEPTH_BASE = os.path.join(config.DATA_HUB, "ProcessedData", "third_depth")
+OBJ_INPUT       = os.path.join(config.DATA_HUB, "ProcessedData", "obj_recon_input")
+MESH_BASE       = os.path.join(config.DATA_HUB, "ProcessedData", "obj_meshes")
+SAM3D_MESH_BASE = os.path.join(config.DATA_HUB, "meshes", "SAM3DMesh", "meshes")
+MANO_BASE       = os.path.join(config.DATA_HUB, "ProcessedData", "third_mano")
+DEPTH_BASE      = os.path.join(config.DATA_HUB, "ProcessedData", "third_depth")
 
 
 # ── 工具函数 ──────────────────────────────────────────────────────────────────
@@ -230,7 +231,10 @@ def estimate_scale_for_object(model, transform, device, ds, obj_name, obj_dir,
     Estimate scale_factor for one object.
     Returns dict with results, or None on failure.
     """
-    out_json = os.path.join(os.path.dirname(mesh_path), "scale.json")
+    # Always write scale.json to ProcessedData/obj_meshes/{ds}/{obj}/
+    # (not inside SAM3DMesh, to keep outputs separate from source)
+    out_dir  = os.path.join(MESH_BASE, ds, obj_name)
+    out_json = os.path.join(out_dir, "scale.json")
 
     if not redo and os.path.exists(out_json):
         with open(out_json) as f:
@@ -337,14 +341,22 @@ def main():
             obj_dir   = os.path.join(ds_dir, obj_name)
             if not os.path.isdir(obj_dir):
                 continue
-            mesh_path = os.path.join(MESH_BASE, mesh_ds, obj_name, "mesh.ply")
+            # 1. SAM3DMesh (primary — SAM3D reconstructed meshes)
+            mesh_path = os.path.join(SAM3D_MESH_BASE, mesh_ds, obj_name, "mesh.ply")
             if not os.path.exists(mesh_path):
-                # Try .obj
-                mesh_path_obj = mesh_path.replace(".ply", ".obj")
-                if os.path.exists(mesh_path_obj):
-                    mesh_path = mesh_path_obj
-                else:
-                    continue
+                # 2. ProcessedData/obj_meshes (legacy)
+                mesh_path = os.path.join(MESH_BASE, mesh_ds, obj_name, "mesh.ply")
+                if not os.path.exists(mesh_path):
+                    mesh_path_obj = mesh_path.replace(".ply", ".obj")
+                    if os.path.exists(mesh_path_obj):
+                        mesh_path = mesh_path_obj
+                    else:
+                        # 3. Try SAM3DMesh with original ds name (not remapped)
+                        mesh_path_sam = os.path.join(SAM3D_MESH_BASE, ds, obj_name, "mesh.ply")
+                        if os.path.exists(mesh_path_sam):
+                            mesh_path = mesh_path_sam
+                        else:
+                            continue
             tasks.append((ds, obj_name, obj_dir, mesh_path))
 
     print(f"\n{'='*60}")

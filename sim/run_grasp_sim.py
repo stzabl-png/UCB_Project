@@ -120,24 +120,20 @@ def setup_scene(obj_id, object_scale):
     for _ in range(10):
         world.step(render=True)
 
-    # 加载物体 USD — 搜索顺序: output/assets/ → sim/assets/
-    a2g_root = os.path.dirname(SIM_DIR)  # Affordance2Grasp root
-    usd_search_dirs = [
-        os.path.join(a2g_root, "output", "assets"),
-        os.path.join(SIM_DIR, "assets"),
-        os.path.join(os.path.expanduser('~'), 'Project', 'mano2gripper', 'Pipeline', 'assets'),
-    ]
-    usd_path = None
-    for d in usd_search_dirs:
-        p = os.path.join(d, f"{obj_id}.usd")
-        if os.path.exists(p):
-            usd_path = p
-            break
+    # 加载物体 USD — 搜索顺序: output/obj_usd/{dataset}/ → sim/assets/
+    a2g_root = os.path.dirname(SIM_DIR)
+    obj_usd_root = os.path.join(a2g_root, 'output', 'obj_usd')
+    datasets_order = ['oakink', 'ycb', 'arctic', 'dexycb', 'egocentric', 'ho3d_v3']
+    usd_search_paths = (
+        [os.path.join(obj_usd_root, ds, f'{obj_id}.usd') for ds in datasets_order]
+        + [os.path.join(SIM_DIR, 'assets', f'{obj_id}.usd')]
+    )
+    usd_path = next((p for p in usd_search_paths if os.path.exists(p)), None)
 
     if usd_path is None:
         cprint(f"❌ USD not found: {obj_id}.usd", "red")
-        cprint(f"   搜索目录: {usd_search_dirs}", "yellow")
-        cprint(f"   先运行: sim45 sim/convert_batch_usd.py", "yellow")
+        cprint(f"   搜索路径: output/obj_usd/{{dataset}}/  sim/assets/", "yellow")
+        cprint(f"   先运行: python3 tools/convert_obj_usd.py --obj {obj_id}", "yellow")
         return None
 
     # 读取每物体覆盖
@@ -345,7 +341,10 @@ def plan_trajectory(motion_gen, franka, target_pos_world, target_quat_wxyz_world
 
     result = motion_gen.plan_single(start_state, goal_pose, plan_config)
 
-    if result.success.item():
+    _suc = result.success
+    if callable(getattr(_suc, 'item', None)):
+        _suc = _suc.item()
+    if _suc:
         traj = result.get_interpolated_plan()
         cprint(f"      [{label}] ✅ Plan OK: {traj.position.shape[0]} steps", "green")
         return traj.position.cpu().numpy()
@@ -441,15 +440,13 @@ def execute_grasp(scene, grasp_pos_obj, grasp_rot_obj, gripper_width, object_sca
     ], dtype=np.float64)
     rot_world = rot_world @ R_adapt
 
-    # TCP 偏移处理
-    # 手动标注: position = 指尖夹持中心 → 减 TCP 偏移得到 panda_hand 位置
-    # 自动生成: position = panda_hand 已包含 TCP 偏移 → 不再减 (防双重)
-    if is_manual:
-        TCP_OFFSET = 0.105
-        approach_dir = rot_world[:, 2]
-        pos_world = pos_world - approach_dir * TCP_OFFSET
+    # TCP 偏移处理 — position = 接触中点, 减去 TCP_OFFSET 得到 panda_hand 腕部位置
+    # Franka: panda_hand → 指尖 = 10.5cm (固定段 6.5cm + 夹爪活动段 4cm)
+    TCP_OFFSET = 0.105
+    approach_dir = rot_world[:, 2]   # 接近方向 = 旋转矩阵第3列
+    pos_world = pos_world - approach_dir * TCP_OFFSET
 
-    # Z 安全限制 — 只拦截明显低于桌面的情况
+    # Z 安全限制
     MIN_GRASP_Z = TABLE_TOP_Z + 0.02
     if pos_world[2] < MIN_GRASP_Z:
         cprint(f"   ⚠️ Z={pos_world[2]:.3f} 太低 (需 >{MIN_GRASP_Z:.3f}), clamp up", "yellow")
@@ -517,20 +514,17 @@ def execute_grasp(scene, grasp_pos_obj, grasp_rot_obj, gripper_width, object_sca
     for _ in range(10):
         world.step(render=True)
 
-    # ---- Phase 3: 从预抓取点缓慢推进到抓取点 ----
-    cprint(f"   → [3/5] Final approach (slow)...", "yellow")
-    # 用 IK 求抓取点的关节角, 然后线性插值推进
+    # ---- Phase 3: 从预抓取点缓慢推进到抓取点 (cuRobo) ----
+    cprint(f"   → [3/5] Final approach (cuRobo)...", "yellow")
     traj_final = plan_trajectory(_CUROBO_MG, franka, pos_world, quat_wxyz, label="final")
     if traj_final is not None:
-        # 慢速推进, 每步多做物理模拟 (让碰撞反应自然)
         for joint_pos in traj_final:
             gripper = franka.get_joint_positions()[7:9]
             franka.set_joint_positions(np.concatenate([joint_pos, gripper]))
             for _ in range(3):
                 world.step(render=True)
     else:
-        # Final approach 失败 → 提前返回失败, 不在预抓取点闭拢夹爪
-        cprint(f"   → Final approach 规划失败, 判定为失败 (不在空中闭拢)", "red")
+        cprint(f"   → Final approach 失败", "red")
         return {'success': False, 'contact_points_local': None, 'finger_width_actual': None}
 
 

@@ -1,4 +1,477 @@
 {
-  "__comment__": "per-object placement overrides. rotation=[roll,pitch,yaw] degrees. z_offset=meters above table (default 0.075*scale)",
-  "C51001": {"rotation": [90, 0, 0], "z_offset": 0.025}
+  "C51001": {
+    "rotation": [
+      90,
+      0,
+      0
+    ],
+    "z_offset": 0.05848
+  },
+  "A01001": {
+    "z_offset": 0.11411,
+    "rotation": [
+      0.0,
+      0.0,
+      180.0
+    ]
+  },
+  "A01002": {
+    "z_offset": 0.12701
+  },
+  "A01006": {
+    "z_offset": 0.10689
+  },
+  "A01008": {
+    "z_offset": 0.12781
+  },
+  "A01009": {
+    "z_offset": 0.12696
+  },
+  "A01010": {
+    "z_offset": 0.13415
+  },
+  "A01023": {
+    "z_offset": 0.11179
+  },
+  "A01026": {
+    "z_offset": 0.10697
+  },
+  "A01027": {
+    "z_offset": 0.15927
+  },
+  "A02011": {
+    "z_offset": 0.11976
+  },
+  "A02012": {
+    "z_offset": 0.13627
+  },
+  "A02014": {
+    "z_offset": 0.06215
+  },
+  "A02015": {
+    "z_offset": 0.09021
+  },
+  "A02018": {
+    "z_offset": 0.13496
+  },
+  "A02021": {
+    "z_offset": 0.10176
+  },
+  "A02028": {
+    "z_offset": 0.0989
+  },
+  "A02029": {
+    "z_offset": 0.11529
+  },
+  "A02030": {
+    "z_offset": 0.0971
+  },
+  "A02031": {
+    "z_offset": 0.11461
+  },
+  "A02032": {
+    "z_offset": 0.12779
+  },
+  "A15015": {
+    "z_offset": 0.09384
+  },
+  "A15027": {
+    "z_offset": 0.13005
+  },
+  "A16012": {
+    "z_offset": 0.09544
+  },
+  "A16026": {
+    "z_offset": 0.0875
+  },
+  "C03001": {
+    "z_offset": 0.101
+  },
+  "C10001": {
+    "z_offset": 0.05281
+  },
+  "C11001": {
+    "z_offset": 0.05
+  },
+  "C12001": {
+    "z_offset": 0.0383
+  },
+  "C13001": {
+    "z_offset": 0.05585
+  },
+  "C14001": {
+    "z_offset": 0.086
+  },
+  "C15001": {
+    "z_offset": 0.06825
+  },
+  "C20001": {
+    "z_offset": 0.11096
+  },
+  "C22001": {
+    "z_offset": 0.10334
+  },
+  "C23001": {
+    "z_offset": 0.06951
+  },
+  "C25001": {
+    "z_offset": 0.08239
+  },
+  "C26001": {
+    "z_offset": 0.1177
+  },
+  "C28001": {
+    "z_offset": 0.05513
+  },
+  "C35001": {
+    "z_offset": 0.06499
+  },
+  "C37001": {
+    "z_offset": 0.06145
+  },
+  "C40001": {
+    "z_offset": 0.06815
+  },
+  "C41001": {
+    "z_offset": 0.06529
+  },
+  "C42001": {
+    "z_offset": 0.0544
+  },
+  "C43001": {
+    "z_offset": 0.04805
+  },
+  "C50001": {
+    "z_offset": 0.02424
+  },
+  "C90001": {
+    "z_offset": 0.04914
+  },
+  "C91001": {
+    "z_offset": 0.10353
+  },
+  "O01000": {
+    "z_offset": 0.10144
+  },
+  "O02001": {
+    "z_offset": 0.08265
+  },
+  "O03001": {
+    "z_offset": 0.12209
+  },
+  "O03002": {
+    "z_offset": 0.05752
+  },
+  "O03003": {
+    "z_offset": 0.0883
+  },
+  "O21001": {
+    "z_offset": 0.10926
+  },
+  "O24001": {
+    "z_offset": 0.10529
+  },
+  "O36001": {
+    "z_offset": 0.08338
+  },
+  "O36002": {
+    "z_offset": 0.08156
+  },
+  "O50001": {
+    "z_offset": 0.10367
+  },
+  "O50002": {
+    "z_offset": 0.04787
+  },
+  "O93001": {
+    "z_offset": 0.02351
+  },
+  "S10001": {
+    "z_offset": 0.0005
+  },
+  "S10002": {
+    "z_offset": 0.0005
+  },
+  "S10003": {
+    "z_offset": 0.0005
+  },
+  "S10004": {
+    "z_offset": 0.0005
+  },
+  "S10005": {
+    "z_offset": 0.0005
+  },
+  "S10006": {
+    "z_offset": 0.0005
+  },
+  "S10007": {
+    "z_offset": 0.0005
+  },
+  "S10008": {
+    "z_offset": 0.0005
+  },
+  "S10009": {
+    "z_offset": 0.0005
+  },
+  "S10010": {
+    "z_offset": 0.0005
+  },
+  "S10011": {
+    "z_offset": 0.0005
+  },
+  "S10012": {
+    "z_offset": 0.0005
+  },
+  "S10013": {
+    "z_offset": 0.04792
+  },
+  "S10014": {
+    "z_offset": 0.0005
+  },
+  "S10015": {
+    "z_offset": 0.0005
+  },
+  "S10016": {
+    "z_offset": 0.0005
+  },
+  "S10017": {
+    "z_offset": 0.0005
+  },
+  "S10018": {
+    "z_offset": 0.0005
+  },
+  "S10019": {
+    "z_offset": 0.0005
+  },
+  "S10020": {
+    "z_offset": 0.0005
+  },
+  "S10021": {
+    "z_offset": 0.0005
+  },
+  "S10022": {
+    "z_offset": 0.0005
+  },
+  "S10023": {
+    "z_offset": 0.0005
+  },
+  "S10024": {
+    "z_offset": 0.0005
+  },
+  "S15004": {
+    "z_offset": 0.0005
+  },
+  "S16001": {
+    "z_offset": 0.0005
+  },
+  "S16002": {
+    "z_offset": 0.0005
+  },
+  "S16003": {
+    "z_offset": 0.0005
+  },
+  "S16005": {
+    "z_offset": 0.0005
+  },
+  "S20001": {
+    "z_offset": 0.0005
+  },
+  "S20005": {
+    "z_offset": 0.0005
+  },
+  "S20021": {
+    "z_offset": 0.0005
+  },
+  "S20022": {
+    "z_offset": 0.0005
+  },
+  "Y03006": {
+    "z_offset": 0.09611
+  },
+  "Y03021": {
+    "z_offset": 0.12744
+  },
+  "Y27035": {
+    "z_offset": 0.10139
+  },
+  "Y29040": {
+    "z_offset": 0.06041
+  },
+  "Y35037": {
+    "z_offset": 0.10123
+  },
+  "airplane": {
+    "z_offset": 0.02497
+  },
+  "alarmclock": {
+    "z_offset": 0.05412
+  },
+  "apple": {
+    "z_offset": 0.04924
+  },
+  "banana": {
+    "z_offset": 0.02256
+  },
+  "binoculars": {
+    "z_offset": 0.0545
+  },
+  "body": {
+    "z_offset": 0.13584
+  },
+  "bowl": {
+    "z_offset": 0.0383
+  },
+  "camera": {
+    "z_offset": 0.03375
+  },
+  "coffeemug": {
+    "z_offset": 0.05249
+  },
+  "cubelarge": {
+    "z_offset": 0.06
+  },
+  "cubemedium": {
+    "z_offset": 0.04
+  },
+  "cubemiddle": {
+    "z_offset": 0.04
+  },
+  "cubesmall": {
+    "z_offset": 0.02
+  },
+  "cup": {
+    "z_offset": 0.05
+  },
+  "cylinderlarge": {
+    "z_offset": 0.06
+  },
+  "cylindermedium": {
+    "z_offset": 0.04
+  },
+  "cylindersmall": {
+    "z_offset": 0.02
+  },
+  "doorknob": {
+    "z_offset": 0.0375
+  },
+  "duck": {
+    "z_offset": 0.04801
+  },
+  "elephant": {
+    "z_offset": 0.05
+  },
+  "eyeglasses": {
+    "z_offset": 0.02211
+  },
+  "flashlight": {
+    "z_offset": 0.06951
+  },
+  "flute": {
+    "z_offset": 0.00846
+  },
+  "fryingpan": {
+    "z_offset": 0.01774
+  },
+  "gamecontroller": {
+    "z_offset": 0.02504
+  },
+  "hammer": {
+    "z_offset": 0.0116
+  },
+  "hand": {
+    "z_offset": 0.06896
+  },
+  "headphones": {
+    "z_offset": 0.02894
+  },
+  "knife": {
+    "z_offset": 0.00744
+  },
+  "lightbulb": {
+    "z_offset": 0.031
+  },
+  "mouse": {
+    "z_offset": 0.01952
+  },
+  "mug": {
+    "z_offset": 0.05249
+  },
+  "phone": {
+    "z_offset": 0.02475
+  },
+  "piggybank": {
+    "z_offset": 0.06799
+  },
+  "pyramidlarge": {
+    "z_offset": 0.05003
+  },
+  "pyramidmedium": {
+    "z_offset": 0.04
+  },
+  "pyramidsmall": {
+    "z_offset": 0.02
+  },
+  "rubberduck": {
+    "z_offset": 0.04801
+  },
+  "scissors": {
+    "z_offset": 0.00724
+  },
+  "spherelarge": {
+    "z_offset": 0.0525
+  },
+  "spheremedium": {
+    "z_offset": 0.03625
+  },
+  "spheresmall": {
+    "z_offset": 0.01825
+  },
+  "stamp": {
+    "z_offset": 0.0375
+  },
+  "stanfordbunny": {
+    "z_offset": 0.06311
+  },
+  "stapler": {
+    "z_offset": 0.02027
+  },
+  "table": {
+    "z_offset": 0.27001
+  },
+  "teapot": {
+    "z_offset": 0.05592
+  },
+  "toothbrush": {
+    "z_offset": 0.00622
+  },
+  "toothpaste": {
+    "z_offset": 0.101
+  },
+  "toruslarge": {
+    "z_offset": 0.01998
+  },
+  "torusmedium": {
+    "z_offset": 0.01323
+  },
+  "torussmall": {
+    "z_offset": 0.00675
+  },
+  "train": {
+    "z_offset": 0.04212
+  },
+  "watch": {
+    "z_offset": 0.04134
+  },
+  "waterbottle": {
+    "z_offset": 0.06825
+  },
+  "wineglass": {
+    "z_offset": 0.086
+  },
+  "wristwatch": {
+    "z_offset": 0.04134
+  },
+  "A16013": {
+    "z_offset": 0.0582
+  }
 }
