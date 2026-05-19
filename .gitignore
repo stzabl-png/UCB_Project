@@ -62,3 +62,9 @@ PIPELINE_INSTRUCTIONS.md
 third_party/FoundationPose/
 third_party/sam-3d-objects/
 third_party/sam2/
+
+# Local Baseline1 training output (gigantic, push to HF instead)
+Baseline1/dp3_runs/
+
+# NVIDIA profiling artifacts
+NvStreamer-*.etli

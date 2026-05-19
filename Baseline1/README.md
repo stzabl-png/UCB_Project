@@ -127,3 +127,97 @@ cd ~/Young_VideoPolicy/dp3 && bash scripts/train_policy.sh dp3 grasping baseline
 | Action space | — | 8D `[xyz, quat, gripper]` | 8D `[xyz, quat, gripper]` (identical) |
 | cuRobo at inference | ✅ | ❌ (policy outputs the trajectory directly) | ❌ |
 | Expected generalisation | best (object-relative contacts) | worse (pose-dependent trajectory) | worst (no human prior) |
+
+---
+
+## Current status — Phase 1 (CAD-first pilot)
+
+Phase 1 is a single-object pilot to derisk the full pipeline before scaling. Detailed plan
+in [`PLAN_V3_CAD_FIRST.md`](PLAN_V3_CAD_FIRST.md). Switched from the SAM3D-mesh path to the
+**CAD-mesh path** (DexYCB's `models/00*/textured.obj`) — cleaner geometry, no per-object
+ICP needed, and the dataset's `pose_y` is already in CAD frame so there's no rotation
+offset to chase.
+
+**Scope of Phase 1**:
+- Object: `ycb_dex_01` (`master_chef_can`) only
+- Subjects: `subject-09` only (5 sessions × 6 cameras = 30 episodes)
+  - The other 9 subjects use different DexYCB extrinsics; only `extrinsics_20201014_215638`
+    is downloaded locally so far
+- Frame: **G-frame** (gravity-aligned, table-anchored, object-translated)
+  - +Z = anti-gravity (up), table at z ≈ 0, object centroid at xy = (0, 0)
+  - `R_W→G` computed from AprilTag (gravity_W ≈ (-0.017, 0.796, 0.605), master cam tilted
+    ~37° from vertical — confirmed across 5 sessions × 6 cameras, byte-identical)
+
+### What works
+
+| Gate | What it tests | Status |
+|---|---|---|
+| 1a | DexYCB extrinsics convention `T_W←C` | ✅ Δ < 0.01 mm cross-camera |
+| 1b | `R_W→G` via AprilTag rotation | ✅ matches gravity within 3 mm |
+| 1c | CAD mesh sanity (`master_chef_can` 10.2 × 10.2 × 14 cm) | ✅ |
+| 1d | `table_z_G` ≈ -0.6884 m via object lowest-point | ✅ matches AprilTag within 2.1 mm |
+| 1e | `table_z_G` cross-frame std | ✅ 3 mm (< 10 mm threshold) |
+| 2  | Cross-camera (6 cams × 1 session) → G-frame consistency | ✅ all 6 cams pass |
+
+### Gate 3 (GT replay in IsaacSim) — work in progress
+
+Goal: take one retargeted EE trajectory, replay open-loop in sim, lift object by dz > 3 cm.
+
+`sim/gt_replay_ikpd_v2.py` is the current driver:
+- Stack: **offline Lula IK precompute + PhysX implicit-PD drive** (no RMPFlow in the hot loop)
+- Per-session Franka base + sim origin (5 sessions span 64 cm in state[0] direction)
+- 3-stage pre-position bridges Franka home → trajectory state[0] (cartesian interp →
+  orientation slerp → ready to replay)
+- 90° axis swap from retarget convention (`local +X = opening`) to Franka panda_hand
+  convention (`local +Y = opening`)
+- IK frame = `panda_hand` (not `right_gripper`), measurement uses same frame — keeps
+  IK target and tracking error in one consistent EE frame
+- Records optional MP4 via `--video <dir>` (PNG frames → ffmpeg)
+
+**Current results (session 142601)**:
+- Offline IK: 100% success (200 + 100 + 73 frames)
+- EE tracking: avg 3 mm / max 7 mm (PhysX implicit PD converges to mm-level)
+- Pre-position end error: 0.4 cm / 0.1 cm + 2° (both stages converge)
+- **`dz = 0` — known geometric limit, not a stack bug**:
+  `master_chef_can` ≈ 10.2 cm wide, Franka Panda max gripper span = 10 cm. Gripper
+  closes ~6 mm short of enveloping the can; one finger contacts and pushes the can a
+  few cm during approach.
+- Known remaining issue: Stage A (200-frame cartesian interp from home → state[0]) has
+  a single wrist-flip at frame ~110 (joint 5 jumps 133° between consecutive IK solves)
+  — IK branch-switching despite warm-start. Fix candidate: replace cartesian interp
+  with joint-space SLERP between two IK solves (home_qpos → qpos_state0).
+
+### Open issues
+
+| Issue | Status | Next step |
+|---|---|---|
+| `master_chef_can` width vs Franka gripper span | Hardware-limited | Pick a smaller YCB object (<8 cm wide) for the Phase 1 pilot |
+| Stage A wrist flip in pre-position | Reproducible | Switch home→state[0] bridge to joint-space SLERP (1 IK at endpoint, smooth qpos between) |
+| Other 9 subjects' DexYCB extrinsics | Not on disk | Download to extend Phase 1 to 50 sessions if pilot succeeds |
+| DP3 deployment Franka home pose | Open | Pick "training-distribution friendly" home (median of state[0] across episodes), use joint-space interp to bridge mechanical home → DP3 starting pose |
+
+### Phase roadmap
+
+| Phase | Scope | Status |
+|---|---|---|
+| 1 — CAD-first pilot | DexYCB, `ycb_dex_01`, subject-09 only | **In progress** (Gates 1, 2 ✅ pass; Gate 3 stack works, blocked on object size) |
+| 2 — DexYCB scale-up | All ycb_dex objects + all 10 subjects | Pending Phase 1 ≥ 50% sim success |
+| 3 — OakInk integration | Add OakInk episodes | Pending |
+| 4 — SAM3D-mesh path | Switch back to SAM3D mesh (for parity with main method) | Pending |
+
+### Files in `Baseline1/`
+
+| File | What it does |
+|---|---|
+| `retarget_human_to_ee.py` | MANO 21-joint → Franka EE 8D state, builds per-episode HDF5 |
+| `convert_to_zarr.py` | Concatenate per-episode HDF5 → DP3 zarr (used by training) |
+| `compute_sam3d_align.py` | Per-object SAM3D↔CAD ICP alignment (legacy path; not used in CAD-first) |
+| `eval/dp3_inference_server.py` | HTTP server bridging `dp3` env (model) ↔ `env_isaaclab` env (sim eval) |
+| `assets/sam3d_align/*.json` | Pre-computed SAM3D→CAD alignment per object |
+| `PLAN_V3_CAD_FIRST.md` | Detailed plan + 11 decisions D1–D11 + 7 validation gates |
+
+Sim-side scripts live under `sim/`:
+| File | What it does |
+|---|---|
+| `sim/gt_replay_ikpd_v2.py` | Gate 3 driver (offline IK + PhysX implicit PD) |
+| `sim/eval_dp3_policy.py` | Closed-loop DP3 sim evaluation (Phase 5) |

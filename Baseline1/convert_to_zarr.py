@@ -23,56 +23,68 @@ import h5py
 import zarr
 
 ap = argparse.ArgumentParser()
-ap.add_argument("--input_dir",   required=True, help="dir with *.hdf5 episode files")
+ap.add_argument("--input_dir",   required=True, nargs="+",
+                help="one or more dirs with *.hdf5 episode files; files concatenated in dir-then-name order")
 ap.add_argument("--output_zarr", default="Baseline1/data/human_dp_baseline.zarr")
 ap.add_argument("--pattern",     default="*.hdf5", help="glob pattern for episode files")
 args = ap.parse_args()
 
 
 def main():
-    files = sorted(glob.glob(os.path.join(args.input_dir, args.pattern)))
+    files = []
+    for d in args.input_dir:
+        files.extend(sorted(glob.glob(os.path.join(d, args.pattern))))
     if not files:
         print(f"❌ no {args.pattern} files in {args.input_dir}"); return
     print(f"Found {len(files)} episode files")
 
-    all_pc, all_state, all_action, ep_ends = [], [], [], []
-    cum = 0
-    n_bad = 0
+    # First pass: probe one episode for shapes (N_pts, state_dim).
+    n_pts, state_dim = None, None
+    for p in files:
+        try:
+            with h5py.File(p, "r") as f:
+                n_pts = f["point_cloud"].shape[1]; state_dim = f["state"].shape[1]
+            break
+        except Exception:
+            continue
+    if n_pts is None:
+        print("❌ no readable episodes"); return
+
+    # Incremental write to zarr: append per episode → memory stays at one-episode size,
+    # avoids OOM when concatenating many GB of point clouds (e.g. DexYCB+OakInk merged).
+    root = zarr.open(args.output_zarr, mode="w")
+    data = root.require_group("data")
+    pc_arr     = data.empty("point_cloud", shape=(0, n_pts, 3), chunks=(100, n_pts, 3), dtype=np.float32)
+    state_arr  = data.empty("state",       shape=(0, state_dim), chunks=(2000, state_dim), dtype=np.float32)
+    action_arr = data.empty("action",      shape=(0, state_dim), chunks=(2000, state_dim), dtype=np.float32)
+    ep_ends, cum, n_bad = [], 0, 0
+    g_min, g_max = float("inf"), float("-inf")
+    xyz_min = np.array([ float("inf")]*3); xyz_max = np.array([float("-inf")]*3)
     for path in files:
         try:
             with h5py.File(path, "r") as f:
-                pc  = f["point_cloud"][:]
-                st  = f["state"][:]
-                ac  = f["action"][:]
+                pc  = f["point_cloud"][:].astype(np.float32)
+                st  = f["state"][:].astype(np.float32)
+                ac  = f["action"][:].astype(np.float32)
         except Exception as e:
             print(f"  ⚠️  {os.path.basename(path)}: read error {e}"); n_bad += 1; continue
         T = len(st)
         if not (len(pc) == T == len(ac)) or T < 1:
-            print(f"  ⚠️  {os.path.basename(path)}: shape mismatch / empty (pc={len(pc)} st={T} ac={len(ac)})")
-            n_bad += 1; continue
-        all_pc.append(pc); all_state.append(st); all_action.append(ac)
+            print(f"  ⚠️  {os.path.basename(path)}: shape mismatch / empty"); n_bad += 1; continue
+        pc_arr.append(pc); state_arr.append(st); action_arr.append(ac)
         cum += T; ep_ends.append(cum)
+        g_min = min(g_min, float(st[:, 7].min())); g_max = max(g_max, float(st[:, 7].max()))
+        xyz_min = np.minimum(xyz_min, st[:, :3].min(0)); xyz_max = np.maximum(xyz_max, st[:, :3].max(0))
 
     if not ep_ends:
         print("❌ no usable episodes"); return
 
-    all_pc     = np.concatenate(all_pc,     axis=0).astype(np.float32)
-    all_state  = np.concatenate(all_state,  axis=0).astype(np.float32)
-    all_action = np.concatenate(all_action, axis=0).astype(np.float32)
-    ep_ends    = np.array(ep_ends, dtype=np.int64)
-
+    ep_ends = np.array(ep_ends, dtype=np.int64)
     print(f"\nepisodes : {len(ep_ends)}  ({n_bad} skipped)")
-    print(f"steps    : {len(all_state)}")
-    print(f"point_cloud {all_pc.shape}  state {all_state.shape}  action {all_action.shape}")
-    print(f"gripper range: [{all_state[:,7].min():.3f}, {all_state[:,7].max():.3f}]  "
-          f"xyz extent (m): {np.round(all_state[:,:3].max(0) - all_state[:,:3].min(0), 3)}")
+    print(f"steps    : {cum}")
+    print(f"point_cloud {pc_arr.shape}  state {state_arr.shape}  action {action_arr.shape}")
+    print(f"gripper range: [{g_min:.3f}, {g_max:.3f}]  xyz extent (m): {np.round(xyz_max-xyz_min, 3)}")
 
-    root = zarr.open(args.output_zarr, mode="w")
-    data = root.require_group("data")
-    data.create_dataset("point_cloud", data=all_pc,
-                        chunks=(100, all_pc.shape[1], all_pc.shape[2]), dtype=np.float32)
-    data.create_dataset("state",  data=all_state,  chunks=(2000, all_state.shape[1]),  dtype=np.float32)
-    data.create_dataset("action", data=all_action, chunks=(2000, all_action.shape[1]), dtype=np.float32)
     meta = root.require_group("meta")
     meta.create_dataset("episode_ends", data=ep_ends, dtype=np.int64)
 
