@@ -42,7 +42,7 @@ DEPTH_PRO_DIR = os.path.join(config.PROJECT_DIR, "third_party", "ml-depth-pro", 
 sys.path.insert(0, DEPTH_PRO_DIR)
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
-OUT_BASE = os.path.join(config.DATA_HUB, "ProcessedData", "third_depth")
+OUT_BASE = os.path.join(config.DATA_HUB, "ProcessedData", "depth", "ThirdPerson")
 RAW_BASE = os.path.join(config.DATA_HUB, "RawData", "ThirdPersonRawData")
 
 

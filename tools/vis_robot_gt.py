@@ -11,22 +11,35 @@ import trimesh
 import h5py
 
 PROJ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-MESH_DIR = os.path.join(PROJ, 'data_hub', 'meshes', 'v1')
+MESH_DIR = os.path.join(PROJ, 'data_hub', 'meshes', 'v1')          # legacy .obj
+PROC_MESH_DIR = os.path.join(PROJ, 'data_hub', 'ProcessedData', 'obj_meshes')  # .ply
 GT_DIRS = [
-    os.path.join(PROJ, 'output', 'robot_gt_verified'),  # ★ 二次验证 (优先)
-    os.path.join(PROJ, 'output', 'robot_gt_v1_manual'),  # 第一版 GT
-    os.path.join(PROJ, 'output', 'robot_gt_v2_raycast'), # 第二版 GT
-    os.path.join(PROJ, 'output', 'robot_gt'),            # 旧路径兼容
-    os.path.join(PROJ, 'output', 'robot_gt_random'),     # 旧路径兼容
+    os.path.join(PROJ, 'output', 'robot_gt_merged_oakink'),  # ★ 最新合并 (优先)
+    os.path.join(PROJ, 'output', 'robot_gt_merged_dexycb'),  # ★ 最新合并 (优先)
+    os.path.join(PROJ, 'output', 'robot_gt_verified'),
+    os.path.join(PROJ, 'output', 'robot_gt_v1_manual'),
+    os.path.join(PROJ, 'output', 'robot_gt_v2_raycast'),
+    os.path.join(PROJ, 'output', 'robot_gt'),
+    os.path.join(PROJ, 'output', 'robot_gt_random'),
 ]
+
+
+def find_mesh(obj_id):
+    """先找 .obj，再找 ProcessedData .ply。"""
+    p = os.path.join(MESH_DIR, f'{obj_id}.obj')
+    if os.path.exists(p): return p
+    for ds in ['oakink', 'dexycb', 'egodex']:
+        p = os.path.join(PROC_MESH_DIR, ds, obj_id, 'mesh.ply')
+        if os.path.exists(p): return p
+    return None
 
 
 def vis_single(obj_id):
     """可视化单个物体的 Robot GT: 用 raycast 计算真实表面接触点."""
     import open3d as o3d
-    mesh_path = os.path.join(MESH_DIR, f'{obj_id}.obj')
-    if not os.path.exists(mesh_path):
-        print(f"❌ mesh 不存在: {mesh_path}"); return
+    mesh_path = find_mesh(obj_id)
+    if not mesh_path:
+        print(f"❌ mesh 不存在: {obj_id}"); return
     
     # 加载 mesh 用于 raycast
     mesh = trimesh.load(mesh_path, force='mesh')
@@ -144,56 +157,47 @@ def vis_single(obj_id):
 
 
 def summary_all():
-    """统计所有物体的 Robot GT 状态."""
-    all_meshes = sorted(glob.glob(os.path.join(MESH_DIR, '*.obj')))
-    
-    results = {'success': [], 'fail': [], 'missing': []}
-    
-    for mp in all_meshes:
-        obj_id = os.path.splitext(os.path.basename(mp))[0]
-        best_status = 'missing'
-        
+    """统计所有物体的 Robot GT 状态（从 merged 目录读）."""
+    all_obj_ids = set()
+    for d in GT_DIRS:
+        for fp in glob.glob(os.path.join(d, '*_robot_gt.hdf5')):
+            all_obj_ids.add(os.path.basename(fp).replace('_robot_gt.hdf5', ''))
+    all_obj_ids = sorted(all_obj_ids)
+    results = {'success': [], 'fail': []}
+
+    for obj_id in all_obj_ids:
+        best_status = 'fail'
         for gt_dir in GT_DIRS:
             gt_path = os.path.join(gt_dir, f'{obj_id}_robot_gt.hdf5')
             if os.path.exists(gt_path):
                 try:
-                    with h5py.File(gt_path, 'r') as f:
-                        if f.attrs.get('success', False):
+                    with h5py.File(gt_path, 'r') as hf:
+                        if int(hf.attrs.get('n_successful', 0)) > 0:
                             best_status = 'success'
                             break
-                        else:
-                            best_status = 'fail'
                 except:
                     pass
-        
         results[best_status].append(obj_id)
-    
-    total = len(all_meshes)
-    print("=" * 60)
-    print("  Robot GT 汇总")
-    print("=" * 60)
-    print(f"  ✅ 成功: {len(results['success'])}/{total}")
-    print(f"  ❌ 失败: {len(results['fail'])}/{total}")
-    print(f"  🆕 缺失: {len(results['missing'])}/{total}")
+
+    total = len(all_obj_ids)
+    print('=' * 60)
+    print('  Robot GT 汇总 (merged 目录)')
+    print('=' * 60)
+    print(f'  ✅ 成功: {len(results["success"])}/{total}')
+    print(f'  ❌ 全轮失败: {len(results["fail"])}/{total}')
     print()
-    
+
     if results['success']:
-        print("✅ 成功的物体:")
+        print('✅ 成功的物体:')
         for i, oid in enumerate(results['success']):
-            print(f"  {oid}", end='')
+            print(f'  {oid}', end='')
             if (i + 1) % 8 == 0: print()
         print()
-    
-    if results['fail']:
-        print(f"\n❌ 失败的物体 ({len(results['fail'])}):")
-        for oid in results['fail']:
-            print(f"  {oid}")
-    
-    if results['missing']:
-        print(f"\n🆕 缺失的物体 ({len(results['missing'])}):")
-        for oid in results['missing']:
-            print(f"  {oid}")
 
+    if results['fail']:
+        print('\n❌ 全轮失败 ({len(results["fail"])}):')
+        for oid in results['fail']:
+            print(f'  {oid}')
 
 def main():
     parser = argparse.ArgumentParser(description='Robot GT 可视化')

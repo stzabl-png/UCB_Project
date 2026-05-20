@@ -60,7 +60,7 @@ EGO_DEPTH_BASE = os.path.join(config.DATA_HUB, "ProcessedData", "egocentric_dept
 EGO_RGB_BASE   = os.path.join(config.DATA_HUB, "RawData",       "EgoRawData")
 MESH_BASE      = os.path.join(config.DATA_HUB, "ProcessedData", "obj_meshes", "egocentric")
 OBJ_INPUT      = os.path.join(config.DATA_HUB, "ProcessedData", "obj_recon_input", "egocentric")
-OUT_BASE       = os.path.join(config.DATA_HUB, "ProcessedData", "obj_poses_ego")   # ← 第一人称专属
+OUT_BASE       = os.path.join(config.DATA_HUB, "ProcessedData", "poses", "Egocentric", "Egodex")   # ← 第一人称专属
 SCENE_TMP      = "/tmp/fp_scenes_ego"     # ← 与第三人称隔离
 
 SHORTER_SIDE   = 480   # FP 推理边长，同第三人称

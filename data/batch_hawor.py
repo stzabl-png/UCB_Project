@@ -49,7 +49,7 @@ def _sync_runner():
 
 _sync_runner()
 
-OUT_BASE    = os.path.join(config.DATA_HUB, "ProcessedData", "ego_mano")
+OUT_BASE    = os.path.join(config.DATA_HUB, "ProcessedData", "mano", "Egocentric", "Egodex")
 
 # Egocentric raw data root
 EGO_BASE    = os.path.join(config.DATA_HUB, "RawData", "EgoRawData")

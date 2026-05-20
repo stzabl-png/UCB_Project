@@ -29,9 +29,9 @@ from data.batch_haptic_arctic import load_haptic_model, run_haptic_on_images
 from data.megasam_utils import K_as_haptic_intrinsics
 
 # ── Output directory ──────────────────────────────────────────────────────────
-OUT_BASE   = os.path.join(config.DATA_HUB, "ProcessedData", "third_mano")
+OUT_BASE   = os.path.join(config.DATA_HUB, "ProcessedData", "mano", "ThirdPerson")
 RAW_BASE   = os.path.join(config.DATA_HUB, "RawData", "ThirdPersonRawData")
-DEPTH_BASE = os.path.join(config.DATA_HUB, "ProcessedData", "third_depth")
+DEPTH_BASE = os.path.join(config.DATA_HUB, "ProcessedData", "depth", "ThirdPerson")
 device = "cuda:0"
 
 

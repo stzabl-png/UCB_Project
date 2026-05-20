@@ -58,6 +58,24 @@ class Franka(Robot):
             orientation=self.orientation,
             articulation_controller = None
         )
+
+        # ── Isaac Sim 5.0 fix: Franka USD 异步加载,
+        #    最多等 30 秒直到 panda_rightfinger 真正出现在 stage ──
+        try:
+            import time as _time
+            import omni.kit.app as _kit_app
+            _app = _kit_app.get_app()
+            _stage = world.stage
+            _finger_path = self._prim_path + "/panda_rightfinger"
+            _deadline = _time.time() + 30.0
+            while _time.time() < _deadline:
+                _app.update()
+                if _stage.GetPrimAtPath(_finger_path).IsValid():
+                    break
+                _time.sleep(0.05)
+        except Exception:
+            pass
+
         # set Franka end effector
         self._end_effector_prim_path = self._prim_path + "/panda_rightfinger"
         gripper_dof_names = ["panda_finger_joint1", "panda_finger_joint2"]
@@ -71,6 +89,7 @@ class Franka(Robot):
             joint_closed_positions=gripper_closed_position,
             action_deltas=deltas,
         )
+
         # add Franka into world (important!)
         self.world.scene.add(self)
         

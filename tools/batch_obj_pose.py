@@ -50,10 +50,10 @@ sys.path.insert(0, FP_ROOT)
 
 # ── 数据路径 ──────────────────────────────────────────────────────────────────
 MESH_BASE   = os.path.join(config.DATA_HUB, "ProcessedData", "obj_meshes")
-DEPTH_BASE  = os.path.join(config.DATA_HUB, "ProcessedData", "third_depth")
+DEPTH_BASE  = os.path.join(config.DATA_HUB, "ProcessedData", "depth", "ThirdPerson")
 RAW_BASE    = os.path.join(config.DATA_HUB, "RawData", "ThirdPersonRawData")
-OBJ_INPUT   = os.path.join(config.DATA_HUB, "ProcessedData", "obj_recon_input")
-OUT_BASE    = os.path.join(config.DATA_HUB, "ProcessedData", "obj_poses")
+OBJ_INPUT   = os.path.join(config.DATA_HUB, "ProcessedData", "mask", "ThirdPerson")
+OUT_BASE    = os.path.join(config.DATA_HUB, "ProcessedData", "poses", "ThirdPerson")
 SCENE_TMP   = "/tmp/fp_scenes"
 
 SHORTER_SIDE = 480   # downscale to fit in GPU memory (OOM if 1000×1000)

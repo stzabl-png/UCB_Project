@@ -67,14 +67,39 @@ class RigidObject:
             scale=self.scale,
         )
 
-        # add deformable object usd to stage
-        add_reference_to_stage(usd_path=self.usd_path,prim_path=self.rigid_prim_path)
-        
-        self.rigid=SingleRigidPrim(
-            prim_path=self.rigid_prim_path,
-            name=self.rigid_name,
-        )
+        # add object usd to stage
+        add_reference_to_stage(usd_path=self.usd_path, prim_path=self.rigid_prim_path)
+
+        # ── Isaac Sim 5.0 兼容: USD reference 加载可能是异步的,
+        #    需要等 stage 完成后 SingleRigidPrim 才能找到 geometry 子 prim ──
+        try:
+            import omni.kit.app as _kit_app
+            _app = _kit_app.get_app()
+            _max_wait = 20
+            for _i in range(_max_wait):
+                _app.update()
+                if is_stage_loading():
+                    continue
+                # 检查 prim 已有子项
+                _p = self.stage.GetPrimAtPath(self.rigid_prim_path)
+                if _p.IsValid() and len(list(_p.GetChildren())) > 0:
+                    break
+        except Exception:
+            pass  # 旧版本不需要等待
+
+        try:
+            self.rigid = SingleRigidPrim(
+                prim_path=self.rigid_prim_path,
+                name=self.rigid_name,
+            )
+        except (AttributeError, TypeError) as e:
+            # Isaac Sim 5.0 fallback: 直接用 SingleXFormPrim 作为刚体代理
+            import omni.usd
+            print(f"  [RigidObject] SingleRigidPrim failed ({e}), using XFormPrim fallback")
+            self.rigid = self.rigid_xform  # 降级为 XFormPrim
+
         self.set_mass(mass)
+
         
         self.rigid_material_path=find_unique_string_name(self.rigid_prim_path+"/physcis_material",is_unique_fn=lambda x: not is_prim_path_valid(x))
         self.rigid_material=PhysicsMaterial(

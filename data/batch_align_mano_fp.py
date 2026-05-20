@@ -57,12 +57,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config
 
 # ── 路径 ──────────────────────────────────────────────────────────────────────
-POSE_BASE      = os.path.join(config.DATA_HUB, "ProcessedData", "obj_poses")
-MANO_BASE      = os.path.join(config.DATA_HUB, "ProcessedData", "third_mano")
-MESH_BASE      = os.path.join(config.DATA_HUB, "ProcessedData", "obj_meshes")
-OUT_TRAIN_BASE = os.path.join(config.DATA_HUB, "ProcessedData", "training_fp")      # 可被 --out_suffix 覆盖
-OUT_PRIOR_BASE = os.path.join(config.DATA_HUB, "ProcessedData", "human_prior_fp")   # 可被 --out_suffix 覆盖
-DEPTH_BASE     = os.path.join(config.DATA_HUB, "ProcessedData", "third_depth")
+POSE_BASE      = os.path.join(config.DATA_HUB, "ProcessedData", "poses",          "ThirdPerson")
+MANO_BASE      = os.path.join(config.DATA_HUB, "ProcessedData", "mano",           "ThirdPerson")
+MESH_BASE      = os.path.join(config.DATA_HUB, "ProcessedData",  "obj_meshes")   # SAM3D meshes
+OUT_TRAIN_BASE = os.path.join(config.DATA_HUB, "ProcessedData", "human_prior_fp", "ThirdPerson")
+OUT_PRIOR_BASE = os.path.join(config.DATA_HUB, "ProcessedData", "human_prior_fp", "ThirdPerson")
+DEPTH_BASE     = os.path.join(config.DATA_HUB, "ProcessedData", "depth",          "ThirdPerson")
 
 N_POINTS       = 4096
 CONTACT_SIGMA  = 0.020   # Gaussian smoothing radius (m)

@@ -59,8 +59,8 @@ PH2D_META      = os.path.join(DATA_ROOT, "ph2d", "ph2d_metadata.json")
 EGODEX_ROOT    = os.path.join(EGO_ROOT,  "egodex", "test")
 TACO_EGO_ROOT  = os.path.join(EGO_ROOT,  "taco",   "Egocentric_RGB_Videos")
 HOI4D_ROOT     = os.path.join(EGO_ROOT,  "hoi4d",  "HOI4D_release")
-OUT_BASE    = os.path.join(proj_cfg.DATA_HUB, "ProcessedData", "egocentric_depth")
-WORK_DIR    = os.path.join(OUT_BASE, "_workdir")   # temp frames + DA/UD outputs
+OUT_BASE    = os.path.join(proj_cfg.DATA_HUB, "ProcessedData", "depth", "Egocentric", "Egodex")
+WORK_DIR    = os.path.join(proj_cfg.DATA_HUB, "ProcessedData", "depth", "Egocentric", "_workdir")   # temp frames + DA/UD outputs
 
 DA_CKPT     = os.path.join(MEGASAM_DIR, "Depth-Anything", "checkpoints",
                             "depth_anything_vitl14.pth")

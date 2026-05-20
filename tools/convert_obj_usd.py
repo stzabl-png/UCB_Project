@@ -32,7 +32,7 @@ import numpy as np
 PROJ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OBJ_MESHES_DIR    = os.path.join(PROJ, 'data_hub', 'ProcessedData', 'obj_meshes')
 OBJ_USD_DIR       = os.path.join(PROJ, 'output', 'obj_usd')
-CANONICAL_ROT_JSON = os.path.join(PROJ, 'sim', 'canonical_rotation.json')
+CANONICAL_ROT_JSON = os.path.join(PROJ, 'sim', 'canonical_rotation.json')  # legacy, no longer used
 
 DATASETS = ['oakink', 'ycb', 'arctic', 'dexycb', 'egocentric', 'ho3d_v3']
 
@@ -48,7 +48,7 @@ def load_canonical_rotations():
 
 
 def find_obj_mesh(obj_id, dataset=None):
-    """在 obj_meshes/ 中查找 mesh.ply 和 scale.json."""
+    """在 obj_meshes/ 中查找 mesh.ply、scale.json 和 rotation.json."""
     datasets = [dataset] if dataset else DATASETS
     for ds in datasets:
         mesh_path  = os.path.join(OBJ_MESHES_DIR, ds, obj_id, 'mesh.ply')
@@ -61,6 +61,25 @@ def find_obj_mesh(obj_id, dataset=None):
                 scale_factor = float(json.load(f)['scale_factor'])
         return mesh_path, scale_factor, ds
     return None, 1.0, None
+
+
+def load_canonical_rotations():
+    """Legacy: kept for backward compatibility only. No longer used in main pipeline."""
+    return {}
+
+
+def load_obj_rotation(obj_id, dataset, canonical_rotations_global):
+    """
+    读取物体的 canonical rotation (Euler XYZ, degrees).
+    唯一来源: per-object rotation.json (estimate_obj_rotation.py 生成)
+    """
+    rot_path = os.path.join(OBJ_MESHES_DIR, dataset, obj_id, 'rotation.json')
+    if os.path.exists(rot_path):
+        data = json.load(open(rot_path))
+        euler = data.get('euler_xyz_deg', None)
+        if euler is not None:
+            return euler, f'rotation.json ({data.get("method","?")})'
+    return None, 'none'
 
 
 def list_dataset_objs(dataset):
@@ -98,13 +117,15 @@ def convert_one(obj_id, mesh_path, scale_factor, dataset, canonical_rotations, f
     if abs(scale_factor - 1.0) > 1e-6:
         mesh.vertices = mesh.vertices * scale_factor
 
-    # ── 3. 应用 canonical rotation ───────────────────────────────────────────
-    rot_euler = canonical_rotations.get(obj_id)
+    # ── 3. 应用 canonical rotation ─────────────────────────────────────────────
+    rot_euler, rot_source = load_obj_rotation(obj_id, dataset, canonical_rotations)
     if rot_euler is not None and any(abs(e) > 0.5 for e in rot_euler):
         from scipy.spatial.transform import Rotation as _R
         R_mat = _R.from_euler('xyz', rot_euler, degrees=True).as_matrix()
         mesh.vertices = (R_mat @ mesh.vertices.T).T
-        print(f'     [canonical rot: {rot_euler}]')
+        print(f'     [rotation {rot_euler}  source={rot_source}]')
+    else:
+        print(f'     [rotation: identity  source={rot_source}]')
 
     # ── 4. 写出 USD ──────────────────────────────────────────────────────────
     stage = Usd.Stage.CreateNew(out_path)
@@ -139,9 +160,26 @@ def convert_one(obj_id, mesh_path, scale_factor, dataset, canonical_rotations, f
 
     stage.Save()
 
-    ext = np.array(mesh.bounding_box.extents) * 100
+    # ── 5. 保存 companion meta JSON（z_offset 供 Sim 精确放置）────────────────
+    vmin = verts.min(axis=0)   # (3,) x/y/z 最小值
+    vmax = verts.max(axis=0)   # (3,) x/y/z 最大值
+    z_offset = float(-vmin[2]) if vmin[2] < 0 else 0.0   # 抬起到 z_min=0
+    meta = {
+        'obj':          obj_id,
+        'dataset':      dataset,
+        'scale_factor': scale_factor,
+        'z_offset_m':   round(z_offset, 6),   # 放置时 Z 轴偏移（米），使底面在桌面
+        'bbox_min':     [round(float(v), 6) for v in vmin],
+        'bbox_max':     [round(float(v), 6) for v in vmax],
+        'bbox_extent_cm': [round(float(v)*100, 2) for v in (vmax - vmin)],
+    }
+    meta_path = os.path.join(out_dir, f'{obj_id}_meta.json')
+    with open(meta_path, 'w') as mf:
+        json.dump(meta, mf, indent=2)
+
+    ext = vmax - vmin
     print(f'  ✅  {out_path}')
-    print(f'      尺寸 (cm): {ext[0]:.1f}×{ext[1]:.1f}×{ext[2]:.1f}   scale={scale_factor:.6f}')
+    print(f'      尺寸 (cm): {ext[0]*100:.1f}×{ext[1]*100:.1f}×{ext[2]*100:.1f}   scale={scale_factor:.6f}   z_offset={z_offset*100:.1f}cm')
     return True
 
 

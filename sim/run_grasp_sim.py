@@ -17,6 +17,7 @@ from isaacsim import SimulationApp
 import argparse
 import os
 import sys
+import json
 
 # Parse args before SimulationApp (因为 SimulationApp 修改了 sys.argv)
 parser = argparse.ArgumentParser(description="Pipeline Stage B: Isaac Sim Grasp Execution")
@@ -30,6 +31,9 @@ parser.add_argument("--result-dir", type=str, default=None,
 args, _ = parser.parse_known_args()
 
 simulation_app = SimulationApp({"headless": args.headless})
+
+# render=True 在非 headless 模式显示流畅运动；headless 模式下 render=False 加速
+RENDER_SIM = not args.headless
 
 import numpy as np
 import h5py
@@ -46,6 +50,16 @@ import omni.replicator.core as rep
 
 SIM_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, SIM_DIR)
+
+# ── cuRobo 路径: 按机器自动查找 ──
+for _curobo_candidate in [
+    os.path.expanduser('~/Project/curobo/src'),          # 本机
+    os.path.expanduser('~/curobo/src'),                  # 服务器备用
+    '/home/vision/Project/curobo/src',                   # 服务器绝对路径
+]:
+    if os.path.isdir(os.path.join(_curobo_candidate, 'curobo')):
+        sys.path.insert(0, _curobo_candidate)
+        break
 from env_config.robot.Franka import Franka
 from env_config.room.Real_Ground import Real_Ground
 from env_config.rigid.RigidObject import RigidObject
@@ -99,7 +113,23 @@ def setup_scene(obj_id, object_scale):
     delete_prim("/Replicator/DomeLight_Xform")
     rep.create.light(position=[0, 0, 0], light_type="dome")
 
-    Real_Ground(world.scene, visual_material_usd=None)
+    # ── 蓝色格子地板: 加载 default_environment.usd (视觉) ────────────────────
+    _sim_dir = os.path.dirname(os.path.abspath(__file__))
+    _env_usd = os.path.join(_sim_dir, "assets_scene",
+                            "Collected_default_environment", "default_environment.usd")
+    delete_prim("/World/Environment")
+    if os.path.exists(_env_usd):
+        from isaacsim.core.utils.stage import add_reference_to_stage as _add_ref
+        _add_ref(usd_path=_env_usd, prim_path="/World/Environment")
+
+    # ── 物理地板: FixedCuboid (Isaac Sim 5.0 fix, async 崩溃用同步方案) ──────
+    delete_prim("/World/Ground")
+    FixedCuboid(
+        prim_path="/World/Ground", name="ground",
+        position=np.array([0.0, 0.0, -0.025]),
+        scale=np.array([20.0, 20.0, 0.05]),
+        size=1.0, visible=False,
+    )
 
     delete_prim("/World/Table")
     FixedCuboid(
@@ -109,16 +139,20 @@ def setup_scene(obj_id, object_scale):
         scale=TABLE_SCALE, size=1.0, visible=True,
     )
 
+
     delete_prim("/World/Franka")
     franka = Franka(world, np.array(ROBOT_POSITION), np.array(ROBOT_ORIENTATION))
 
     world.reset()
+
+
+
     for _ in range(50):
-        world.step(render=True)
+        world.step(render=RENDER_SIM)
 
     franka.open_gripper()
     for _ in range(10):
-        world.step(render=True)
+        world.step(render=RENDER_SIM)
 
     # 加载物体 USD — 搜索顺序: output/obj_usd/{dataset}/ → sim/assets/
     a2g_root = os.path.dirname(SIM_DIR)
@@ -138,16 +172,25 @@ def setup_scene(obj_id, object_scale):
 
     # 读取每物体覆盖
     _override = OBJECT_ROTATION_OVERRIDES.get(obj_id, None)
-    if isinstance(_override, dict):
-        obj_z_offset = _override.get('z_offset', 0.075 * object_scale)
-        obj_orientation = _override.get('rotation', list(OBJECT_ORIENTATION))
-        if 'z_offset' in _override:
-            cprint(f"   z_offset 覆盖: {obj_id} → {obj_z_offset*100:.1f}cm", "cyan")
-        if 'rotation' in _override:
-            cprint(f"   ⮻ 朝向覆盖: {obj_id} → {obj_orientation}°", "cyan")
+    obj_orientation = list(OBJECT_ORIENTATION)
+
+    # ── z_offset 优先级: meta JSON > override config > 启发式 ────────────────
+    # meta JSON 由 convert_obj_usd.py 生成（精确值：使物体底面落在 Z=0）
+    _meta_path = usd_path.replace('.usd', '_meta.json')
+    if os.path.exists(_meta_path):
+        with open(_meta_path) as _mf:
+            _meta = json.load(_mf)
+        obj_z_offset = float(_meta.get('z_offset_m', 0.075 * object_scale))
+        cprint(f"   z_offset (meta): {obj_id} → {obj_z_offset*100:.1f}cm", "cyan")
+    elif isinstance(_override, dict) and 'z_offset' in _override:
+        obj_z_offset = _override['z_offset']
+        cprint(f"   z_offset (override): {obj_id} → {obj_z_offset*100:.1f}cm", "cyan")
     else:
-        obj_z_offset = 0.075 * object_scale
-        obj_orientation = list(OBJECT_ORIENTATION)
+        obj_z_offset = 0.075 * object_scale   # 7.5cm 启发式
+
+    if isinstance(_override, dict) and 'rotation' in _override:
+        obj_orientation = _override['rotation']
+        cprint(f"   ⮻ 朝向覆盖: {obj_id} → {obj_orientation}°", "cyan")
 
     obj_pos = list(OBJECT_POSITION)
     obj_pos[2] += obj_z_offset
@@ -218,7 +261,7 @@ def setup_scene(obj_id, object_scale):
             cprint(f"   ✅ Finger friction on {finger_name}", "green")
 
     for _ in range(100):
-        world.step(render=True)
+        world.step(render=RENDER_SIM)
 
     cprint("✅ Scene Ready", "green")
     return {"world": world, "franka": franka, "obj": obj}
@@ -274,6 +317,12 @@ _CUROBO_MG = None
 
 def init_curobo():
     """初始化 cuRobo MotionGen."""
+    import os as _os
+    # ── 确保 ninja + nvcc 在 PATH，Isaac Sim python.sh 会覆盖环境 ──
+    _extra = '/home/vision/isaacsim/kit/python/bin:/usr/local/cuda/bin'
+    if _extra not in _os.environ.get('PATH', ''):
+        _os.environ['PATH'] = _extra + ':' + _os.environ.get('PATH', '')
+
     from curobo.wrap.reacher.motion_gen import MotionGen, MotionGenConfig
 
     _, T_robot_world = get_robot_base_transform()
@@ -394,7 +443,7 @@ def execute_trajectory(franka, world, traj):
     for joint_pos in traj:
         gripper = franka.get_joint_positions()[7:9]
         franka.set_joint_positions(np.concatenate([joint_pos, gripper]))
-        world.step(render=True)
+        world.step(render=RENDER_SIM)
 
 
 # ============================================================
@@ -481,7 +530,7 @@ def execute_grasp(scene, grasp_pos_obj, grasp_rot_obj, gripper_width, object_sca
     # ---- 打开夹爪 ----
     franka.open_gripper()
     for _ in range(30):
-        world.step(render=True)
+        world.step(render=RENDER_SIM)
 
     # ---- Phase 1: 规划到预抓取点 (Pre-grasp) ----
     # 预抓取点 = 抓取点沿接近方向后退 12cm, 避免轨迹穿过瓶子
@@ -509,10 +558,10 @@ def execute_grasp(scene, grasp_pos_obj, grasp_rot_obj, gripper_width, object_sca
     for joint_pos in traj:
         gripper = franka.get_joint_positions()[7:9]
         franka.set_joint_positions(np.concatenate([joint_pos, gripper]))
-        world.step(render=True)
+        world.step(render=RENDER_SIM)
 
     for _ in range(10):
-        world.step(render=True)
+        world.step(render=RENDER_SIM)
 
     # ---- Phase 3: 从预抓取点缓慢推进到抓取点 (cuRobo) ----
     cprint(f"   → [3/5] Final approach (cuRobo)...", "yellow")
@@ -522,7 +571,7 @@ def execute_grasp(scene, grasp_pos_obj, grasp_rot_obj, gripper_width, object_sca
             gripper = franka.get_joint_positions()[7:9]
             franka.set_joint_positions(np.concatenate([joint_pos, gripper]))
             for _ in range(3):
-                world.step(render=True)
+                world.step(render=RENDER_SIM)
     else:
         cprint(f"   → Final approach 失败", "red")
         return {'success': False, 'contact_points_local': None, 'finger_width_actual': None}
@@ -550,7 +599,7 @@ def execute_grasp(scene, grasp_pos_obj, grasp_rot_obj, gripper_width, object_sca
     # 闭合过程中记录力
     force_log = []
     for step in range(80):
-        world.step(render=True)
+        world.step(render=RENDER_SIM)
 
         # 读取接触力
         from omni.physx import get_physx_scene_query_interface
@@ -600,13 +649,13 @@ def execute_grasp(scene, grasp_pos_obj, grasp_rot_obj, gripper_width, object_sca
             )
             franka.apply_action(action)
             for _ in range(2):
-                world.step(render=True)
+                world.step(render=RENDER_SIM)
     else:
         cprint(f"   ⚠️ Lift planning failed, skipping", "yellow")
 
     # 稳定 — 夹爪控制器持续施力
     for _ in range(80):
-        world.step(render=True)
+        world.step(render=RENDER_SIM)
 
     # ---- 检查结果 ----
     obj_after, _ = scene["obj"].get_obj_pos()
@@ -734,11 +783,17 @@ def main():
     cprint(f"  Contacts:  {n_contact}", "cyan")
     cprint(f"  Scale:     {args.object_scale}x", "cyan")
 
+    # 按评分降序排列（纯分数，不加方向权重）
+    grasp_candidates.sort(key=lambda c: c["score"], reverse=True)
+
     for i, c in enumerate(grasp_candidates):
-        euler = Rotation.from_matrix(c["rotation"]).as_euler('xyz', degrees=True)
+        R = c["rotation"]
+        approach = R[:, 2] if R.shape == (3, 3) else [0, 0, 0]
+        approach_str = f"({approach[0]:+.2f},{approach[1]:+.2f},{approach[2]:+.2f})"
         marker = "⭐" if i == 0 else "  "
         cprint(f"  {marker} [{i+1}] {c['name']:>16s}  score={c['score']:5.1f}  "
-               f"gripper={c['gripper_width']*100:.1f}cm", "cyan")
+               f"approach={approach_str}  gripper={c['gripper_width']*100:.1f}cm", "cyan")
+
 
     # ---- 搭建场景 ----
     cprint(f"\n📦 Setting up scene...", "yellow")
@@ -750,13 +805,16 @@ def main():
     # ---- 等待用户调整视角 (Sim 保持交互) ----
     if not args.headless:
         import sys, select
-        cprint("🎥 在 Sim 中调整视角, 终端按 Enter 开始抓取...", "cyan")
+        cprint("=" * 50, "cyan")
+        cprint("🎥 Sim 窗口已就绪，物体已放置到桌面", "cyan")
+        cprint("   终端按 Enter 开始抓取...", "cyan")
+        cprint("=" * 50, "cyan")
         while True:
-            scene["world"].step(render=True)
-            # 非阻塞检测 Enter
+            scene["world"].step(render=True)   # render=True: 保持 viewport 实时更新
             if select.select([sys.stdin], [], [], 0)[0]:
                 sys.stdin.readline()
                 break
+
 
     # ---- 逐候选尝试抓取 ----
     success = False
@@ -781,6 +839,9 @@ def main():
                 is_manual=is_manual,
                 mesh_prerotation_euler=cand.get("mesh_prerotation_euler", None)
             )
+            # ── fix: execute_grasp 在 cuRobo 初始化失败时可能返回 False ──
+            if not isinstance(grasp_result, dict):
+                grasp_result = {'success': bool(grasp_result), 'contact_points_local': None, 'finger_width_actual': None}
             success = grasp_result['success']
         except Exception as e:
             cprint(f"  ❌ Error: {e}", "red")
@@ -831,7 +892,7 @@ def main():
             scene["franka"].set_joint_positions(home_joints)
             # 等物理稳定 (多等几步确保鼠标落稳)
             for _ in range(150):
-                scene["world"].step(render=True)
+                scene["world"].step(render=RENDER_SIM)
 
     # ---- 保存 Robot GT 结果 (所有成功的都保存) ----
     successful_grasps = [cr for cr in candidate_results if cr['success']]
@@ -914,7 +975,7 @@ def main():
             all_j[:7] = hold_arm
             scene["franka"].set_joint_positions(all_j)
             scene["franka"].close_gripper()
-            scene["world"].step(render=True)
+            scene["world"].step(render=RENDER_SIM)
 
     simulation_app.close()
 

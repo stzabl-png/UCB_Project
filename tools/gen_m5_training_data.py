@@ -16,14 +16,19 @@
 import os, sys, glob, h5py, numpy as np, trimesh
 
 PROJ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-MESH_DIR = os.path.join(PROJ, 'data_hub', 'meshes', 'v1')
+MESH_DIR = os.path.join(PROJ, 'data_hub', 'meshes', 'v1')  # legacy .obj (可能为空)
+PROC_MESH_DIR = os.path.join(PROJ, 'data_hub', 'ProcessedData', 'obj_meshes')  # .ply
 HP_DIR = os.path.join(PROJ, 'data_hub', 'human_prior')
 GT_DIRS = [
+    # ── 最新合并轮次（优先）──
+    os.path.join(PROJ, 'output', 'robot_gt_merged_oakink'),
+    os.path.join(PROJ, 'output', 'robot_gt_merged_dexycb'),
+    # ── 历史路径兼容 ──
     os.path.join(PROJ, 'output', 'robot_gt_verified'),
-    os.path.join(PROJ, 'output', 'robot_gt_v1_manual'),  # 第一版 GT
-    os.path.join(PROJ, 'output', 'robot_gt_v2_raycast'), # 第二版 GT (v2射线采样)
-    os.path.join(PROJ, 'output', 'robot_gt_v3_score80'), # 第三版 GT (score≥80, 100 batches)
-    os.path.join(PROJ, 'sim', 'output', 'robot_gt'),     # 旧路径兼容
+    os.path.join(PROJ, 'output', 'robot_gt_v1_manual'),
+    os.path.join(PROJ, 'output', 'robot_gt_v2_raycast'),
+    os.path.join(PROJ, 'output', 'robot_gt_v3_score80'),
+    os.path.join(PROJ, 'sim', 'output', 'robot_gt'),
     os.path.join(PROJ, 'output', 'robot_gt'),
     os.path.join(PROJ, 'output', 'robot_gt_random'),
 ]
@@ -31,7 +36,7 @@ OUT_DIR = os.path.join(PROJ, 'data_hub', 'training_m5')
 os.makedirs(OUT_DIR, exist_ok=True)
 
 N_POINTS = 4096
-CONTACT_SIGMA = 0.025  # 高斯平滑 sigma (25mm, 扩大标注覆盖)
+CONTACT_SIGMA = 0.040  # 高斯平滑 sigma (40mm, 扩大正样本覆盖以缓解类别不平衡)
 
 
 def load_human_prior(obj_id):
@@ -166,7 +171,16 @@ def process_object(obj_id, mesh_path):
 
 
 def main():
+    # ── legacy .obj meshes ──
     all_meshes = sorted(glob.glob(os.path.join(MESH_DIR, '*.obj')))
+
+    # ── ProcessedData .ply meshes (oakink / dexycb / egodex) ──
+    for ds_subdir in ['oakink', 'dexycb', 'egodex']:
+        ply_pattern = os.path.join(PROC_MESH_DIR, ds_subdir, '*', 'mesh.ply')
+        for ply_path in sorted(glob.glob(ply_pattern)):
+            obj_id = os.path.basename(os.path.dirname(ply_path))
+            all_meshes.append((obj_id, ply_path, 1.0, None))  # (obj_id, path, scale, rot)
+    print(f'  共扫描到 {len(all_meshes)} 个 mesh')
     # 也扫描 ContactPose 的 mesh
     cp_mesh_dir = os.path.join(PROJ, 'data_hub', 'meshes', 'contactpose')
     if os.path.isdir(cp_mesh_dir):
@@ -224,7 +238,7 @@ def main():
     skip = set()   # object IDs to skip (e.g. already processed or known bad)
 
     for mp in all_meshes:
-        # ARCTIC entries are 4-tuples: (obj_id, src, scale, rot)
+        # 4-tuples: (obj_id, path, scale, rot)
         if isinstance(mp, tuple):
             obj_id = mp[0]
             mp = mp[1]   # actual mesh path

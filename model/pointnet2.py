@@ -215,3 +215,15 @@ class PointNet2Seg(nn.Module):
         
         return seg_logits
 
+    def extract_global_feat(self, xyz, features):
+        """冻结推理专用：只走 SA1-3，返回 global_feat (B, 512)。
+        调用时请先 model.eval() 并用 torch.no_grad()。
+        """
+        with torch.no_grad():
+            l1_xyz, l1_points = self.sa1(xyz, features)
+            l2_xyz, l2_points = self.sa2(l1_xyz, l1_points)
+            l3_xyz, l3_points = self.sa3(l2_xyz, l2_points)
+            global_feat = torch.max(
+                l3_points.permute(0, 2, 1), dim=2
+            )[0]  # (B, 512)
+        return global_feat

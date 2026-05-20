@@ -44,22 +44,36 @@ def find_obj_mesh(obj_id):
 
 
 def load_mesh(obj_id):
-    """从 obj_meshes/ 加载并应用 scale + canonical_rotation."""
+    """从 obj_meshes/ 加载并应用 scale + per-object rotation.json."""
     mp, sf = find_obj_mesh(obj_id)
     if mp is None:
         sys.exit(f'❌ obj_meshes/ 中未找到 {obj_id}')
     mesh = trimesh.load(mp, force='mesh')
     if abs(sf - 1.0) > 1e-6:
         mesh.vertices *= sf
-    # canonical rotation
-    cr_path = os.path.join(PROJ, 'sim', 'canonical_rotation.json')
-    if os.path.exists(cr_path):
-        cr = json.load(open(cr_path))
-        rot_euler = cr.get(obj_id)
-        if rot_euler and any(abs(e) > 0.5 for e in rot_euler):
-            R = Rotation.from_euler('xyz', rot_euler, degrees=True).as_matrix()
-            mesh.vertices = (R @ mesh.vertices.T).T
+    # ── per-object rotation.json (pca_z 方法生成) ────────────────────────────
+    rot_applied = False
+    for ds in DATASETS:
+        rot_path = os.path.join(OBJ_MESHES_DIR, ds, obj_id, 'rotation.json')
+        if os.path.exists(rot_path):
+            rot_data = json.load(open(rot_path))
+            rot_euler = rot_data.get('euler_xyz_deg')
+            if rot_euler and any(abs(e) > 0.5 for e in rot_euler):
+                R = Rotation.from_euler('xyz', rot_euler, degrees=True).as_matrix()
+                mesh.vertices = (R @ mesh.vertices.T).T
+            rot_applied = True
+            break
+    # fallback: 旧全局 canonical_rotation.json
+    if not rot_applied:
+        cr_path = os.path.join(PROJ, 'sim', 'canonical_rotation.json')
+        if os.path.exists(cr_path):
+            cr = json.load(open(cr_path))
+            rot_euler = cr.get(obj_id)
+            if rot_euler and any(abs(e) > 0.5 for e in rot_euler):
+                R = Rotation.from_euler('xyz', rot_euler, degrees=True).as_matrix()
+                mesh.vertices = (R @ mesh.vertices.T).T
     return mesh
+
 
 
 # ── HDF5 读取 ─────────────────────────────────────────────────────────────────
