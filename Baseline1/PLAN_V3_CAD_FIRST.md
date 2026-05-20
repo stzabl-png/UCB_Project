@@ -123,7 +123,42 @@ If +X is defined as robot-facing direction (i.e., from robot base toward task ar
 
 ## 2. Pipeline Changes
 
-### 2.1 `Baseline1/retarget_human_to_ee.py` (major rewrite)
+### 2.0 New: `Baseline1/build_gt_replay.py` — supersedes `retarget_human_to_ee.py` for G-frame data
+
+**Why a new script** (decided 2026-05-19): `retarget_human_to_ee.py` was written before the G-frame
+concept and outputs episodes in "camera frame minus object centroid" (no gravity-alignment). Phase 1
+Gate 3 already requires real G-frame, so we wrote `build_gt_replay.py` for that. Rather than rewrite
+retarget, we let `build_gt_replay.py` cover both Gate-3 single-episode generation and DP3-training
+batch generation. Result: one source of G-frame logic, no risk of v3/v4 divergence.
+
+**Two modes**:
+- `--single --session ... --cam ... --obj-class ... --out *.hdf5` — one episode for Gate 3
+- `--batch  --subject ... --obj-class ... --out-dir ...`         — all (session × cam) for a subject
+
+**Design choices baked in**:
+1. **G-frame transform** (`R_W→G` from AprilTag-derived gravity; +Z = -gravity, +Y_G = master cam
+   forward projected horizontal).
+2. **Session-level origin locked to master cam's frame-0 object pose** — all 6 cams within a session
+   share `origin_G_in_G = (centroid_xy_master_frame0, table_z_master_frame0)`. This is why same-session
+   different-cam (state, action) sequences are byte-identical (cross-cam diff < 10⁻⁵). Without this
+   lock, each cam's own pose_y annotation noise produces ~cm-level state drift across cams.
+3. **Cross-cam valid-frame intersection** — episode emits only frames valid in *all* `PIPELINE_CAMS`.
+   DexYCB labels can be `joint_3d < -0.5` (missing) for the first few frames of some cams; using a
+   per-cam first-valid-frame would make state[0] correspond to different physical timestamps in
+   different cams. Cost: trims 0–5 "pre-approach" frames (motion barely starts); benefit: identical
+   physical-time alignment for the PC-augmentation use of multi-cam data.
+4. **Deterministic mesh sampling** (`trimesh.sample_surface(..., seed=42)`) — re-runs produce
+   byte-identical HDF5 instead of mm-level drift from random surface sampling.
+
+**Output schema** (compatible with `convert_to_zarr.py`):
+- datasets: `state (T,8)`, `action (T,8)`, `point_cloud (T,N,3)` — all in G-frame
+- attrs: `dataset`, `obj_id`, `ycb_class_id`, `session`, `camera`, `subject`, `mano_side`,
+  `n_steps`, `grasp_onset`, `grasp_onset_idx`, `origin_G_W`, `table_z_G`, `ee_offset_m`, `gripper_span_m`
+
+`retarget_human_to_ee.py` is now flagged as **legacy** (kept until existing Baseline1/data/episodes_v2/
+is fully replaced by Baseline1/data/episodes_g/, then can be removed).
+
+### 2.1 `Baseline1/retarget_human_to_ee.py` (legacy, partially superseded by 2.0)
 
 **Remove**:
 - `compute_sam3d_align.py` dependency (no R_align lookup)

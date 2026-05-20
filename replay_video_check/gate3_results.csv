@@ -1,0 +1,17 @@
+object,session,IK,replay_mean_track,final_EE_vs_human,unreachable_frames,Gate3
+cracker_box,20201015_143145,8/8 100%,12mm,0mm,0/8,PASS
+sugar_box,20201015_143213,29/29 100%,18mm,64mm,0/29,FAIL
+tomato_soup_can,20201015_143403,22/22 100%,32mm,2mm,0/22,FAIL
+mustard_bottle,20201015_143726,18/18 100%,13mm,66mm,0/18,FAIL
+tuna_fish_can,20201015_143921,24/24 100%,17mm,1mm,0/24,PASS
+pudding_box,20201015_144218,18/18 100%,28mm,1mm,0/18,FAIL
+gelatin_box,20201015_144510,21/21 100%,27mm,1mm,0/21,FAIL
+potted_meat_can,20201015_144721,19/25 (incomplete),—,—,—,FAIL (IK unreachable)
+banana,20201015_145212,11/14 (incomplete),—,—,—,FAIL (IK unreachable)
+bleach_cleanser,20201015_145515,18/18 100%,10mm,0mm,0/18,PASS
+bowl,20201015_145926,32/32 100%,23mm,1mm,0/32,FAIL
+power_drill,20201015_150342,35/35 100%,32mm,1mm,0/35,FAIL
+scissors,20201015_150710,30/30 100%,22mm,11mm,0/30,FAIL
+large_marker,20201015_150938,24/24 100%,23mm,3mm,0/24,FAIL
+extra_large_clamp,20201015_151221,12/13 (incomplete),—,—,—,FAIL (IK unreachable)
+foam_brick,20201015_151513,33/33 100%,39mm,2mm,0/33,FAIL

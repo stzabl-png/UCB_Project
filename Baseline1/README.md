@@ -191,10 +191,29 @@ Goal: take one retargeted EE trajectory, replay open-loop in sim, lift object by
 
 | Issue | Status | Next step |
 |---|---|---|
-| `master_chef_can` width vs Franka gripper span | Hardware-limited | Pick a smaller YCB object (<8 cm wide) for the Phase 1 pilot |
-| Stage A wrist flip in pre-position | Reproducible | Switch home→state[0] bridge to joint-space SLERP (1 IK at endpoint, smooth qpos between) |
+| `master_chef_can` width vs Franka gripper span | Hardware-limited | Use `ycb_dex_04` (tomato_soup_can, 6.8 cm diameter — fits gripper with margin) for the Phase 1 pilot. CAD USD already at `output/obj_usd_cad/ycb/ycb_dex_04.usd`. |
+| Stage A wrist flip in pre-position | Resolved | Replaced by `franka.set_joints_default_state(qpos[state[0]])` + `world.reset()` — Franka spawns directly at trajectory start, no pre-position interpolation, no IK branch switching visible in sim. |
+| Trajectory wrist flip on new sessions (e.g. ycb_dex_04) | Reproducible | Try multi-seed IK strategy: precompute trajectory with several seed candidates, pick the chain with smallest joint-step max. |
+| `Baseline1/data/episodes_v2/` (legacy) is **not** G-frame | Known stale | Already regenerated for master_chef_can subject-09 into `Baseline1/data/episodes_g/`. Rebuild zarr from `episodes_g/` before DP3 training. |
 | Other 9 subjects' DexYCB extrinsics | Not on disk | Download to extend Phase 1 to 50 sessions if pilot succeeds |
 | DP3 deployment Franka home pose | Open | Pick "training-distribution friendly" home (median of state[0] across episodes), use joint-space interp to bridge mechanical home → DP3 starting pose |
+
+### Data-generation design (build_gt_replay.py)
+
+Three fixes vs `retarget_human_to_ee.py` that make the dataset suitable for sim deployment:
+
+1. **G-frame transform** (`+Z = -gravity`): rotates W frame (master cam C) so the +Z axis is the
+   true vertical. Without this, training and sim use frames that differ by a ~37° tilt (master
+   cam was angled), and DP3 would have to learn an unphysical "tilted" approach axis.
+2. **Session-level origin** (locked to master cam's frame-0 object pose): each session has one
+   `origin_G_in_G = (centroid_xy_master, table_z_master)`. All 6 cams' (state, action) sequences
+   share this origin, so they describe the same physical trajectory; only the point clouds differ
+   (each cam sees a different surface).
+3. **Cross-cam valid-frame intersection**: DexYCB labels can be invalid (NaN markers) for the first
+   few frames of some cams. We compute the set of frame ids valid across *all* cams and emit only
+   those, so every cam's HDF5 has identical (state, action) row count and physical-time alignment.
+   Cost: ~0–5 frames of "pre-approach" trimmed from the start of each session (motion barely starts
+   in those frames, so the loss is negligible).
 
 ### Phase roadmap
 
@@ -209,7 +228,8 @@ Goal: take one retargeted EE trajectory, replay open-loop in sim, lift object by
 
 | File | What it does |
 |---|---|
-| `retarget_human_to_ee.py` | MANO 21-joint → Franka EE 8D state, builds per-episode HDF5 |
+| `retarget_human_to_ee.py` | (Legacy, non-G-frame) MANO 21-joint → Franka EE 8D state, per-episode HDF5. Output is "camera frame minus object centroid" — not gravity-aligned. **Superseded by `build_gt_replay.py` for Phase 1+**, kept for back-compat with existing Baseline1/data/episodes_v2/ until that is regenerated. |
+| `build_gt_replay.py` | **G-frame** HDF5 generator (replaces retarget for any new training data). Two modes: `--single` (one session × cam → one HDF5, used by `sim/gt_replay_ikpd_v2.py`) and `--batch` (subject × object → many HDF5s). Locks origin to master cam's frame-0 pose_y, and filters per-cam to the cross-cam intersection of valid frames so all 6 cams' (state, action) sequences are byte-identical (PC differs, since they see different views). |
 | `convert_to_zarr.py` | Concatenate per-episode HDF5 → DP3 zarr (used by training) |
 | `compute_sam3d_align.py` | Per-object SAM3D↔CAD ICP alignment (legacy path; not used in CAD-first) |
 | `eval/dp3_inference_server.py` | HTTP server bridging `dp3` env (model) ↔ `env_isaaclab` env (sim eval) |
