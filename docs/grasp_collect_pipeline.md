@@ -255,10 +255,13 @@ cat output/benchmark_sim_parallel/gpu0_A01001/result_min_free_3.0gb.json | grep 
 | `candidates/round_XXXX/{OBJ}_grasp.hdf5` | 候选抓取 |
 | `robot_gt/round_XXXX/{OBJ}_robot_gt.hdf5` | Sim 成功结果 |
 | `merged/{OBJ}_robot_gt_merged.hdf5` | 多轮成功合并 |
-| `summary.csv` | 每物体每轮状态 |
+| `summary.csv` | 每物体每轮状态（追加，不删历史） |
+| `state.json` | 下次 `--resume` 从哪一轮开始 |
 | `sim_logs/round_XXXX/` | convert / gen / sim 日志 |
 
-### 4.1 首次全量（已转 USD，双卡示例）
+**轮次与覆盖：** 不同 `round_XXXX/` **互不覆盖**。危险操作：不带 `--resume` 又从 `round_0000` 跑——sampler `--force` 会**重写**该轮已有 HDF5。
+
+### 4.1 首次全量（默认 10 轮，已转 USD，双卡示例）
 
 ```bash
 conda activate bundlesdf
@@ -267,7 +270,6 @@ cd "$PROJ"
 
 python3 scripts/batch_grasp_collect.py \
   --dataset oakink \
-  --max-rounds 1 \
   --sampler-workers 8 \
   --sim-gpu-ids 0,1 \
   --sim-per-gpu 1 \
@@ -276,10 +278,45 @@ python3 scripts/batch_grasp_collect.py \
   --no-convert
 ```
 
-- 不加 `--rotation` = 默认 **no-rotation**（与上文一致）。
-- `--no-convert`：跳过 USD 转换（需已完成第 1 节）。
+- 默认 `--max-rounds 10` → `round_0000` … `round_0009`（可不写该参数）。
+- 不加 `--rotation` = **no-rotation**。
+- `--no-convert`：跳过 USD（需已完成第 1 节）。
 
-### 4.2 断点续跑（跳过已有 grasp / robot_gt）
+### 4.2 跑完预设轮数后继续加轮（不覆盖旧 round）
+
+例如已跑满默认 10 轮（`state.json` 里 `"round": 10`），再加 **5** 轮 → 只写 `round_0010`…`round_0014`：
+
+```bash
+python3 scripts/batch_grasp_collect.py \
+  --dataset oakink \
+  --max-rounds 5 \
+  --resume \
+  --sampler-workers 8 \
+  --sim-gpu-ids 0,1 \
+  --sim-per-gpu 1 \
+  --headless \
+  --no-convert
+```
+
+`--resume` 作用：
+
+1. 从 `state.json` 的 `round` 继续编号（不回到 0000）。
+2. 某一 round 目录里已有 `*_grasp.hdf5` / `*_robot_gt.hdf5` 的物体会跳过 gen/sim。
+
+**不要**在已有 10 轮数据后去掉 `--resume` 再跑默认 10 轮——会从 `round_0000` 重来并覆盖该轮文件。
+
+另开一套输出（与旧实验完全隔离）：
+
+```bash
+python3 scripts/batch_grasp_collect.py \
+  --dataset oakink \
+  --outdir output/grasp_collect_exp2 \
+  ...
+```
+
+### 4.3 断点续跑（同一轮未完成）
+
+batch 中途断了，同一轮里补跑未完成物体：
 
 ```bash
 python3 scripts/batch_grasp_collect.py \
@@ -293,26 +330,13 @@ python3 scripts/batch_grasp_collect.py \
   --no-convert
 ```
 
-### 4.3 多轮采集（每轮新随机候选，合并到 merged/）
-
-```bash
-python3 scripts/batch_grasp_collect.py \
-  --dataset oakink \
-  --max-rounds 3 \
-  --resume \
-  --sampler-workers 8 \
-  --sim-gpu-ids 0,1 \
-  --sim-per-gpu 1 \
-  --headless \
-  --no-convert
-```
+若 `state.json` 已进位到下一轮，但你想**只补** `round_0003`，需手动把 `state.json` 里 `"round"` 改回 `3`，或只删该轮缺失物体的 HDF5 后 `--resume`。
 
 ### 4.4 单卡
 
 ```bash
 python3 scripts/batch_grasp_collect.py \
   --dataset oakink \
-  --max-rounds 1 \
   --sampler-workers 8 \
   --sim-gpu-ids 0 \
   --sim-per-gpu 1 \
@@ -343,7 +367,7 @@ ls output/grasp_collect/robot_gt/round_0000/*_robot_gt.hdf5 2>/dev/null | wc -l
 | `--sim-gpu-ids` | `0` | 物理 GPU 列表，如 `0,1` |
 | `--sim-per-gpu` | 1 | **每张 GPU** 同时跑的 Isaac 数 |
 | `--target` | 20 | 每物体每轮候选数 |
-| `--max-rounds` | 1 | 轮数 |
+| `--max-rounds` | 10 | 轮数（默认 `round_0000`…`0009`） |
 | `--no-convert` | 关 | 跳过 USD 转换 |
 | `--resume` | 关 | 跳过已有 HDF5 |
 | `--rotation` | 关 | 加上则使用 `rotation.json`（一般不要） |
@@ -392,15 +416,17 @@ python3 tools/convert_obj_usd.py --dataset oakink --no-rotation --force
 # 2. 显存压测（可选；若无 A01001_grasp.hdf5 先做第 3.0 节 sampler）
 python3 scripts/benchmark_sim_parallel.py --gpu 0 --start-n 6 --min-free-gb 3
 
-# 3. 正式 batch（双卡，已转 USD）
+# 3. 正式 batch（双卡，默认 10 轮 round_0000..0009）
 python3 scripts/batch_grasp_collect.py \
   --dataset oakink \
-  --max-rounds 1 \
   --sampler-workers 8 \
   --sim-gpu-ids 0,1 \
   --sim-per-gpu 1 \
   --headless \
   --no-convert
+
+# 3b. 跑满 10 轮后再加 5 轮（不覆盖旧 round）:
+# python3 scripts/batch_grasp_collect.py --dataset oakink --max-rounds 5 --resume ...
 
 # 4. 抽查可视化
 python3 tools/vis_grasp_candidates.py \

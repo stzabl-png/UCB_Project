@@ -14,13 +14,11 @@ batch_grasp_collect.py — 批量: 生成 candidate → Isaac Sim 验证 → 记
 用法:
     export ISAAC_SIM_PATH=/path/to/isaac-sim
 
-    python3 scripts/batch_grasp_collect.py --obj A01001 --max-rounds 1 \\
-        --sampler-workers 4 --sim-per-gpu 1 --sim-gpu-ids 0 --headless
-
-    python3 scripts/batch_grasp_collect.py --dataset oakink --max-rounds 3 \\
+    python3 scripts/batch_grasp_collect.py --dataset oakink \\
         --sampler-workers 8 --sim-per-gpu 1 --sim-gpu-ids 0,1 --headless --no-convert
 
-    python3 scripts/batch_grasp_collect.py --dataset oakink --resume
+    # 默认 10 轮 (round_0000..0009)；续跑更多轮:
+    python3 scripts/batch_grasp_collect.py --dataset oakink --max-rounds 5 --resume ...
 """
 from __future__ import annotations
 
@@ -568,7 +566,8 @@ def main():
         "--workers", type=int, default=None,
         help="(已弃用) 仅设置 sampler-workers",
     )
-    parser.add_argument("--max-rounds", type=int, default=1, help="轮数 (每轮先全量 gen 再全量 sim)")
+    parser.add_argument("--max-rounds", type=int, default=10,
+                        help="轮数 (每轮先全量 gen 再全量 sim；默认 10 → round_0000..0009)")
     parser.add_argument("--max-candidates", type=int, default=None, help="sim 最多尝试数")
     parser.add_argument("--sim-timeout", type=int, default=2400,
                         help="单次 sim 超时秒 (默认 2400 = 40 分钟)")

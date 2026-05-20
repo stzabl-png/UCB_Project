@@ -191,6 +191,73 @@ cuRobo: plan home → pre-grasp → grasp → lift
     ❌  discard failed candidates
 ```
 
+### Batch grasp collect (OakInk robot GT at scale)
+
+Full commands and troubleshooting: [`docs/grasp_collect_pipeline.md`](docs/grasp_collect_pipeline.md).
+
+**Layout** (`output/grasp_collect/` by default):
+
+| Path | Notes |
+|------|--------|
+| `candidates/round_0000/` … `round_0009/` | Each round has its **own** candidate HDF5s — rounds do not overwrite each other |
+| `robot_gt/round_XXXX/` | Per-round sim results |
+| `merged/{obj}_robot_gt_merged.hdf5` | Merges **all completed rounds** for that object (updated after each sim) |
+| `summary.csv` | Appends one row per object per round (history kept) |
+| `state.json` | Next round index after a batch run |
+
+**First run** (default **10 rounds**, raw mesh / no rotation):
+
+```bash
+conda activate bundlesdf
+export PROJ=/path/to/Affordance2Grasp
+export ISAAC_SIM_PATH=/path/to/your/isaac-sim
+cd "$PROJ"
+
+# Optional once: USD for all OakInk objects
+python3 tools/convert_obj_usd.py --dataset oakink --no-rotation --force
+
+python3 scripts/batch_grasp_collect.py \
+  --dataset oakink \
+  --sampler-workers 8 \
+  --sim-gpu-ids 0,1 \
+  --sim-per-gpu 1 \
+  --headless \
+  --no-convert
+```
+
+This runs `round_0000` … `round_0009` (no `--max-rounds` needed unless you want fewer).
+
+**Continue for more rounds without overwriting previous round data**
+
+- **Safe:** `--resume` reads `state.json` and starts at the next round index (e.g. after 10 rounds, `state.json` has `"round": 10` → next run writes `round_0010`, `round_0011`, …).
+- **Within a round**, `--resume` skips objects that already have `*_grasp.hdf5` / `*_robot_gt.hdf5` in **that** round folder.
+- **Unsafe:** starting again **without** `--resume` resets to `round_0000` and sampler uses `--force`, which **overwrites** `candidates/round_0000/*.hdf5` (and re-sims can overwrite that round’s `robot_gt`).
+
+Example — already finished the default 10 rounds, add **5** more:
+
+```bash
+python3 scripts/batch_grasp_collect.py \
+  --dataset oakink \
+  --max-rounds 5 \
+  --resume \
+  --sampler-workers 8 \
+  --sim-gpu-ids 0,1 \
+  --sim-per-gpu 1 \
+  --headless \
+  --no-convert
+```
+
+→ Runs `round_0010` … `round_0014` only; `round_0000` … `round_0009` stay on disk.
+
+**Separate experiment** (no sharing with prior output): use another outdir:
+
+```bash
+python3 scripts/batch_grasp_collect.py \
+  --dataset oakink \
+  --outdir output/grasp_collect_exp2 \
+  ...
+```
+
 ### Step 3 — PointNet++ Training
 
 ```
