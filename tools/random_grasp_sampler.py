@@ -15,7 +15,7 @@ M2 Random Grasp Sampler v2
     python3 tools/random_grasp_sampler.py --arctic               # ARCTIC 全部 10 个物体
     python3 tools/random_grasp_sampler.py --arctic --obj scissors # ARCTIC 单个物体
 """
-import os, sys, glob, argparse
+import os, sys, glob, argparse, time
 import numpy as np
 import trimesh
 import h5py
@@ -23,9 +23,9 @@ from scipy.spatial.transform import Rotation
 
 import json
 PROJ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-HP_DIR        = os.path.join(PROJ, 'data_hub', 'human_prior')
+HP_DIR        = os.path.join(PROJ, 'data_hub', 'ProcessedData', 'training_fp')  # 主要来源
 INFER_HP_DIR  = os.path.join(PROJ, 'data_hub', 'human_prior_infer')
-OUTPUT_DIR    = os.path.join(PROJ, 'output', 'grasps_random')
+OUTPUT_DIR    = os.path.join(PROJ, 'output', 'grasps_candidate')
 INFER_OUT_DIR = os.path.join(PROJ, 'output', 'grasps_infer')
 
 # ── 统一 Mesh 来源 ─────────────────────────────────────────────────────────────
@@ -55,18 +55,28 @@ ARCTIC_CANONICAL_ROT = {
                           [ 1, 0, 0]], dtype=np.float64),  # 长轴 X→Z, 竖立
 }
 MIN_GRIPPER_WIDTH = 0.005
-N_POINTS_PER_BATCH = 20     # 每批采样点数
-TARGET_HIGH_QUALITY = 20     # 目标高质量候选数
-SCORE_THRESHOLD = 75.0       # 高质量门槛
-MAX_BATCHES = 20             # 最大迭代批次（超大物体快速失败）
+# MAX_GRIPPER_OPEN = 0.08  已在上方第45行定义 (Franka 最大开口 8cm)
+N_POINTS_PER_BATCH  = 20     # 每批采样点数
+N_APPROACH_PER_PT   = 6      # 每个内部点随机采样的 approach 方向数
+TARGET_HIGH_QUALITY = 50     # 目标高质量候选数
+SCORE_THRESHOLD     = 70.0   # 高质量门槛 (R3 提高到 70)
+SKIP_AFTER_BATCHES  = 8      # 超过此批次仍无高质量候选 → 标记为难抓物体并跳过
+MAX_BATCHES         = 40     # 最大迭代批次
 
-# 4 个固定接近方向 (v4.1: 移除从下穿桌 + 背面不可达方向)
-APPROACH_DIRS = [
-    np.array([0, 0, -1], dtype=np.float32),  # 从上方 (top-down, 最稳定)
-    np.array([0, 1, 0], dtype=np.float32),   # 从机器人正面 (Franka 最可达)
-    np.array([1, 0, 0], dtype=np.float32),   # 从左侧
-    np.array([-1, 0, 0], dtype=np.float32),  # 从右侧
-]
+
+def sample_approach_dirs(n: int, z_min_cos: float = -0.1) -> list:
+    """
+    在可达半球随机均匀采样 n 个 approach 方向。
+    z_min_cos: approach_dir.z 的下限，-0.1 表示允许轻微向上但排除从正下方进入。
+    这样避免从桌面穿透，同时覆盖从侧面和上方的连续方向空间。
+    """
+    dirs = []
+    while len(dirs) < n:
+        v = np.random.randn(3).astype(np.float32)
+        v /= np.linalg.norm(v) + 1e-8
+        if v[2] >= z_min_cos:   # 不从正下方接近
+            dirs.append(v)
+    return dirs
 
 
 def load_canonical_rotations():
@@ -111,17 +121,32 @@ def list_dataset_objs(dataset):
     )
 
 
-def load_human_prior(obj_id, hp_dir=None):
-    """支持 oakink_{id} / arctic_{id} 等前缀命名."""
+def load_human_prior(obj_id, hp_dir=None, dataset=None):
+    """
+    加载 HumanPrior。搜索顺序:
+      1. ProcessedData/training_fp/{dataset}/{obj_id}.hdf5   (新格式 ★推荐)
+      2. ProcessedData/training_fp/oakink/{obj_id}.hdf5
+      3. {hp_dir}/{obj_id}.hdf5  (legacy)
+      4. {hp_dir}/oakink_{obj_id}.hdf5
+    """
+    # 候选路径列表
+    candidates = []
+
+    # 优先搜索 training_fp 各数据集子目录
+    for ds in ([dataset] if dataset else ['oakink', 'ycb', 'dexycb', 'arctic']):
+        candidates.append(os.path.join(TRAINING_FP_DIR, ds, f'{obj_id}.hdf5'))
+
+    # Legacy fallback
     if hp_dir is None:
         hp_dir = HP_DIR
-    for name in [
-        f'{obj_id}.hdf5',           # 原始: scissors.hdf5
-        f'oakink_{obj_id}.hdf5',    # OakInk 推理: oakink_A01001.hdf5
-        f'arctic_{obj_id}.hdf5',    # ARCTIC 推理: arctic_scissors.hdf5
-        f'grab_{obj_id}.hdf5',      # GRAB legacy
-    ]:
-        path = os.path.join(hp_dir, name)
+    candidates += [
+        os.path.join(hp_dir, f'{obj_id}.hdf5'),
+        os.path.join(hp_dir, f'oakink_{obj_id}.hdf5'),
+        os.path.join(hp_dir, f'arctic_{obj_id}.hdf5'),
+        os.path.join(hp_dir, f'grab_{obj_id}.hdf5'),
+    ]
+
+    for path in candidates:
         if os.path.exists(path):
             with h5py.File(path, 'r') as f:
                 return f['point_cloud'][()].astype(np.float32), f['human_prior'][()].astype(np.float32)
@@ -191,46 +216,48 @@ def make_rotation_matrix(approach, finger_dir):
     return R
 
 
-def score_candidate(mesh, width, approach, finger_dir, grasp_center, contact_L, contact_R, z_min, z_max):
-    """物理评分 v4.7: 反力(35%) + 重心对齐(25%) + 宽度(20%) + 可达性(20%).
-    
-    移除 flatness: 高精度扫描 mesh 曲面法线抖动 → 恒为 0, 无区分力。
-    保留 antipodal: 真正的力封闭条件, 对任意 mesh 都有意义。
+def score_candidate(mesh, width, approach, finger_dir, grasp_center,
+                    contact_L, contact_R, z_min, z_max, mesh_rc=None):
     """
+    物理评分 v5.1 (mesh_rc: 用简化 mesh 做法线查询，大幅加速高面数物体)
+    """
+    score_mesh = mesh_rc if mesh_rc is not None else mesh
+
     # === 1. 反力分 (Antipodal, 35%) ===
-    # 从接触面法线计算力封闭质量
-    # 理想: 两侧法线分别与 finger_dir 方向相反/相同 → dot 乘积接近 1
-    closest_L, _, tri_L = mesh.nearest.on_surface([contact_L])
-    closest_R, _, tri_R = mesh.nearest.on_surface([contact_R])
-    normal_L = mesh.face_normals[tri_L[0]]
-    normal_R = mesh.face_normals[tri_R[0]]
+    closest_L, _, tri_L = score_mesh.nearest.on_surface([contact_L])
+    closest_R, _, tri_R = score_mesh.nearest.on_surface([contact_R])
+    normal_L = score_mesh.face_normals[tri_L[0]]
+    normal_R = score_mesh.face_normals[tri_R[0]]
     antipodal_dot = -np.dot(normal_L, finger_dir) * np.dot(normal_R, finger_dir)
     antipodal_score = float(np.clip(antipodal_dot, 0, 1))
 
-    # === 2. 重心对齐分 (CoM Alignment, 25%) ===
-    com = mesh.center_mass
-    com_dist = np.linalg.norm(grasp_center - com)
-    obj_size = np.linalg.norm(mesh.bounds[1] - mesh.bounds[0])
-    com_score = float(np.clip(1.0 - com_dist / (obj_size * 0.5 + 1e-8), 0, 1))
+    # === 2. 中心轴对齐分 (Axis Alignment, 25%) ===
+    # 物体竖直中轴: 过 XY 重心、方向为世界 Z 轴的直线
+    # 越靠近中轴 → 抓取越对称，物体不易侧翻
+    centroid_xy = mesh.centroid[:2]
+    gc_xy = np.array(grasp_center[:2], dtype=np.float64)
+    dist_to_axis = float(np.linalg.norm(gc_xy - centroid_xy))
+    extents = mesh.bounds[1] - mesh.bounds[0]
+    xy_radius = float(max(extents[0], extents[1]) / 2.0 + 1e-8)
+    axis_score = float(np.clip(1.0 - dist_to_axis / xy_radius, 0, 1))
 
     # === 3. 宽度分 (Width, 20%) ===
-    # 2~5cm 最优 (中心 3.5cm)
     ws = float(np.clip(1.0 - abs(width - 0.035) / 0.045, 0, 1))
 
-    # === 4. Franka 可达性分 (Reachability, 20%) ===
+    # === 4. Franka 可达性分 (Reachability, 20%) — 连续评分 ===
+    # +Y 正前方最可达, 从下方 (-Z) 最难
+    # 用 approach 方向与理想方向的余弦相似度做连续评分
     app = np.array(approach, dtype=np.float32)
     app = app / (np.linalg.norm(app) + 1e-8)
-    if app[2] < -0.8:           # top-down [0,0,-1]
-        reach_score = 1.0
-    elif app[1] > 0.8:          # 从机器人正面 [0,+1,0]
-        reach_score = 0.85
-    elif abs(app[0]) > 0.8:     # 侧面 [±1,0,0]
-        reach_score = 0.60
-    else:
-        reach_score = 0.4
+    # 理想方向混合: 0.6×+Y + 0.4×-Z (正面偏顶部)
+    ideal = np.array([0.0, 0.6, -0.4], dtype=np.float32)
+    ideal /= np.linalg.norm(ideal)
+    cos_sim = float(np.dot(app, ideal))         # [-1, 1]
+    reach_score = float(np.clip((cos_sim + 1) / 2, 0, 1))  # → [0, 1]
 
+    # 合计: 0.35 + 0.25 + 0.20 + 0.20 = 1.00 → × 100
     return (0.35 * antipodal_score +
-            0.25 * com_score +
+            0.25 * axis_score +
             0.20 * ws +
             0.20 * reach_score) * 100
 
@@ -271,18 +298,19 @@ def check_finger_reachable(mesh, grasp_center, approach, max_finger_depth=0.04):
     return nearest_dist <= max_finger_depth
 
 
-def generate_one_batch(mesh, points, z_min, z_max):
+def generate_one_batch(mesh, points, z_min, z_max, mesh_rc=None):
     """从一批采样点生成候选并评分."""
     PALM_CLEARANCE  = 0.010   # 手掌到近端面最小间距 1cm
     FRANKA_FINGER_D = 0.040   # Franka 指深 4cm
 
+    rc = mesh_rc if mesh_rc is not None else mesh   # 简化 mesh 用于 raycast
     candidates = []
     for pt in points:
-        for approach in APPROACH_DIRS:
+        for approach in sample_approach_dirs(N_APPROACH_PER_PT):
             finger_dir = choose_finger_dir(approach)
 
-            hits_pos, _, _ = mesh.ray.intersects_location([pt], [finger_dir])
-            hits_neg, _, _ = mesh.ray.intersects_location([pt], [-finger_dir])
+            hits_pos, _, _ = rc.ray.intersects_location([pt], [finger_dir])
+            hits_neg, _, _ = rc.ray.intersects_location([pt], [-finger_dir])
 
             if len(hits_pos) == 0 or len(hits_neg) == 0:
                 continue
@@ -303,7 +331,7 @@ def generate_one_batch(mesh, points, z_min, z_max):
             # 手掌面在 grasp_center - approach*4cm
             # d_near > 4cm → 手掌面会顶进物体 → 丢弃
             FINGER_ACTIVE_DEPTH = 0.040   # = TCP_OFFSET(10.5) - palm_fixed(6.5)
-            hits_near, _, _ = mesh.ray.intersects_location(
+            hits_near, _, _ = rc.ray.intersects_location(
                 [grasp_center], [-approach]
             )
             if len(hits_near):
@@ -319,7 +347,8 @@ def generate_one_batch(mesh, points, z_min, z_max):
             gripper_width = float(np.clip(width + 0.005, 0.01, MAX_GRIPPER_OPEN))
             score = score_candidate(
                 mesh, width, approach, finger_dir,
-                grasp_center, nearest_neg, nearest_pos, z_min, z_max
+                grasp_center, nearest_neg, nearest_pos,
+                z_min, z_max, mesh_rc=rc
             )
 
             candidates.append({
@@ -339,7 +368,7 @@ def generate_one_batch(mesh, points, z_min, z_max):
     return candidates
 
 
-def generate_candidates_iterative(mesh, obj_id, hp_dir=None):
+def generate_candidates_iterative(mesh, obj_id, hp_dir=None, mesh_rc=None):
     """迭代生成候选, 直到有 TARGET_HIGH_QUALITY 个分数 > SCORE_THRESHOLD."""
     hp_pc, hp_labels = load_human_prior(obj_id, hp_dir=hp_dir)
     has_hp = hp_pc is not None and np.any(hp_labels > 0.5)
@@ -356,17 +385,23 @@ def generate_candidates_iterative(mesh, obj_id, hp_dir=None):
     
     for batch in range(MAX_BATCHES):
         pts = sample_points(mesh, hp_pc, hp_labels, N_POINTS_PER_BATCH, has_hp)
-        new_cands = generate_one_batch(mesh, pts, z_min, z_max)
+        new_cands = generate_one_batch(mesh, pts, z_min, z_max, mesh_rc=mesh_rc)
         all_candidates.extend(new_cands)
-        
+
         # 统计高质量候选
         high_quality = [c for c in all_candidates if c['score'] >= SCORE_THRESHOLD]
         hp_ratio = "50%HP+50%rnd" if has_hp else "100%rnd"
         print(f"    batch {batch+1}: +{len(new_cands)} 候选, "
               f"高质量≥{SCORE_THRESHOLD:.0f}分: {len(high_quality)}/{TARGET_HIGH_QUALITY} ({hp_ratio})")
-        
+
         if len(high_quality) >= TARGET_HIGH_QUALITY:
             break
+
+        # 快速放弃: 超过 SKIP_AFTER_BATCHES 批仍无高质量 → 物体难抓, 跳过
+        if batch + 1 >= SKIP_AFTER_BATCHES and len(high_quality) == 0:
+            print(f"  [SKIP] {batch+1} 批次 ({(batch+1)*N_POINTS_PER_BATCH} 个随机位置) 均无 ≥{SCORE_THRESHOLD:.0f} 分候选"
+                  f" → 标记为难抓物体")
+            return []   # 返回空 → 调用方写 .skip 标记
     
     # 按分数排序, 取 top TARGET_HIGH_QUALITY
     all_candidates.sort(key=lambda c: -c['score'])
@@ -560,8 +595,13 @@ def main():
 
         print(f'\n[{idx+1}/{len(obj_list)}] {obj_id}')
 
+        skip_path = os.path.join(_out_dir, f'{obj_id}.skip')
+        out_path  = os.path.join(_out_dir, f'{obj_id}_grasp.hdf5')
+
         if not args.force:
-            out_path = os.path.join(_out_dir, f'{obj_id}_grasp.hdf5')
+            if os.path.exists(skip_path):
+                print(f' ⏭️ [SKIP标记] 已知难抓物体')
+                continue
             if os.path.exists(out_path):
                 print(' ⏭️ (已生成)')
                 continue
@@ -597,19 +637,35 @@ def main():
             trimesh.repair.fix_normals(mesh)
 
         ext = mesh.bounding_box.extents * 100
-        print(f'  尺寸: {ext[0]:.1f}×{ext[1]:.1f}×{ext[2]:.1f} cm')
+        print(f'  尺寸: {ext[0]:.1f}×{ext[1]:.1f}×{ext[2]:.1f} cm  ({len(mesh.faces):,} 面)')
+
+        # ── Step 3: 简化 mesh 用于 raycast（加速 ~18×，几何精度足够）───────
+        # 原始高精度 PLY (~500K面) 做 raycast 极慢；简化到 5000 面精度已足够
+        # mesh.contains() 用原始 mesh（速度差不多），raycast 用简化 mesh
+        SIMPLIFY_TARGET = 5000
+        mesh_rc = None   # 默认: 不需要简化时直接用原始 mesh
+        if len(mesh.faces) > SIMPLIFY_TARGET * 2:
+            t_s = time.time()
+            mesh_rc = mesh.simplify_quadric_decimation(face_count=SIMPLIFY_TARGET)
+            if not mesh_rc.is_watertight:
+                trimesh.repair.fix_normals(mesh_rc)
+            print(f'  → 简化为 {len(mesh_rc.faces):,} 面 (raycast用, {time.time()-t_s:.2f}s)')
 
         # HP 从指定目录读取（支持 training_fp/ 直接读）
-        candidates = generate_candidates_iterative(mesh, hp_name, hp_dir=hp_dir_use)
+        candidates = generate_candidates_iterative(mesh, hp_name, hp_dir=hp_dir_use,
+                                                   mesh_rc=mesh_rc)
 
         if candidates:
             path = save_candidates_hdf5(candidates, obj_id, mesh_path, _out_dir)
             print(f'  ✅ → {os.path.basename(path)} ({len(candidates)} 候选)')
             generated += 1
-            if args.vis:
-                visualize_candidates(mesh, candidates, obj_id)
         else:
-            print(f'  ⚠️ 无有效候选')
+            # 无有效候选 → 写 .skip 标记，下次直接跳过
+            open(skip_path, 'w').write(f'SKIP: {SKIP_AFTER_BATCHES} batches, 0 candidates >= {SCORE_THRESHOLD}\n')
+            print(f'  ⬛ → {obj_id}.skip (难抓物体，已标记)')
+
+        if args.vis and candidates:
+            visualize_candidates(mesh, candidates, obj_id)
 
     print(f"\n{'='*60}")
     print(f'  完成! 生成 {generated}/{len(obj_list)} 个物体的候选')
