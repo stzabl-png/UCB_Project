@@ -64,17 +64,22 @@ SKIP_AFTER_BATCHES  = 8      # 超过此批次仍无高质量候选 → 标记�
 MAX_BATCHES         = 40     # 最大迭代批次
 
 
-def sample_approach_dirs(n: int, z_min_cos: float = -0.1) -> list:
+def sample_approach_dirs(n: int, z_max_cos: float = 0.3) -> list:
     """
-    在可达半球随机均匀采样 n 个 approach 方向。
-    z_min_cos: approach_dir.z 的下限，-0.1 表示允许轻微向上但排除从正下方进入。
-    这样避免从桌面穿透，同时覆盖从侧面和上方的连续方向空间。
+    在 canonical 坐标系（Z=竖直向上）中均匀采样 approach 方向。
+    
+    约定: approach 向量指向夹爪进入物体的方向
+      - approach.z < 0  → 从上往下 (top-down)  ✅ 允许
+      - approach.z ≈ 0  → 水平侧向              ✅ 允许
+      - approach.z > z_max_cos → 从下往上 (桌下穿入) ❌ 禁止
+    
+    z_max_cos=0.3 表示排除与+Z夹角<72°的向上方向（即wrist在物体正下方）。
     """
     dirs = []
     while len(dirs) < n:
         v = np.random.randn(3).astype(np.float32)
         v /= np.linalg.norm(v) + 1e-8
-        if v[2] >= z_min_cos:   # 不从正下方接近
+        if v[2] <= z_max_cos:   # 排除从桌底穿入的向上方向
             dirs.append(v)
     return dirs
 
@@ -429,6 +434,18 @@ def save_candidates_hdf5(candidates, obj_id, mesh_path, output_dir):
         m.attrs['obj_id'] = obj_id
         m.attrs['mesh_path'] = os.path.abspath(mesh_path)
         m.attrs['method'] = 'raycast_scored_v2'
+        # ★ canonical_rotation_applied=True 表示生成时已把 rotation.json 应用到 mesh 顶点
+        # 因此 grasp 坐标已在 canonical 系里，与 USD/Sim 完全一致，Sim 无需任何补偿
+        # mesh_prerotation_euler 必须存 [0,0,0]，否则 execute_grasp 会错误地再转一次
+        _dataset_m = 'dexycb' if obj_id.startswith('ycb_') else 'oakink'
+        import sys as _sys2; import os as _os2
+        _tdir = _os2.path.dirname(_os2.path.abspath(__file__))
+        if _tdir not in _sys2.path: _sys2.path.insert(0, _tdir)
+        from mesh_utils import get_canonical_euler as _gce
+        _euler = _gce(obj_id, _dataset_m)
+        m.attrs['mesh_prerotation_euler'] = [0.0, 0.0, 0.0]   # ← 不需要补偿
+        m.attrs['canonical_rotation_applied'] = any(abs(e) > 0.5 for e in _euler)
+        m.attrs['canonical_euler_info'] = _euler               # 仅供参考，不被 sim 使用
         
         cg = f.create_group('candidates')
         cg.attrs['n_candidates'] = len(candidates)
@@ -616,21 +633,22 @@ def main():
         if scale != 1.0:
             mesh.vertices *= scale
 
-        # ── Step 2: 应用 canonical rotation (SAM3D → 正确朝向) ────────────
-        rot_euler = canonical_rotations.get(obj_id)
-        if rot_euler is not None and any(abs(e) > 0.5 for e in rot_euler):
+        # ── Step 2: 应用 canonical rotation (与 USD/Sim 保持完全一致) ────────
+        # 来源: obj_meshes/{dataset}/{obj_id}/rotation.json (同 convert_obj_usd.py)
+        import sys as _sys
+        _tools_dir = os.path.dirname(os.path.abspath(__file__))
+        if _tools_dir not in _sys.path:
+            _sys.path.insert(0, _tools_dir)
+        from mesh_utils import get_canonical_euler as _get_euler
+        _dataset = 'dexycb' if obj_id.startswith('ycb_') else ('arctic' if args.arctic else 'oakink')
+        rot_euler = _get_euler(obj_id, _dataset)
+        if any(abs(e) > 0.5 for e in rot_euler):
             from scipy.spatial.transform import Rotation as _R
             R_mat = _R.from_euler('xyz', rot_euler, degrees=True).as_matrix()
             mesh.vertices = (R_mat @ mesh.vertices.T).T
-            print(f'     [canonical rot: {rot_euler}]')
-
-        # ARCTIC: 额外规范化旋转
-        if args.arctic:
-            obj_bare = obj_id.replace('arctic_', '')
-            R = ARCTIC_CANONICAL_ROT.get(obj_bare)
-            if R is not None:
-                mesh.vertices = (R @ mesh.vertices.T).T
-                print(f'     [canonical rot applied: {obj_bare}]')
+            print(f'     [canonical rot (rotation.json): {[round(e,1) for e in rot_euler]}°]')
+        else:
+            print(f'     [canonical rot: identity]')
 
         if not mesh.is_watertight:
             trimesh.repair.fill_holes(mesh)

@@ -32,6 +32,7 @@ args, _ = parser.parse_known_args()
 
 simulation_app = SimulationApp({"headless": args.headless})
 
+
 # render=True 在非 headless 模式显示流畅运动；headless 模式下 render=False 加速
 RENDER_SIM = not args.headless
 
@@ -264,19 +265,18 @@ def setup_scene(obj_id, object_scale):
     for _ in range(100):
         world.step(render=RENDER_SIM)
 
-    # cuRobo planning mesh (rigid-root local frame; pose synced each plan)
+    # ── cuRobo 规划用物体 mesh（规划层碰撞，不影响 PhysX）────────────────────
     scene_out = {"world": world, "franka": franka, "obj": obj}
     mesh_info = prepare_curobo_mesh(stage, obj.rigid_prim_path)
     if mesh_info is not None:
         scene_out["curobo_mesh_vertices"] = mesh_info["vertices"]
-        scene_out["curobo_mesh_faces"] = mesh_info["faces"]
+        scene_out["curobo_mesh_faces"]    = mesh_info["faces"]
         cprint(
             f"   ✅ cuRobo object mesh: {mesh_info['n_faces']} faces"
-            f" (from stage, raw {mesh_info['n_faces_raw']})",
-            "green",
+            f" (raw {mesh_info['n_faces_raw']})", "green"
         )
     else:
-        cprint("   ⚠️ cuRobo object mesh: extraction failed (table+ground only)", "yellow")
+        cprint("   ⚠️ cuRobo object mesh: 提取失败，仅用桌面+地面", "yellow")
 
     cprint("✅ Scene Ready", "green")
     return scene_out
@@ -331,7 +331,7 @@ def make_transform(pos, quat_wxyz):
 _CUROBO_MG = None
 
 def init_curobo(scene=None):
-    """初始化 cuRobo MotionGen."""
+    """初始化 cuRobo MotionGen (含物体 mesh 障碍物)."""
     import os as _os
     # ── 确保 ninja + nvcc 在 PATH，Isaac Sim python.sh 会覆盖环境 ──
     _extra = '/home/vision/isaacsim/kit/python/bin:/usr/local/cuda/bin'
@@ -343,19 +343,21 @@ def init_curobo(scene=None):
     _, T_robot_world = get_robot_base_transform()
 
     # 桌面障碍物 (变换到机器人底座坐标)
-    table_pos_r = (T_robot_world @ np.append(TABLE_POSITION, 1.0))[:3]
+    table_pos_r  = (T_robot_world @ np.append(TABLE_POSITION, 1.0))[:3]
     ground_pos_r = (T_robot_world @ np.array([0, 0, -0.005, 1.0]))[:3]
 
-    mesh_pose = None
-    mesh_verts = mesh_faces = None
+    # 记录到 scene 供 plan_trajectory 复用
+    if scene is not None:
+        scene["curobo_table_pos_r"]  = table_pos_r
+        scene["curobo_ground_pos_r"] = ground_pos_r
+
+    # 物体 mesh 障碍物 (可选)
+    mesh_verts = mesh_faces = mesh_pose = None
     if scene is not None and scene.get("curobo_mesh_vertices") is not None:
-        mesh_verts = scene["curobo_mesh_vertices"]
-        mesh_faces = scene["curobo_mesh_faces"]
+        mesh_verts  = scene["curobo_mesh_vertices"]
+        mesh_faces  = scene["curobo_mesh_faces"]
         pos_w, quat_wxyz = scene["obj"].get_obj_pos()
         mesh_pose = object_pose_robot_frame(pos_w, quat_wxyz, T_robot_world)
-    if scene is not None:
-        scene["curobo_table_pos_r"] = table_pos_r
-        scene["curobo_ground_pos_r"] = ground_pos_r
 
     world_config = build_world_config_dict(
         table_pos_r, ground_pos_r, TABLE_SCALE,
@@ -376,29 +378,29 @@ def init_curobo(scene=None):
     if mesh_verts is not None:
         cprint("   ✅ cuRobo ready (table + ground + object mesh)", "green")
     else:
-        cprint("   ✅ cuRobo ready", "green")
+        cprint("   ✅ cuRobo ready (table + ground only)", "green")
     return mg
 
 
 def plan_trajectory(motion_gen, franka, target_pos_world, target_quat_wxyz_world,
-                      label="", scene=None, use_object_mesh=True):
-    """cuRobo 规划无碰撞轨迹. 返回关节轨迹 (numpy) 或 None.
+                    label="", scene=None, use_object_mesh=True):
+    """cuRobo 规划无碰撞轨迹.
 
-    use_object_mesh: if False, planner sees table+ground only (final approach / last mile).
+    use_object_mesh=True  → pre-grasp/approach 阶段：cuRobo 包含物体 mesh 障碍
+    use_object_mesh=False → final approach/lift  阶段：仅桌面+地面，不阻挡夹爪接触
     """
     from curobo.types.math import Pose
     from curobo.types.robot import JointState as CuJointState
     from curobo.wrap.reacher.motion_gen import MotionGenPlanConfig
 
     _, T_robot_world = get_robot_base_transform()
+
+    # 每次规划前同步 cuRobo 碰撞世界
     if scene is not None:
-        table_pos_r = scene.get("curobo_table_pos_r")
-        ground_pos_r = scene.get("curobo_ground_pos_r")
-        if table_pos_r is None:
-            table_pos_r = (T_robot_world @ np.append(TABLE_POSITION, 1.0))[:3]
-            ground_pos_r = (T_robot_world @ np.array([0, 0, -0.005, 1.0]))[:3]
-            scene["curobo_table_pos_r"] = table_pos_r
-            scene["curobo_ground_pos_r"] = ground_pos_r
+        table_pos_r  = scene.get("curobo_table_pos_r",
+                                 (T_robot_world @ np.append(TABLE_POSITION, 1.0))[:3])
+        ground_pos_r = scene.get("curobo_ground_pos_r",
+                                 (T_robot_world @ np.array([0, 0, -0.005, 1.0]))[:3])
         include_mesh = use_object_mesh and scene.get("curobo_mesh_vertices") is not None
         sync_curobo_world(
             motion_gen, scene,
@@ -407,7 +409,7 @@ def plan_trajectory(motion_gen, franka, target_pos_world, target_quat_wxyz_world
             include_object_mesh=include_mesh,
         )
         if not use_object_mesh and scene.get("curobo_mesh_vertices") is not None:
-            cprint(f"      [{label}] cuRobo world: table+ground only (no object mesh)", "cyan")
+            cprint(f"      [{label}] cuRobo world: table+ground only (object mesh cleared)", "cyan")
     pos_r, quat_r = world_to_robot_pose(target_pos_world, target_quat_wxyz_world, T_robot_world)
 
     euler_r = Rotation.from_quat([quat_r[1], quat_r[2], quat_r[3], quat_r[0]]).as_euler('xyz', degrees=True)
@@ -565,7 +567,7 @@ def execute_grasp(scene, grasp_pos_obj, grasp_rot_obj, gripper_width, object_sca
     obj_init, _ = scene["obj"].get_obj_pos()
     initial_z = obj_init[2]
 
-    # ---- 初始化 cuRobo ----
+    # ---- 初始化 cuRobo (含物体 mesh 障碍物) ----
     if _CUROBO_MG is None:
         try:
             _CUROBO_MG = init_curobo(scene)
@@ -584,14 +586,16 @@ def execute_grasp(scene, grasp_pos_obj, grasp_rot_obj, gripper_width, object_sca
     pre_grasp_offset = 0.15  # 15cm
     pre_grasp_pos = pos_world - approach_dir * pre_grasp_offset
 
-    cprint(f"   → [1/5] Planning to pre-grasp point...", "yellow")
+    cprint(f"   → [1/5] Planning to pre-grasp point (with object mesh)...", "yellow")
     cprint(f"      pre-grasp: [{pre_grasp_pos[0]:.4f}, {pre_grasp_pos[1]:.4f}, {pre_grasp_pos[2]:.4f}]", "magenta")
-    traj = plan_trajectory(_CUROBO_MG, franka, pre_grasp_pos, quat_wxyz, label="pre-grasp", scene=scene)
+    traj = plan_trajectory(_CUROBO_MG, franka, pre_grasp_pos, quat_wxyz,
+                           label="pre-grasp", scene=scene, use_object_mesh=True)
 
     if traj is None:
         # Fallback: 直接规划到抓取点
         cprint(f"   → Pre-grasp 失败, 直接规划到抓取点...", "yellow")
-        traj = plan_trajectory(_CUROBO_MG, franka, pos_world, quat_wxyz, label="direct", scene=scene)
+        traj = plan_trajectory(_CUROBO_MG, franka, pos_world, quat_wxyz,
+                               label="direct", scene=scene, use_object_mesh=True)
 
     if traj is None:
         cprint(f"   ❌ cuRobo 规划全部失败", "red")
@@ -609,12 +613,10 @@ def execute_grasp(scene, grasp_pos_obj, grasp_rot_obj, gripper_width, object_sca
     for _ in range(10):
         world.step(render=RENDER_SIM)
 
-    # ---- Phase 3: 从预抓取点缓慢推进到抓取点 (cuRobo, no object mesh — last mile) ----
-    cprint(f"   → [3/5] Final approach (cuRobo, table+ground only)...", "yellow")
-    traj_final = plan_trajectory(
-        _CUROBO_MG, franka, pos_world, quat_wxyz,
-        label="final", scene=scene, use_object_mesh=False,
-    )
+    # ---- Phase 3: 最后接近 (清除物体 mesh — 让夹爪能碰到物体) ----
+    cprint(f"   → [3/5] Final approach (table+ground only, no object mesh)...", "yellow")
+    traj_final = plan_trajectory(_CUROBO_MG, franka, pos_world, quat_wxyz,
+                                 label="final", scene=scene, use_object_mesh=False)
     if traj_final is not None:
         for joint_pos in traj_final:
             gripper = franka.get_joint_positions()[7:9]
@@ -682,12 +684,10 @@ def execute_grasp(scene, grasp_pos_obj, grasp_rot_obj, gripper_width, object_sca
         else:
             cprint(f"      ✅ 夹爪稳定 (变化 {delta*100:.3f}cm)", "green")
 
-    # ---- Phase 5: 提起 (夹爪由控制器维持力; no object mesh — object moves with gripper) ----
-    cprint(f"   → [5/5] Planning lift (table+ground only)...", "yellow")
-    traj_lift = plan_trajectory(
-        _CUROBO_MG, franka, lift_pos, quat_wxyz,
-        label="lift", scene=scene, use_object_mesh=False,
-    )
+    # ---- Phase 5: 提起 (物体 mesh 仍清除 — 物体随夹爪一起移动) ----
+    cprint(f"   → [5/5] Planning lift (no object mesh)...", "yellow")
+    traj_lift = plan_trajectory(_CUROBO_MG, franka, lift_pos, quat_wxyz,
+                                label="lift", scene=scene, use_object_mesh=False)
 
     if traj_lift is not None:
         cprint(f"   ✅ Lift trajectory: {len(traj_lift)} steps", "green")

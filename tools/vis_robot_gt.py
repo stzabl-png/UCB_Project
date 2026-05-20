@@ -11,11 +11,15 @@ import trimesh
 import h5py
 
 PROJ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(PROJ, 'tools'))
+from mesh_utils import load_mesh_canonical, find_ply
+
 MESH_DIR = os.path.join(PROJ, 'data_hub', 'meshes', 'v1')          # legacy .obj
 PROC_MESH_DIR = os.path.join(PROJ, 'data_hub', 'ProcessedData', 'obj_meshes')  # .ply
 GT_DIRS = [
     os.path.join(PROJ, 'output', 'robot_gt_merged_oakink'),  # ★ 最新合并 (优先)
     os.path.join(PROJ, 'output', 'robot_gt_merged_dexycb'),  # ★ 最新合并 (优先)
+    os.path.join(PROJ, 'output', 'robot_gt_r3'),
     os.path.join(PROJ, 'output', 'robot_gt_verified'),
     os.path.join(PROJ, 'output', 'robot_gt_v1_manual'),
     os.path.join(PROJ, 'output', 'robot_gt_v2_raycast'),
@@ -35,15 +39,21 @@ def find_mesh(obj_id):
 
 
 def vis_single(obj_id):
-    """可视化单个物体的 Robot GT: 用 raycast 计算真实表面接触点."""
+    """可视化单个物体的 Robot GT: 用 canonical mesh (与 USD/Sim 一致) 做 raycast."""
     import open3d as o3d
-    mesh_path = find_mesh(obj_id)
-    if not mesh_path:
-        print(f"❌ mesh 不存在: {obj_id}"); return
-    
-    # 加载 mesh 用于 raycast
-    mesh = trimesh.load(mesh_path, force='mesh')
-    
+
+    # 加载 canonical mesh（与 USD/Sim 完全对齐）
+    _dataset = 'dexycb' if obj_id.startswith('ycb_') else 'oakink'
+    _ply, _ds = find_ply(obj_id, _dataset)
+    if _ply is not None:
+        mesh = load_mesh_canonical(obj_id, _ds, verbose=True)
+    else:
+        legacy = os.path.join(MESH_DIR, f'{obj_id}.obj')
+        if not os.path.exists(legacy):
+            print(f'❌ mesh 不存在: {obj_id}'); return
+        mesh = trimesh.load(legacy, force='mesh')
+
+
     grasp_data = []  # list of {mid, c1, c2, name}
     
     for gt_dir in GT_DIRS:
@@ -65,11 +75,11 @@ def vis_single(obj_id):
                 ad = g['approach_dir'][:] if 'approach_dir' in g else None
                 fd = g['finger_dir'][:] if 'finger_dir' in g else None
                 w = g.attrs.get('gripper_width', 0.04)
-                
+
                 if ad is None or fd is None:
                     print(f"    ⚠️ {name}: 缺少方向数据, 跳过")
                     continue
-                
+
                 # 手指中点 = TCP + approach × 10.5cm
                 finger_mid = gp + ad * 0.105
                 
@@ -101,7 +111,15 @@ def vis_single(obj_id):
                 else:
                     print(f"    🤖 {name}: w={w*100:.1f}cm ❌ 无接触点")
                 
-                grasp_data.append({'mid': finger_mid, 'c1': c1, 'c2': c2, 'name': name})
+                grasp_data.append({
+                    'mid':          finger_mid,
+                    'c1':           c1,
+                    'c2':           c2,
+                    'name':         name,
+                    'approach_dir': ad,
+                    'finger_dir':   fd,
+                    'gripper_width': w,
+                })
         
         if grasp_data:
             break  # 优先使用第一个有数据的 GT 源
@@ -110,50 +128,65 @@ def vis_single(obj_id):
         print(f"⚠️ {obj_id} 没有成功的 Robot GT"); return
     
     print(f"\n打开 Open3D ({len(grasp_data)} 个GT)...")
-    
+
     geometries = []
-    
-    # 物体线框
-    o3d_mesh = o3d.io.read_triangle_mesh(mesh_path)
+
+    # 物体线框 (canonical 坐标系，与 USD/Sim 完全一致)
+    o3d_mesh = o3d.geometry.TriangleMesh()
+    o3d_mesh.vertices = o3d.utility.Vector3dVector(mesh.vertices)
+    o3d_mesh.triangles = o3d.utility.Vector3iVector(mesh.faces)
     o3d_mesh.compute_vertex_normals()
     wireframe = o3d.geometry.LineSet.create_from_triangle_mesh(o3d_mesh)
-    wireframe.paint_uniform_color([0.5, 0.5, 0.5])
+    wireframe.paint_uniform_color([0.6, 0.6, 0.6])
     geometries.append(wireframe)
-    
+
+    def add_sphere(pos, r, color):
+        s = o3d.geometry.TriangleMesh.create_sphere(radius=r)
+        s.translate(pos); s.paint_uniform_color(color); s.compute_vertex_normals()
+        geometries.append(s)
+
+    def add_line(p0, p1, color):
+        ls = o3d.geometry.LineSet()
+        ls.points = o3d.utility.Vector3dVector([p0, p1])
+        ls.lines  = o3d.utility.Vector2iVector([[0, 1]])
+        ls.colors = o3d.utility.Vector3dVector([color])
+        geometries.append(ls)
+
     for gd in grasp_data:
-        mid = gd['mid']
-        # 蓝色球: 抓取中点
-        sp = o3d.geometry.TriangleMesh.create_sphere(radius=0.003)
-        sp.translate(mid)
-        sp.paint_uniform_color([0.0, 0.3, 1.0])
-        sp.compute_vertex_normals()
-        geometries.append(sp)
-        
+        mid  = gd['mid']   # 指尖中点 (TCP + approach*0.105)
+        ad   = gd.get('approach_dir')
+        fd   = gd.get('finger_dir')
+        w    = gd.get('gripper_width', 0.04)
         c1, c2 = gd['c1'], gd['c2']
-        pts_for_lines = [mid]
-        
-        # 红色球: 表面接触点
-        for cp in [c1, c2]:
-            if cp is not None:
-                s = o3d.geometry.TriangleMesh.create_sphere(radius=0.003)
-                s.translate(cp)
-                s.paint_uniform_color([1.0, 0.0, 0.0])
-                s.compute_vertex_normals()
-                geometries.append(s)
-                pts_for_lines.append(cp)
-        
-        # 绿线: 中点 ↔ 接触点
-        if len(pts_for_lines) > 1:
-            pts = np.array(pts_for_lines)
-            lines = [[0, i] for i in range(1, len(pts))]
-            ls = o3d.geometry.LineSet()
-            ls.points = o3d.utility.Vector3dVector(pts)
-            ls.lines = o3d.utility.Vector2iVector(lines)
-            ls.colors = o3d.utility.Vector3dVector([[0, 1, 0]] * len(lines))
-            geometries.append(ls)
-    
-    o3d.visualization.draw_geometries(geometries, 
-        window_name=f"Robot GT — {obj_id} ({len(grasp_data)} grasps)")
+
+        # 🟡 黄色球: 指尖中点 (force_center)
+        add_sphere(mid, 0.004, [1.0, 0.85, 0.0])
+
+        # 🔴🔵 左右接触点
+        if c1 is not None: add_sphere(c1, 0.003, [0.9, 0.15, 0.15])
+        if c2 is not None: add_sphere(c2, 0.003, [0.15, 0.3, 0.95])
+
+        # ━ 夹爪横杆 (接触点之间)
+        if c1 is not None and c2 is not None:
+            add_line(c1, c2, [0.2, 0.85, 0.2])
+
+        # ↑ approach 方向箭头 (绿色, 从 TCP 指向物体)
+        if ad is not None:
+            tcp = mid - ad * 0.105          # 手腕位置
+            add_sphere(tcp, 0.003, [0.9, 0.6, 0.1])  # 🟠 手腕
+            add_line(tcp, mid, [0.1, 0.9, 0.3])       # 绿色 approach 线
+
+        # ← finger_dir 横向 (青色, 表示夹爪方向)
+        if fd is not None:
+            tl = mid - fd * w / 2
+            tr = mid + fd * w / 2
+            add_line(tl, tr, [0.2, 0.85, 0.85])
+
+    o3d.visualization.draw_geometries(
+        geometries,
+        window_name=f"Robot GT — {obj_id} ({len(grasp_data)} grasps)  "
+                    f"🟡指尖中心  🔴🔵接触点  🟢approach  🟠手腕  青=夹爪宽"
+    )
 
 
 def summary_all():
@@ -201,16 +234,22 @@ def summary_all():
 
 def main():
     parser = argparse.ArgumentParser(description='Robot GT 可视化')
-    parser.add_argument('--obj', help='可视化单个物体')
-    parser.add_argument('--all', action='store_true', help='汇总所有统计')
+    parser.add_argument('--obj',    help='可视化单个物体')
+    parser.add_argument('--all',    action='store_true', help='汇总所有统计')
+    parser.add_argument('--gt_dir', help='指定 robot_gt 目录 (默认搜索所有标准目录)')
     args = parser.parse_args()
-    
+
+    if args.gt_dir:
+        # 临时覆盖全局 GT_DIRS
+        global GT_DIRS
+        GT_DIRS = [os.path.abspath(args.gt_dir)]
+
     if args.all:
         summary_all()
     elif args.obj:
         vis_single(args.obj)
     else:
-        print("用法: --all 查看汇总, --obj ID 可视化单个")
+        print("用法: --all 查看汇总, --obj ID 可视化单个, --gt_dir 指定目录")
 
 
 if __name__ == '__main__':

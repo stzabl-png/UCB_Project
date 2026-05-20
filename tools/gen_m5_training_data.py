@@ -14,6 +14,8 @@
     python3 tools/gen_m5_training_data.py
 """
 import os, sys, glob, h5py, numpy as np, trimesh
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__))))
+from mesh_utils import load_mesh_canonical, find_ply
 
 PROJ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MESH_DIR = os.path.join(PROJ, 'data_hub', 'meshes', 'v1')  # legacy .obj (可能为空)
@@ -130,8 +132,18 @@ def compute_robot_gt_label(mesh, points, grasps):
 
 
 def process_object(obj_id, mesh_path):
-    """处理单个物体."""
-    mesh = trimesh.load(mesh_path, force='mesh')
+    """处理单个物体.
+    mesh 加载时应用 canonical rotation，与 USD/Sim 完全一致。
+    """
+    # 判断 dataset
+    _dataset = 'dexycb' if obj_id.startswith('ycb_') else 'oakink'
+    _ply, _ds = find_ply(obj_id, _dataset)
+    if _ply is not None:
+        # 使用 canonical mesh（与 USD/Sim 完全对齐）
+        mesh = load_mesh_canonical(obj_id, _ds, verbose=True)
+    else:
+        # fallback: legacy .obj
+        mesh = trimesh.load(mesh_path, force='mesh')
 
     # 优先使用 Human Prior 的点云
     hp_pc, hp_nrm, hp_labels = load_human_prior(obj_id)
