@@ -63,6 +63,7 @@ for _curobo_candidate in [
 from env_config.robot.Franka import Franka
 from env_config.room.Real_Ground import Real_Ground
 from env_config.rigid.RigidObject import RigidObject
+from curobo_world import prepare_curobo_mesh, build_world_config_dict, sync_curobo_world, object_pose_robot_frame
 
 
 # ============================================================
@@ -263,8 +264,22 @@ def setup_scene(obj_id, object_scale):
     for _ in range(100):
         world.step(render=RENDER_SIM)
 
+    # cuRobo planning mesh (rigid-root local frame; pose synced each plan)
+    scene_out = {"world": world, "franka": franka, "obj": obj}
+    mesh_info = prepare_curobo_mesh(stage, obj.rigid_prim_path)
+    if mesh_info is not None:
+        scene_out["curobo_mesh_vertices"] = mesh_info["vertices"]
+        scene_out["curobo_mesh_faces"] = mesh_info["faces"]
+        cprint(
+            f"   ✅ cuRobo object mesh: {mesh_info['n_faces']} faces"
+            f" (from stage, raw {mesh_info['n_faces_raw']})",
+            "green",
+        )
+    else:
+        cprint("   ⚠️ cuRobo object mesh: extraction failed (table+ground only)", "yellow")
+
     cprint("✅ Scene Ready", "green")
-    return {"world": world, "franka": franka, "obj": obj}
+    return scene_out
 
 
 # ============================================================
@@ -315,7 +330,7 @@ def make_transform(pos, quat_wxyz):
 # ============================================================
 _CUROBO_MG = None
 
-def init_curobo():
+def init_curobo(scene=None):
     """初始化 cuRobo MotionGen."""
     import os as _os
     # ── 确保 ninja + nvcc 在 PATH，Isaac Sim python.sh 会覆盖环境 ──
@@ -331,37 +346,68 @@ def init_curobo():
     table_pos_r = (T_robot_world @ np.append(TABLE_POSITION, 1.0))[:3]
     ground_pos_r = (T_robot_world @ np.array([0, 0, -0.005, 1.0]))[:3]
 
-    world_config = {
-        "cuboid": {
-            "table": {
-                "dims": [TABLE_SCALE[0], TABLE_SCALE[1], TABLE_SCALE[2]],
-                "pose": [*table_pos_r.tolist(), 1, 0, 0, 0],
-            },
-            "ground": {
-                "dims": [5.0, 5.0, 0.01],
-                "pose": [*ground_pos_r.tolist(), 1, 0, 0, 0],
-            },
-        },
-    }
+    mesh_pose = None
+    mesh_verts = mesh_faces = None
+    if scene is not None and scene.get("curobo_mesh_vertices") is not None:
+        mesh_verts = scene["curobo_mesh_vertices"]
+        mesh_faces = scene["curobo_mesh_faces"]
+        pos_w, quat_wxyz = scene["obj"].get_obj_pos()
+        mesh_pose = object_pose_robot_frame(pos_w, quat_wxyz, T_robot_world)
+    if scene is not None:
+        scene["curobo_table_pos_r"] = table_pos_r
+        scene["curobo_ground_pos_r"] = ground_pos_r
+
+    world_config = build_world_config_dict(
+        table_pos_r, ground_pos_r, TABLE_SCALE,
+        mesh_vertices=mesh_verts, mesh_faces=mesh_faces, mesh_pose_robot=mesh_pose,
+    )
+
+    load_kwargs = {"interpolation_dt": 0.02}
+    if mesh_verts is not None:
+        load_kwargs["collision_cache"] = {"obb": 4, "mesh": 4}
 
     mg_config = MotionGenConfig.load_from_robot_config(
-        "franka.yml", world_config, interpolation_dt=0.02,
+        "franka.yml", world_config, **load_kwargs,
     )
     mg = MotionGen(mg_config)
 
     cprint("   → cuRobo warmup...", "yellow")
     mg.warmup()
-    cprint("   ✅ cuRobo ready", "green")
+    if mesh_verts is not None:
+        cprint("   ✅ cuRobo ready (table + ground + object mesh)", "green")
+    else:
+        cprint("   ✅ cuRobo ready", "green")
     return mg
 
 
-def plan_trajectory(motion_gen, franka, target_pos_world, target_quat_wxyz_world, label=""):
-    """cuRobo 规划无碰撞轨迹. 返回关节轨迹 (numpy) 或 None."""
+def plan_trajectory(motion_gen, franka, target_pos_world, target_quat_wxyz_world,
+                      label="", scene=None, use_object_mesh=True):
+    """cuRobo 规划无碰撞轨迹. 返回关节轨迹 (numpy) 或 None.
+
+    use_object_mesh: if False, planner sees table+ground only (final approach / last mile).
+    """
     from curobo.types.math import Pose
     from curobo.types.robot import JointState as CuJointState
     from curobo.wrap.reacher.motion_gen import MotionGenPlanConfig
 
     _, T_robot_world = get_robot_base_transform()
+    if scene is not None:
+        table_pos_r = scene.get("curobo_table_pos_r")
+        ground_pos_r = scene.get("curobo_ground_pos_r")
+        if table_pos_r is None:
+            table_pos_r = (T_robot_world @ np.append(TABLE_POSITION, 1.0))[:3]
+            ground_pos_r = (T_robot_world @ np.array([0, 0, -0.005, 1.0]))[:3]
+            scene["curobo_table_pos_r"] = table_pos_r
+            scene["curobo_ground_pos_r"] = ground_pos_r
+        include_mesh = use_object_mesh and scene.get("curobo_mesh_vertices") is not None
+        sync_curobo_world(
+            motion_gen, scene,
+            table_pos_r, ground_pos_r,
+            TABLE_SCALE, T_robot_world,
+            include_object_mesh=include_mesh,
+        )
+        if not use_object_mesh and scene.get("curobo_mesh_vertices") is not None:
+            cprint(f"      [{label}] cuRobo world: table+ground only (no object mesh)", "cyan")
     pos_r, quat_r = world_to_robot_pose(target_pos_world, target_quat_wxyz_world, T_robot_world)
 
     euler_r = Rotation.from_quat([quat_r[1], quat_r[2], quat_r[3], quat_r[0]]).as_euler('xyz', degrees=True)
@@ -522,7 +568,7 @@ def execute_grasp(scene, grasp_pos_obj, grasp_rot_obj, gripper_width, object_sca
     # ---- 初始化 cuRobo ----
     if _CUROBO_MG is None:
         try:
-            _CUROBO_MG = init_curobo()
+            _CUROBO_MG = init_curobo(scene)
         except Exception as e:
             cprint(f"   ❌ cuRobo init failed: {e}", "red")
             return False
@@ -540,12 +586,12 @@ def execute_grasp(scene, grasp_pos_obj, grasp_rot_obj, gripper_width, object_sca
 
     cprint(f"   → [1/5] Planning to pre-grasp point...", "yellow")
     cprint(f"      pre-grasp: [{pre_grasp_pos[0]:.4f}, {pre_grasp_pos[1]:.4f}, {pre_grasp_pos[2]:.4f}]", "magenta")
-    traj = plan_trajectory(_CUROBO_MG, franka, pre_grasp_pos, quat_wxyz, label="pre-grasp")
+    traj = plan_trajectory(_CUROBO_MG, franka, pre_grasp_pos, quat_wxyz, label="pre-grasp", scene=scene)
 
     if traj is None:
         # Fallback: 直接规划到抓取点
         cprint(f"   → Pre-grasp 失败, 直接规划到抓取点...", "yellow")
-        traj = plan_trajectory(_CUROBO_MG, franka, pos_world, quat_wxyz, label="direct")
+        traj = plan_trajectory(_CUROBO_MG, franka, pos_world, quat_wxyz, label="direct", scene=scene)
 
     if traj is None:
         cprint(f"   ❌ cuRobo 规划全部失败", "red")
@@ -563,9 +609,12 @@ def execute_grasp(scene, grasp_pos_obj, grasp_rot_obj, gripper_width, object_sca
     for _ in range(10):
         world.step(render=RENDER_SIM)
 
-    # ---- Phase 3: 从预抓取点缓慢推进到抓取点 (cuRobo) ----
-    cprint(f"   → [3/5] Final approach (cuRobo)...", "yellow")
-    traj_final = plan_trajectory(_CUROBO_MG, franka, pos_world, quat_wxyz, label="final")
+    # ---- Phase 3: 从预抓取点缓慢推进到抓取点 (cuRobo, no object mesh — last mile) ----
+    cprint(f"   → [3/5] Final approach (cuRobo, table+ground only)...", "yellow")
+    traj_final = plan_trajectory(
+        _CUROBO_MG, franka, pos_world, quat_wxyz,
+        label="final", scene=scene, use_object_mesh=False,
+    )
     if traj_final is not None:
         for joint_pos in traj_final:
             gripper = franka.get_joint_positions()[7:9]
@@ -633,9 +682,12 @@ def execute_grasp(scene, grasp_pos_obj, grasp_rot_obj, gripper_width, object_sca
         else:
             cprint(f"      ✅ 夹爪稳定 (变化 {delta*100:.3f}cm)", "green")
 
-    # ---- Phase 5: 提起 (夹爪由控制器维持力) ----
-    cprint(f"   → [5/5] Planning lift...", "yellow")
-    traj_lift = plan_trajectory(_CUROBO_MG, franka, lift_pos, quat_wxyz, label="lift")
+    # ---- Phase 5: 提起 (夹爪由控制器维持力; no object mesh — object moves with gripper) ----
+    cprint(f"   → [5/5] Planning lift (table+ground only)...", "yellow")
+    traj_lift = plan_trajectory(
+        _CUROBO_MG, franka, lift_pos, quat_wxyz,
+        label="lift", scene=scene, use_object_mesh=False,
+    )
 
     if traj_lift is not None:
         cprint(f"   ✅ Lift trajectory: {len(traj_lift)} steps", "green")
