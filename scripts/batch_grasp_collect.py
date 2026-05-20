@@ -570,7 +570,8 @@ def main():
     )
     parser.add_argument("--max-rounds", type=int, default=1, help="轮数 (每轮先全量 gen 再全量 sim)")
     parser.add_argument("--max-candidates", type=int, default=None, help="sim 最多尝试数")
-    parser.add_argument("--sim-timeout", type=int, default=900, help="单次 sim 超时秒")
+    parser.add_argument("--sim-timeout", type=int, default=2400,
+                        help="单次 sim 超时秒 (默认 2400 = 40 分钟)")
     parser.add_argument("--rotation", action="store_true",
                         help="应用 rotation.json (默认: 不旋转)")
     parser.add_argument("--no-convert", action="store_true", help="跳过 convert_obj_usd")
