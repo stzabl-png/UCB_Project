@@ -158,12 +158,25 @@ def load_human_prior(obj_id, hp_dir=None, dataset=None):
     return None, None
 
 
-def sample_points(mesh, hp_pc, hp_labels, n_total, has_hp):
+def _points_inside(mesh, pts: np.ndarray) -> np.ndarray:
+    """mesh.contains 在部分高面数/非封闭 SAM3D mesh 上会触发 trimesh ray IndexError。"""
+    if len(pts) == 0:
+        return np.array([], dtype=bool)
+    try:
+        return mesh.contains(pts)
+    except (IndexError, ValueError) as e:
+        print(f"  [warn] mesh.contains failed ({e}); fallback bbox-only sampling")
+        return np.ones(len(pts), dtype=bool)
+
+
+def sample_points(mesh, hp_pc, hp_labels, n_total, has_hp, mesh_contains=None):
     """50% Human-Prior-guided + 50% 纯随机采样.
     
     HP-guided: 在 human_prior > 0.3 的顶点附近 ±5mm jitter, 找 mesh 内部点.
     随机:      在 bbox 内均匀随机采样, 取 mesh 内部点.
+    mesh_contains: 用于 contains 检测的 mesh（默认 mesh；建议传简化后的 mesh_rc）
     """
+    m_in = mesh_contains if mesh_contains is not None else mesh
     points = []
 
     # ── 50% HP-guided ──────────────────────────────────────────
@@ -181,7 +194,7 @@ def sample_points(mesh, hp_pc, hp_labels, n_total, has_hp):
             jitter = np.random.randn(*chosen.shape) * 0.005
             candidates = chosen + jitter
             # 只保留在 mesh 内部的点
-            inside = mesh.contains(candidates)
+            inside = _points_inside(m_in, candidates)
             for p in candidates[inside][:n_hp]:
                 points.append(p.astype(np.float32))
 
@@ -192,7 +205,7 @@ def sample_points(mesh, hp_pc, hp_labels, n_total, has_hp):
     if n_rand > 0:
         bbox_min, bbox_max = mesh.bounds[0], mesh.bounds[1]
         all_pts = np.random.uniform(bbox_min, bbox_max, size=(n_rand * 20, 3))
-        inside = mesh.contains(all_pts)
+        inside = _points_inside(m_in, all_pts)
         for p in all_pts[inside][:n_rand]:
             points.append(p.astype(np.float32))
 
@@ -373,8 +386,18 @@ def generate_one_batch(mesh, points, z_min, z_max, mesh_rc=None):
     return candidates
 
 
-def generate_candidates_iterative(mesh, obj_id, hp_dir=None, mesh_rc=None):
-    """迭代生成候选, 直到有 TARGET_HIGH_QUALITY 个分数 > SCORE_THRESHOLD."""
+def generate_candidates_iterative(
+    mesh,
+    obj_id,
+    hp_dir=None,
+    mesh_rc=None,
+    target_n=None,
+    score_threshold=None,
+):
+    """迭代生成候选, 直到有 target_n 个分数 > score_threshold."""
+    target_n = TARGET_HIGH_QUALITY if target_n is None else target_n
+    score_threshold = SCORE_THRESHOLD if score_threshold is None else score_threshold
+
     hp_pc, hp_labels = load_human_prior(obj_id, hp_dir=hp_dir)
     has_hp = hp_pc is not None and np.any(hp_labels > 0.5)
 
@@ -388,29 +411,32 @@ def generate_candidates_iterative(mesh, obj_id, hp_dir=None, mesh_rc=None):
     z_min, z_max = mesh.bounds[0][2], mesh.bounds[1][2]
     all_candidates = []
     
+    m_contains = mesh_rc if mesh_rc is not None else mesh
     for batch in range(MAX_BATCHES):
-        pts = sample_points(mesh, hp_pc, hp_labels, N_POINTS_PER_BATCH, has_hp)
+        pts = sample_points(
+            mesh, hp_pc, hp_labels, N_POINTS_PER_BATCH, has_hp, mesh_contains=m_contains,
+        )
         new_cands = generate_one_batch(mesh, pts, z_min, z_max, mesh_rc=mesh_rc)
         all_candidates.extend(new_cands)
 
         # 统计高质量候选
-        high_quality = [c for c in all_candidates if c['score'] >= SCORE_THRESHOLD]
+        high_quality = [c for c in all_candidates if c['score'] >= score_threshold]
         hp_ratio = "50%HP+50%rnd" if has_hp else "100%rnd"
         print(f"    batch {batch+1}: +{len(new_cands)} 候选, "
-              f"高质量≥{SCORE_THRESHOLD:.0f}分: {len(high_quality)}/{TARGET_HIGH_QUALITY} ({hp_ratio})")
+              f"高质量≥{score_threshold:.0f}分: {len(high_quality)}/{target_n} ({hp_ratio})")
 
-        if len(high_quality) >= TARGET_HIGH_QUALITY:
+        if len(high_quality) >= target_n:
             break
 
         # 快速放弃: 超过 SKIP_AFTER_BATCHES 批仍无高质量 → 物体难抓, 跳过
         if batch + 1 >= SKIP_AFTER_BATCHES and len(high_quality) == 0:
-            print(f"  [SKIP] {batch+1} 批次 ({(batch+1)*N_POINTS_PER_BATCH} 个随机位置) 均无 ≥{SCORE_THRESHOLD:.0f} 分候选"
+            print(f"  [SKIP] {batch+1} 批次 ({(batch+1)*N_POINTS_PER_BATCH} 个随机位置) 均无 ≥{score_threshold:.0f} 分候选"
                   f" → 标记为难抓物体")
             return []   # 返回空 → 调用方写 .skip 标记
     
-    # 按分数排序, 取 top TARGET_HIGH_QUALITY
+    # 按分数排序, 取 top target_n
     all_candidates.sort(key=lambda c: -c['score'])
-    selected = all_candidates[:TARGET_HIGH_QUALITY]
+    selected = all_candidates[:target_n]
     
     # 重命名
     for i, c in enumerate(selected):
@@ -425,7 +451,7 @@ def generate_candidates_iterative(mesh, obj_id, hp_dir=None, mesh_rc=None):
     return selected
 
 
-def save_candidates_hdf5(candidates, obj_id, mesh_path, output_dir):
+def save_candidates_hdf5(candidates, obj_id, mesh_path, output_dir, no_rotation=False):
     os.makedirs(output_dir, exist_ok=True)
     path = os.path.join(output_dir, f'{obj_id}_grasp.hdf5')
     
@@ -434,19 +460,18 @@ def save_candidates_hdf5(candidates, obj_id, mesh_path, output_dir):
         m.attrs['obj_id'] = obj_id
         m.attrs['mesh_path'] = os.path.abspath(mesh_path)
         m.attrs['method'] = 'raycast_scored_v2'
-        # ★ canonical_rotation_applied=True 表示生成时已把 rotation.json 应用到 mesh 顶点
-        # 因此 grasp 坐标已在 canonical 系里，与 USD/Sim 完全一致，Sim 无需任何补偿
-        # mesh_prerotation_euler 必须存 [0,0,0]，否则 execute_grasp 会错误地再转一次
+        m.attrs['no_rotation'] = bool(no_rotation)
         _dataset_m = 'dexycb' if obj_id.startswith('ycb_') else 'oakink'
         import sys as _sys2; import os as _os2
         _tdir = _os2.path.dirname(_os2.path.abspath(__file__))
         if _tdir not in _sys2.path: _sys2.path.insert(0, _tdir)
         from mesh_utils import get_canonical_euler as _gce
-        _euler = _gce(obj_id, _dataset_m)
-        m.attrs['mesh_prerotation_euler'] = [0.0, 0.0, 0.0]   # ← 不需要补偿
-        m.attrs['canonical_rotation_applied'] = any(abs(e) > 0.5 for e in _euler)
-        m.attrs['canonical_euler_info'] = _euler               # 仅供参考，不被 sim 使用
-        
+        _euler = [0.0, 0.0, 0.0] if no_rotation else _gce(obj_id, _dataset_m)
+        m.attrs['mesh_prerotation_euler'] = [0.0, 0.0, 0.0]
+        m.attrs['canonical_rotation_applied'] = (
+            False if no_rotation else any(abs(e) > 0.5 for e in _euler)
+        )
+        m.attrs['canonical_euler_info'] = _euler
         cg = f.create_group('candidates')
         cg.attrs['n_candidates'] = len(candidates)
         for i, c in enumerate(candidates):
@@ -537,6 +562,96 @@ def visualize_candidates(mesh, candidates, obj_id):
     vis.destroy_window()
 
 
+def process_one_object(
+    obj_id,
+    mesh_path,
+    scale,
+    hp_name,
+    hp_dir,
+    output_dir,
+    *,
+    dataset='oakink',
+    force=False,
+    no_rotation=False,
+    target_n=TARGET_HIGH_QUALITY,
+    score_threshold=SCORE_THRESHOLD,
+    arctic=False,
+):
+    """
+    为单个物体生成 grasp candidates HDF5。
+    返回 (out_path | None, skipped_reason | None)
+    """
+    skip_path = os.path.join(output_dir, f'{obj_id}.skip')
+    out_path = os.path.join(output_dir, f'{obj_id}_grasp.hdf5')
+
+    if not force:
+        if os.path.exists(skip_path):
+            return None, 'skip_marked'
+        if os.path.exists(out_path):
+            return out_path, 'exists'
+
+    if not os.path.exists(mesh_path):
+        return None, 'no_mesh'
+
+    mesh = trimesh.load(mesh_path, force='mesh')
+    if scale != 1.0:
+        mesh.vertices *= scale
+
+    if not no_rotation:
+        import sys as _sys
+        _tools_dir = os.path.dirname(os.path.abspath(__file__))
+        if _tools_dir not in _sys.path:
+            _sys.path.insert(0, _tools_dir)
+        from mesh_utils import get_canonical_euler as _get_euler
+        _dataset = (
+            'dexycb' if obj_id.startswith('ycb_')
+            else ('arctic' if arctic else dataset)
+        )
+        rot_euler = _get_euler(obj_id, _dataset)
+        if any(abs(e) > 0.5 for e in rot_euler):
+            R_mat = Rotation.from_euler('xyz', rot_euler, degrees=True).as_matrix()
+            mesh.vertices = (R_mat @ mesh.vertices.T).T
+            print(f'     [canonical rot (rotation.json): {[round(e,1) for e in rot_euler]}°]')
+        else:
+            print(f'     [canonical rot: identity]')
+    else:
+        print(f'     [no rotation: raw SAM3D mesh + scale only]')
+
+    if not mesh.is_watertight:
+        trimesh.repair.fill_holes(mesh)
+        trimesh.repair.fix_normals(mesh)
+
+    ext = mesh.bounding_box.extents * 100
+    print(f'  尺寸: {ext[0]:.1f}×{ext[1]:.1f}×{ext[2]:.1f} cm  ({len(mesh.faces):,} 面)')
+
+    SIMPLIFY_TARGET = 5000
+    mesh_rc = None
+    if len(mesh.faces) > SIMPLIFY_TARGET * 2:
+        t_s = time.time()
+        mesh_rc = mesh.simplify_quadric_decimation(face_count=SIMPLIFY_TARGET)
+        if not mesh_rc.is_watertight:
+            trimesh.repair.fix_normals(mesh_rc)
+        print(f'  → 简化为 {len(mesh_rc.faces):,} 面 (raycast用, {time.time()-t_s:.2f}s)')
+
+    candidates = generate_candidates_iterative(
+        mesh, hp_name, hp_dir=hp_dir, mesh_rc=mesh_rc,
+        target_n=target_n, score_threshold=score_threshold,
+    )
+
+    if candidates:
+        path = save_candidates_hdf5(
+            candidates, obj_id, mesh_path, output_dir, no_rotation=no_rotation,
+        )
+        print(f'  ✅ → {os.path.basename(path)} ({len(candidates)} 候选)')
+        return path, None
+
+    open(skip_path, 'w').write(
+        f'SKIP: {SKIP_AFTER_BATCHES} batches, 0 candidates >= {score_threshold}\n'
+    )
+    print(f'  ⬛ → {obj_id}.skip (难抓物体，已标记)')
+    return None, 'no_candidates'
+
+
 def main():
     parser = argparse.ArgumentParser(description='Grasp Sampler v2 (Scored + Iterative)')
     parser.add_argument('--obj',     help='单个物体 ID (自动在 obj_meshes/ 所有数据集中查找)')
@@ -547,6 +662,12 @@ def main():
     parser.add_argument('--force',   action='store_true', help='强制重新生成（覆盖已有）')
     parser.add_argument('--vis',     action='store_true')
     parser.add_argument('--output-dir', default=None)
+    parser.add_argument('--target', type=int, default=TARGET_HIGH_QUALITY,
+                        help=f'目标候选数 (默认 {TARGET_HIGH_QUALITY})')
+    parser.add_argument('--score-threshold', type=float, default=SCORE_THRESHOLD,
+                        help=f'分数门槛 (默认 {SCORE_THRESHOLD})')
+    parser.add_argument('--no-rotation', action='store_true',
+                        help='不应用 rotation.json，使用 SAM3D 原始 mesh 朝向')
     args = parser.parse_args()
 
     # 推理模式：切换目录
@@ -595,14 +716,12 @@ def main():
     mode = 'ARCTIC' if args.arctic else f'obj_meshes/{getattr(args,"dataset","oakink") or "oakink"}'
     print('=' * 60)
     print(f'  Grasp Sampler v2 [{mode}] (50%HP + 50%rnd)')
-    print(f'  Target: {TARGET_HIGH_QUALITY} candidates ≥ {SCORE_THRESHOLD} pts')
+    print(f'  Target: {args.target} candidates ≥ {args.score_threshold} pts')
+    if args.no_rotation:
+        print('  Rotation: OFF (raw mesh)')
     print('=' * 60)
 
-    # 预加载 canonical rotation
-    canonical_rotations = load_canonical_rotations()
-
     generated = 0
-    # 支持5元组 (obj_id, mesh_path, scale, hp_name, hp_dir) 和旧4元组
     for idx, entry in enumerate(obj_list):
         if len(entry) == 5:
             obj_id, mesh_path, scale, hp_name, hp_dir_use = entry
@@ -612,78 +731,24 @@ def main():
 
         print(f'\n[{idx+1}/{len(obj_list)}] {obj_id}')
 
-        skip_path = os.path.join(_out_dir, f'{obj_id}.skip')
-        out_path  = os.path.join(_out_dir, f'{obj_id}_grasp.hdf5')
-
-        if not args.force:
-            if os.path.exists(skip_path):
-                print(f' ⏭️ [SKIP标记] 已知难抓物体')
-                continue
-            if os.path.exists(out_path):
-                print(' ⏭️ (已生成)')
-                continue
-
-        if not os.path.exists(mesh_path):
+        _ds = args.dataset or ('arctic' if args.arctic else 'oakink')
+        out_path, reason = process_one_object(
+            obj_id, mesh_path, scale, hp_name, hp_dir_use, _out_dir,
+            dataset=_ds,
+            force=args.force,
+            no_rotation=args.no_rotation,
+            target_n=args.target,
+            score_threshold=args.score_threshold,
+            arctic=args.arctic,
+        )
+        if reason == 'skip_marked':
+            print(f' ⏭️ [SKIP标记] 已知难抓物体')
+        elif reason == 'exists':
+            print(' ⏭️ (已生成)')
+        elif reason == 'no_mesh':
             print(f' ❌ mesh 不存在: {mesh_path}')
-            continue
-
-        mesh = trimesh.load(mesh_path, force='mesh')
-
-        # ── Step 1: 应用 scale_factor → 米制 ─────────────────────────────
-        if scale != 1.0:
-            mesh.vertices *= scale
-
-        # ── Step 2: 应用 canonical rotation (与 USD/Sim 保持完全一致) ────────
-        # 来源: obj_meshes/{dataset}/{obj_id}/rotation.json (同 convert_obj_usd.py)
-        import sys as _sys
-        _tools_dir = os.path.dirname(os.path.abspath(__file__))
-        if _tools_dir not in _sys.path:
-            _sys.path.insert(0, _tools_dir)
-        from mesh_utils import get_canonical_euler as _get_euler
-        _dataset = 'dexycb' if obj_id.startswith('ycb_') else ('arctic' if args.arctic else 'oakink')
-        rot_euler = _get_euler(obj_id, _dataset)
-        if any(abs(e) > 0.5 for e in rot_euler):
-            from scipy.spatial.transform import Rotation as _R
-            R_mat = _R.from_euler('xyz', rot_euler, degrees=True).as_matrix()
-            mesh.vertices = (R_mat @ mesh.vertices.T).T
-            print(f'     [canonical rot (rotation.json): {[round(e,1) for e in rot_euler]}°]')
-        else:
-            print(f'     [canonical rot: identity]')
-
-        if not mesh.is_watertight:
-            trimesh.repair.fill_holes(mesh)
-            trimesh.repair.fix_normals(mesh)
-
-        ext = mesh.bounding_box.extents * 100
-        print(f'  尺寸: {ext[0]:.1f}×{ext[1]:.1f}×{ext[2]:.1f} cm  ({len(mesh.faces):,} 面)')
-
-        # ── Step 3: 简化 mesh 用于 raycast（加速 ~18×，几何精度足够）───────
-        # 原始高精度 PLY (~500K面) 做 raycast 极慢；简化到 5000 面精度已足够
-        # mesh.contains() 用原始 mesh（速度差不多），raycast 用简化 mesh
-        SIMPLIFY_TARGET = 5000
-        mesh_rc = None   # 默认: 不需要简化时直接用原始 mesh
-        if len(mesh.faces) > SIMPLIFY_TARGET * 2:
-            t_s = time.time()
-            mesh_rc = mesh.simplify_quadric_decimation(face_count=SIMPLIFY_TARGET)
-            if not mesh_rc.is_watertight:
-                trimesh.repair.fix_normals(mesh_rc)
-            print(f'  → 简化为 {len(mesh_rc.faces):,} 面 (raycast用, {time.time()-t_s:.2f}s)')
-
-        # HP 从指定目录读取（支持 training_fp/ 直接读）
-        candidates = generate_candidates_iterative(mesh, hp_name, hp_dir=hp_dir_use,
-                                                   mesh_rc=mesh_rc)
-
-        if candidates:
-            path = save_candidates_hdf5(candidates, obj_id, mesh_path, _out_dir)
-            print(f'  ✅ → {os.path.basename(path)} ({len(candidates)} 候选)')
+        elif out_path:
             generated += 1
-        else:
-            # 无有效候选 → 写 .skip 标记，下次直接跳过
-            open(skip_path, 'w').write(f'SKIP: {SKIP_AFTER_BATCHES} batches, 0 candidates >= {SCORE_THRESHOLD}\n')
-            print(f'  ⬛ → {obj_id}.skip (难抓物体，已标记)')
-
-        if args.vis and candidates:
-            visualize_candidates(mesh, candidates, obj_id)
 
     print(f"\n{'='*60}")
     print(f'  完成! 生成 {generated}/{len(obj_list)} 个物体的候选')

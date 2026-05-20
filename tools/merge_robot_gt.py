@@ -1,209 +1,123 @@
 #!/usr/bin/env python3
 """
-merge_robot_gt.py
-─────────────────────────────────────────────────────────────
-自动扫描 output/robot_gt_*/ 目录（R1, R2, R3, R4...），
-对每个物体，合并所有轮次中 successful_grasps 里的成功候选，
-输出到 robot_gt_merged_*/。
-
-训练代码只需读 robot_gt_merged/，新增轮次后重新跑此脚本即可。
-
+merge_robot_gt.py — 合并多轮 / 多文件 robot_gt HDF5 中的成功抓取
+================================================================
 用法:
-    python3 tools/merge_robot_gt.py                   # 合并 OakInk + DexYCB
-    python3 tools/merge_robot_gt.py --dataset oakink
-    python3 tools/merge_robot_gt.py --dataset dexycb
-    python3 tools/merge_robot_gt.py --dry-run         # 预览不写文件
+    python3 tools/merge_robot_gt.py --obj A01001 \\
+        --inputs output/grasp_collect/robot_gt/round_0000/A01001_robot_gt.hdf5 \\
+                 output/grasp_collect/robot_gt/round_0001/A01001_robot_gt.hdf5 \\
+        --output output/grasp_collect/merged/A01001_robot_gt_merged.hdf5
 """
+from __future__ import annotations
 
 import argparse
-import glob
 import os
+import sys
 
 import h5py
 import numpy as np
+from scipy.spatial.transform import Rotation
 
 
-OUTPUT_BASE = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "output"))
+def _load_successful(path: str) -> list[dict]:
+    rows = []
+    with h5py.File(path, "r") as f:
+        if "successful_grasps" not in f:
+            return rows
+        sg = f["successful_grasps"]
+        for key in sorted(sg.keys()):
+            g = sg[key]
+            rows.append({
+                "name": g.attrs.get("name", key),
+                "score": float(g.attrs.get("score", 0)),
+                "gripper_width": float(g.attrs.get("gripper_width", 0.04)),
+                "approach_type": g.attrs.get("approach_type", ""),
+                "grasp_point": np.array(g["grasp_point"][:], dtype=np.float64),
+                "rotation": np.array(g["rotation"][:], dtype=np.float64),
+                "source_file": os.path.abspath(path),
+                "round_key": key,
+            })
+            if "contact_points_local" in g:
+                rows[-1]["contact_points_local"] = np.array(
+                    g["contact_points_local"][:], dtype=np.float64
+                )
+                rows[-1]["finger_width_actual"] = float(
+                    g.attrs.get("finger_width_actual", 0.0)
+                )
+    return rows
 
-DATASET_PATTERNS = {
-    "oakink": {
-        "round_glob": "robot_gt_oakink*",
-        "merged_dir": "robot_gt_merged_oakink",
-    },
-    "dexycb": {
-        "round_glob": "robot_gt_dexycb*",
-        "merged_dir": "robot_gt_merged_dexycb",
-    },
-}
+
+def _is_duplicate(a: dict, b: dict, pos_tol=0.005, rot_tol_deg=12.0) -> bool:
+    if np.linalg.norm(a["grasp_point"] - b["grasp_point"]) > pos_tol:
+        return False
+    Ra = Rotation.from_matrix(a["rotation"])
+    Rb = Rotation.from_matrix(b["rotation"])
+    angle = Ra.inv() * Rb
+    return np.linalg.norm(angle.as_rotvec()) <= np.deg2rad(rot_tol_deg)
 
 
-def find_round_dirs(output_base: str, glob_pattern: str) -> list:
-    dirs = sorted(glob.glob(os.path.join(output_base, glob_pattern)))
-    dirs = [d for d in dirs if "merged" not in os.path.basename(d)]
-    return dirs
-
-
-def collect_all_successful(round_dirs: list, obj_id: str):
-    """
-    跨轮次收集同一物体的所有成功 grasp。
-    返回: (list of grasp dicts, list of source round names)
-    每个 grasp dict: {
-        datasets: { key: np.array },
-        attrs:    { key: value },
-        source:   str  # 来自哪个轮次目录
-    }
-    """
-    all_grasps = []
-    sources = []
-
-    for rdir in round_dirs:
-        result_file = os.path.join(rdir, f"{obj_id}_robot_gt.hdf5")
-        if not os.path.exists(result_file):
+def merge_grasps(all_rows: list[dict], pos_tol=0.005, rot_tol_deg=12.0) -> list[dict]:
+    merged: list[dict] = []
+    for row in sorted(all_rows, key=lambda r: -r["score"]):
+        if any(_is_duplicate(row, m, pos_tol, rot_tol_deg) for m in merged):
             continue
-        try:
-            with h5py.File(result_file, "r") as f:
-                n_suc = int(f.attrs.get("n_successful", 0))
-                if n_suc == 0:
-                    continue
-                rname = os.path.basename(rdir)
-                if rname not in sources:
-                    sources.append(rname)
-
-                sg = f.get("successful_grasps")
-                if sg is None:
-                    continue
-
-                for gkey in sorted(sg.keys()):
-                    g = sg[gkey]
-                    entry = {
-                        "datasets": {k: g[k][()] for k in g.keys()},
-                        "attrs":    dict(g.attrs),
-                        "source":   rname,
-                    }
-                    all_grasps.append(entry)
-
-        except Exception as e:
-            print(f"    ⚠️  读取失败 {result_file}: {e}")
-
-    return all_grasps, sources
+        merged.append(row)
+    return merged
 
 
-def write_merged(obj_id: str, all_grasps: list, sources: list,
-                 merged_dir: str, template_file: str):
-    """写合并后的 HDF5，结构与原始文件一致。"""
-    out_path = os.path.join(merged_dir, f"{obj_id}_robot_gt.hdf5")
-    os.makedirs(merged_dir, exist_ok=True)
+def write_merged(path: str, obj_id: str, grasps: list[dict], source_files: list[str]):
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with h5py.File(path, "w") as rf:
+        rf.attrs["obj_id"] = obj_id
+        rf.attrs["success"] = len(grasps) > 0
+        rf.attrs["n_successful"] = len(grasps)
+        rf.attrs["n_source_files"] = len(source_files)
+        rf.attrs["source_files"] = np.array(source_files, dtype=h5py.string_dtype())
 
-    # 读原始顶层 attrs 作为模板
-    base_attrs = {}
-    if template_file and os.path.exists(template_file):
-        with h5py.File(template_file, "r") as f:
-            base_attrs = dict(f.attrs)
-
-    with h5py.File(out_path, "w") as out:
-        # 顶层 attrs
-        for k, v in base_attrs.items():
-            out.attrs[k] = v
-        out.attrs["n_successful"]       = len(all_grasps)
-        out.attrs["n_candidates_total"] = len(all_grasps)
-        out.attrs["success"]            = len(all_grasps) > 0
-        out.attrs["merge_sources"]      = str(sources)
-        out.attrs["obj_id"]             = obj_id
-
-        # successful_grasps 组
-        sg = out.create_group("successful_grasps")
-        for i, grasp in enumerate(all_grasps):
-            g = sg.create_group(f"grasp_{i}")
-            for k, v in grasp["datasets"].items():
-                g.create_dataset(k, data=v)
-            for k, v in grasp["attrs"].items():
-                g.attrs[k] = v
-            g.attrs["merge_source"] = grasp["source"]
-
-
-def merge_dataset(dataset: str, output_base: str, dry_run: bool):
-    cfg = DATASET_PATTERNS[dataset]
-    round_dirs = find_round_dirs(output_base, cfg["round_glob"])
-    merged_dir = os.path.join(output_base, cfg["merged_dir"])
-
-    print(f"\n{'='*60}")
-    print(f"  {dataset.upper()} 合并")
-    print(f"  轮次目录: {[os.path.basename(d) for d in round_dirs]}")
-    print(f"  输出:     {merged_dir}")
-    print(f"{'='*60}")
-
-    if not round_dirs:
-        print("  ❌ 未找到任何轮次目录")
-        return 0, 0
-
-    # 收集所有物体 ID（跨轮次并集）
-    all_obj_ids = set()
-    for rdir in round_dirs:
-        for fp in glob.glob(os.path.join(rdir, "*_robot_gt.hdf5")):
-            all_obj_ids.add(os.path.basename(fp).replace("_robot_gt.hdf5", ""))
-
-    merged_count = 0
-    skipped_count = 0
-
-    for obj_id in sorted(all_obj_ids):
-        all_grasps, sources = collect_all_successful(round_dirs, obj_id)
-
-        if not all_grasps:
-            print(f"  ❌ {obj_id}: 所有轮次均失败，跳过")
-            skipped_count += 1
-            continue
-
-        # 找 attrs 模板文件（任意一个有成功结果的）
-        template_file = None
-        for rdir in round_dirs:
-            fp = os.path.join(rdir, f"{obj_id}_robot_gt.hdf5")
-            if os.path.exists(fp):
-                try:
-                    with h5py.File(fp, "r") as f:
-                        if int(f.attrs.get("n_successful", 0)) > 0:
-                            template_file = fp
-                            break
-                except:
-                    pass
-
-        if dry_run:
-            print(f"  [DRY] {obj_id}: {len(all_grasps)} 候选  来源: {sources}")
-        else:
-            write_merged(obj_id, all_grasps, sources, merged_dir, template_file)
-            print(f"  ✅ {obj_id}: {len(all_grasps)} 候选  来源: {sources}")
-
-        merged_count += 1
-
-    print(f"\n  {'[DRY] ' if dry_run else ''}完成: ✅{merged_count} 有数据  ❌{skipped_count} 全轮失败  (共{len(all_obj_ids)}个物体)")
-    return merged_count, skipped_count
+        sg = rf.create_group("successful_grasps")
+        sg.attrs["count"] = len(grasps)
+        for i, cr in enumerate(grasps):
+            gi = sg.create_group(f"grasp_{i}")
+            gi.attrs["name"] = cr["name"]
+            gi.attrs["score"] = cr["score"]
+            gi.attrs["gripper_width"] = cr["gripper_width"]
+            gi.attrs["approach_type"] = cr.get("approach_type", "")
+            gi.attrs["source_file"] = cr.get("source_file", "")
+            gi.create_dataset("grasp_point", data=cr["grasp_point"])
+            gi.create_dataset("rotation", data=cr["rotation"])
+            gi.create_dataset("approach_dir", data=cr["rotation"][:, 2])
+            gi.create_dataset("finger_dir", data=cr["rotation"][:, 0])
+            if "contact_points_local" in cr:
+                gi.create_dataset("contact_points_local", data=cr["contact_points_local"])
+                gi.attrs["finger_width_actual"] = cr.get("finger_width_actual", 0.0)
+                gi.attrs["has_contact_points"] = True
+            else:
+                gi.attrs["has_contact_points"] = False
 
 
 def main():
-    parser = argparse.ArgumentParser(description="合并多轮 robot_gt 结果")
-    parser.add_argument("--dataset", choices=["oakink", "dexycb", "all"], default="all")
-    parser.add_argument("--output-base", default=None)
-    parser.add_argument("--dry-run", action="store_true", help="只预览，不写文件")
+    parser = argparse.ArgumentParser(description="Merge robot_gt successful grasps")
+    parser.add_argument("--obj", required=True)
+    parser.add_argument("--inputs", nargs="+", required=True, help="robot_gt HDF5 paths")
+    parser.add_argument("--output", required=True)
+    parser.add_argument("--pos-tol", type=float, default=0.005)
+    parser.add_argument("--rot-tol-deg", type=float, default=12.0)
     args = parser.parse_args()
 
-    output_base = os.path.abspath(args.output_base or OUTPUT_BASE)
-    datasets = ["oakink", "dexycb"] if args.dataset == "all" else [args.dataset]
+    all_rows: list[dict] = []
+    used_files: list[str] = []
+    for p in args.inputs:
+        if not os.path.isfile(p):
+            print(f"  skip missing: {p}")
+            continue
+        rows = _load_successful(p)
+        all_rows.extend(rows)
+        used_files.append(os.path.abspath(p))
+        print(f"  + {len(rows)} from {p}")
 
-    print(f"{'='*60}")
-    print(f"  robot_gt 多轮合并  |  dry_run={args.dry_run}")
-    print(f"  output_base: {output_base}")
-    print(f"{'='*60}")
-
-    total = 0
-    for ds in datasets:
-        m, _ = merge_dataset(ds, output_base, args.dry_run)
-        total += m
-
-    print(f"\n{'='*60}")
-    print(f"  全部完成，共 {total} 个物体有合并数据")
-    print(f"  训练时读取:")
-    for ds in datasets:
-        print(f"    output/{DATASET_PATTERNS[ds]['merged_dir']}/")
-    print(f"{'='*60}")
+    merged = merge_grasps(all_rows, args.pos_tol, args.rot_tol_deg)
+    write_merged(args.output, args.obj, merged, used_files)
+    print(f"✅ merged {len(merged)} unique successes → {args.output}")
 
 
 if __name__ == "__main__":

@@ -5,8 +5,8 @@ estimate_obj_rotation.py
 对每个物体估计 canonical rotation，使 mesh 对齐到真实世界中物体的自然姿态。
 
 方法 (按优先级):
-  pca_z    ★首选: 纯几何 PCA，把最长/特征轴对齐到世界 Z（让物体竖立）
-             适用所有数据集，无需 FP 位姿。
+  stable_pose ★首选: trimesh.compute_stable_poses() 凸包稳定姿态（桌上自然摆放）
+  pca_z    纯几何 PCA，把最长/特征轴对齐到世界 Z（stable_pose 失败时 fallback）
   world_z  FP ob_in_cam + R_cam_to_world → 世界坐标系平均旋转 (fallback)
   icp_hp   OakInk fallback: ICP 对齐 training_fp point_cloud
   fp_avg   YCB fallback: 直接平均 ob_in_cam 旋转（相机系，非世界系）
@@ -16,13 +16,13 @@ estimate_obj_rotation.py
   ProcessedData/obj_meshes/{dataset}/{obj_id}/rotation.json
   {
     "euler_xyz_deg": [rx, ry, rz],   # 应用到 mesh 的旋转 (degrees)
-    "method": "world_z" | "icp_hp" | "fp_avg" | "identity",
+    "method": "stable_pose" | "pca_z" | "world_z" | "icp_hp" | "fp_avg" | "identity",
     "obj": "A01001",
     "dataset": "oakink"
   }
 
 用法:
-  python3 data/estimate_obj_rotation.py --dataset oakink           # world_z 优先
+  python3 data/estimate_obj_rotation.py --dataset oakink           # stable_pose 优先
   python3 data/estimate_obj_rotation.py --dataset oakink --method icp_hp
   python3 data/estimate_obj_rotation.py --dataset ycb
   python3 data/estimate_obj_rotation.py --all --force
@@ -173,6 +173,31 @@ def pca_z_rotation(mesh_verts):
     return Rotation.from_rotvec(rot_vec).as_matrix()
 
 
+def stable_pose_rotation(mesh):
+    """
+    trimesh 稳定姿态：凸包候选底面 + 均匀密度 CoM 投影，取概率最高的姿态。
+    返回 3×3 旋转（不含平移），使 mesh 顶点 v' = R @ v 与 compute_stable_poses 的旋转一致。
+    """
+    try:
+        transforms, probs = mesh.compute_stable_poses()
+    except Exception:
+        return None, None
+
+    if transforms is None or len(transforms) == 0:
+        return None, None
+
+    T = np.asarray(transforms[0], dtype=np.float64)
+    if T.shape != (4, 4):
+        return None, None
+
+    R = T[:3, :3]
+    if abs(np.linalg.det(R) - 1.0) > 0.05:
+        return None, None
+
+    prob = float(probs[0]) if probs is not None and len(probs) > 0 else None
+    return R, prob
+
+
 def icp_rotation_only(src_pts, tgt_pts, n_iter=50):
     """
     只估计旋转的简化 ICP（固定质心对齐，只优化旋转）。
@@ -254,8 +279,24 @@ def estimate_one(obj_id, dataset, force=False, n_mesh_pts=2048, method_override=
     R_final = None
     method  = None
 
-    # ── 方法0: pca_z ★ 纯几何主轴对齐（首选）──────────────────────────────
-    if method_override in (None, 'pca_z'):
+    # ── 方法0: stable_pose ★ trimesh 稳定姿态（首选）────────────────────────
+    if method_override in (None, 'stable_pose'):
+        try:
+            R_sp, prob = stable_pose_rotation(mesh)
+            if R_sp is not None:
+                R_final = R_sp
+                euler_test = Rotation.from_matrix(R_final).as_euler('xyz', degrees=True)
+                prob_str = f' prob={prob:.3f}' if prob is not None else ''
+                method = 'stable_pose'
+                print(f'  🪑 {obj_id}: stable_pose{prob_str} -> euler={[round(e,1) for e in euler_test]}')
+            else:
+                print(f'  ⚠️  {obj_id}: stable_pose 无可用姿态')
+        except Exception as e:
+            print(f'  ⚠️  {obj_id}: stable_pose 失败: {e}')
+            R_final = None
+
+    # ── 方法1: pca_z 纯几何主轴对齐（fallback）────────────────────────────
+    if R_final is None and method_override in (None, 'pca_z'):
         try:
             R_final = pca_z_rotation(mesh.vertices)
             euler_test = Rotation.from_matrix(R_final).as_euler('xyz', degrees=True)
@@ -265,7 +306,7 @@ def estimate_one(obj_id, dataset, force=False, n_mesh_pts=2048, method_override=
             print(f'  ⚠️  {obj_id}: pca_z 失败: {e}')
             R_final = None
 
-    # ── 方法1: world_z (FP位姿+桌面检测，fallback) ──────────────────────────
+    # ── 方法2: world_z (FP位姿+桌面检测，fallback) ──────────────────────────
     if R_final is None and method_override in (None, 'world_z'):
         R_cw = load_r_cam_to_world(dataset)
         if R_cw is not None:
@@ -289,7 +330,7 @@ def estimate_one(obj_id, dataset, force=False, n_mesh_pts=2048, method_override=
                     method  = f'world_z ({len(R_world_list)} frames)'
                     print(f'  🌍 {obj_id}: world_z ({len(R_world_list)} frames)')
 
-    # ── 方法1: ICP 对齐 HP point_cloud (OakInk fallback) ────────────────────
+    # ── 方法3: ICP 对齐 HP point_cloud (OakInk fallback) ────────────────────
     if R_final is None and method_override in (None, 'icp_hp'):
         hp_pc, hp_path = load_hp_pointcloud(obj_id, dataset)
         if hp_pc is not None:
@@ -304,7 +345,7 @@ def estimate_one(obj_id, dataset, force=False, n_mesh_pts=2048, method_override=
                 print(f'  ⚠️  {obj_id}: ICP 失败: {e}')
                 R_final = None
 
-    # ── 方法2: FP 平均旋转（相机系，硬编码 Y→Z 假设） ───────────────────────
+    # ── 方法4: FP 平均旋转（相机系，硬编码 Y→Z 假设） ───────────────────────
     if R_final is None and method_override in (None, 'fp_avg'):
         fp_poses = load_fp_poses(obj_id, dataset)
         if fp_poses:
@@ -362,8 +403,8 @@ def main():
     parser.add_argument('--all',     action='store_true')
     parser.add_argument('--force',   action='store_true', help='覆盖已有 rotation.json')
     parser.add_argument('--method',  default=None,
-                        choices=['world_z', 'icp_hp', 'fp_avg'],
-                        help='强制使用指定方法（默认: world_z 优先）')
+                        choices=['stable_pose', 'pca_z', 'world_z', 'icp_hp', 'fp_avg'],
+                        help='强制使用指定方法（默认: stable_pose → pca_z → world_z → …）')
     args = parser.parse_args()
 
     datasets_to_run = ['oakink', 'dexycb'] if args.all else ([args.dataset] if args.dataset else None)
@@ -385,7 +426,11 @@ def main():
         obj_ids = list_dataset_objs(ds)
         # 检查 world_z 可用性
         r_cw = load_r_cam_to_world(ds)
-        method_note = f'world_z ✅' if r_cw is not None else 'world_z ❌ (先跑 detect_table_plane.py)'
+        method_note = 'stable_pose → pca_z → world_z …'
+        if r_cw is not None:
+            method_note += '  (world_z ✅)'
+        else:
+            method_note += '  (world_z ❌ 需 detect_table_plane.py)'
         print(f'\n=== {ds} ({len(obj_ids)} 物体)  方法: {method_note} ===')
         for obj_id in obj_ids:
             total += 1

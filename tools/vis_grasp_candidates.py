@@ -43,15 +43,17 @@ def find_obj_mesh(obj_id):
     return None, 1.0
 
 
-def load_mesh(obj_id):
-    """从 obj_meshes/ 加载并应用 scale + per-object rotation.json."""
+def load_mesh(obj_id, no_rotation=False):
+    """从 obj_meshes/ 加载并应用 scale；可选 per-object rotation.json。"""
     mp, sf = find_obj_mesh(obj_id)
     if mp is None:
         sys.exit(f'❌ obj_meshes/ 中未找到 {obj_id}')
     mesh = trimesh.load(mp, force='mesh')
     if abs(sf - 1.0) > 1e-6:
         mesh.vertices *= sf
-    # ── per-object rotation.json (pca_z 方法生成) ────────────────────────────
+    if no_rotation:
+        return mesh
+    # ── per-object rotation.json (pca_z / stable_pose 等) ───────────────────
     rot_applied = False
     for ds in DATASETS:
         rot_path = os.path.join(OBJ_MESHES_DIR, ds, obj_id, 'rotation.json')
@@ -73,6 +75,28 @@ def load_mesh(obj_id):
                 R = Rotation.from_euler('xyz', rot_euler, degrees=True).as_matrix()
                 mesh.vertices = (R @ mesh.vertices.T).T
     return mesh
+
+
+def hdf5_no_rotation_flag(hdf5_path):
+    """从候选 HDF5 metadata 读取 no_rotation；无字段则返回 None。"""
+    with h5py.File(hdf5_path, 'r') as f:
+        if 'metadata' not in f:
+            return None
+        if 'no_rotation' not in f['metadata'].attrs:
+            return None
+        return bool(f['metadata'].attrs['no_rotation'])
+
+
+def load_success_names_from_robot_gt(robot_gt_path):
+    """从 sim 输出的 *_robot_gt.hdf5 读取 successful_grasps 的 name。"""
+    names = []
+    with h5py.File(robot_gt_path, 'r') as f:
+        if 'successful_grasps' not in f:
+            return names
+        for key in sorted(f['successful_grasps'].keys()):
+            g = f[f'successful_grasps/{key}']
+            names.append(g.attrs.get('name', key))
+    return names
 
 
 
@@ -214,22 +238,49 @@ def make_fig(mesh, cand, success_labels):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--hdf5',    required=True, help='候选 HDF5 文件')
-    parser.add_argument('--success', nargs='*', default=[], help='成功的候选 name 列表')
+    parser.add_argument('--robot-gt', default=None,
+                        help='sim 输出的 *_robot_gt.hdf5；自动标绿 successful_grasps')
+    parser.add_argument('--success', nargs='*', default=[],
+                        help='成功的候选 name（与 --robot-gt 可叠加）')
+    parser.add_argument('--only-success', action='store_true',
+                        help='只生成成功候选的 PNG（需 --robot-gt 或 --success）')
+    parser.add_argument('--no-rotation', action='store_true',
+                        help='不应用 rotation.json（与 sampler --no-rotation 一致）')
     parser.add_argument('--top',     type=int, default=None, help='只生成前 N 个候选')
     parser.add_argument('--outdir',  default=OUT_DIR)
     args = parser.parse_args()
 
     success_labels = set(args.success)
+    if args.robot_gt:
+        if not os.path.isfile(args.robot_gt):
+            sys.exit(f'❌ robot_gt 不存在: {args.robot_gt}')
+        from_gt = load_success_names_from_robot_gt(args.robot_gt)
+        success_labels.update(from_gt)
+        print(f'robot_gt: {len(from_gt)} 成功 → {from_gt}')
 
     obj_id = os.path.basename(args.hdf5).replace('_grasp.hdf5', '')
-    mesh   = load_mesh(obj_id)
-    print(f'mesh 尺寸 (cm): {mesh.bounding_box.extents*100}')
+    no_rotation = args.no_rotation
+    if not no_rotation:
+        detected = hdf5_no_rotation_flag(args.hdf5)
+        if detected is not None:
+            no_rotation = detected
+    mesh = load_mesh(obj_id, no_rotation=no_rotation)
+    rot_note = 'raw SAM3D + scale' if no_rotation else 'scale + rotation.json'
+    print(f'mesh ({rot_note}) 尺寸 (cm): {mesh.bounding_box.extents*100}')
     print(f'CoM: {mesh.center_mass*100} cm')
 
     cands = load_candidates(args.hdf5)
-    print(f'物体: {obj_id}  候选: {len(cands)}  成功: {success_labels}')
+    if args.only_success:
+        if not success_labels:
+            sys.exit('❌ --only-success 需要 --robot-gt 或 --success')
+        cands = [c for c in cands if c['name'] in success_labels]
+        if not cands:
+            sys.exit(f'❌ 候选 HDF5 中未找到成功 name: {success_labels}')
+    print(f'物体: {obj_id}  绘制: {len(cands)}  成功标记: {success_labels}')
 
     outdir = os.path.join(args.outdir, obj_id)
+    if args.only_success:
+        outdir = os.path.join(outdir, 'success')
     os.makedirs(outdir, exist_ok=True)
 
     top_n = args.top or len(cands)

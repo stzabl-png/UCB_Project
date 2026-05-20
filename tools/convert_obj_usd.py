@@ -92,7 +92,7 @@ def list_dataset_objs(dataset):
     )
 
 
-def convert_one(obj_id, mesh_path, scale_factor, dataset, canonical_rotations, force=False):
+def convert_one(obj_id, mesh_path, scale_factor, dataset, canonical_rotations, force=False, no_rotation=False):
     """将单个物体 PLY → USD."""
     out_dir  = os.path.join(OBJ_USD_DIR, dataset)
     out_path = os.path.join(out_dir, f'{obj_id}.usd')
@@ -118,14 +118,18 @@ def convert_one(obj_id, mesh_path, scale_factor, dataset, canonical_rotations, f
         mesh.vertices = mesh.vertices * scale_factor
 
     # ── 3. 应用 canonical rotation ─────────────────────────────────────────────
-    rot_euler, rot_source = load_obj_rotation(obj_id, dataset, canonical_rotations)
-    if rot_euler is not None and any(abs(e) > 0.5 for e in rot_euler):
-        from scipy.spatial.transform import Rotation as _R
-        R_mat = _R.from_euler('xyz', rot_euler, degrees=True).as_matrix()
-        mesh.vertices = (R_mat @ mesh.vertices.T).T
-        print(f'     [rotation {rot_euler}  source={rot_source}]')
-    else:
+    if no_rotation:
+        rot_euler, rot_source = None, 'skipped (--no-rotation)'
         print(f'     [rotation: identity  source={rot_source}]')
+    else:
+        rot_euler, rot_source = load_obj_rotation(obj_id, dataset, canonical_rotations)
+        if rot_euler is not None and any(abs(e) > 0.5 for e in rot_euler):
+            from scipy.spatial.transform import Rotation as _R
+            R_mat = _R.from_euler('xyz', rot_euler, degrees=True).as_matrix()
+            mesh.vertices = (R_mat @ mesh.vertices.T).T
+            print(f'     [rotation {rot_euler}  source={rot_source}]')
+        else:
+            print(f'     [rotation: identity  source={rot_source}]')
 
     # ── 4. 写出 USD ──────────────────────────────────────────────────────────
     stage = Usd.Stage.CreateNew(out_path)
@@ -172,6 +176,7 @@ def convert_one(obj_id, mesh_path, scale_factor, dataset, canonical_rotations, f
         'bbox_min':     [round(float(v), 6) for v in vmin],
         'bbox_max':     [round(float(v), 6) for v in vmax],
         'bbox_extent_cm': [round(float(v)*100, 2) for v in (vmax - vmin)],
+        'no_rotation': bool(no_rotation),
     }
     meta_path = os.path.join(out_dir, f'{obj_id}_meta.json')
     with open(meta_path, 'w') as mf:
@@ -191,6 +196,8 @@ def main():
     parser.add_argument('--dataset', help='指定数据集: oakink / ycb / arctic / dexycb / egocentric')
     parser.add_argument('--all',     action='store_true', help='转换所有数据集')
     parser.add_argument('--force',   action='store_true', help='覆盖已有 USD')
+    parser.add_argument('--no-rotation', action='store_true',
+                        help='不应用 rotation.json，导出 SAM3D 原始朝向')
     args = parser.parse_args()
 
     canonical_rotations = load_canonical_rotations()
@@ -223,7 +230,8 @@ def main():
     ok = err = 0
     for i, (obj_id, mesh_path, sf, ds) in enumerate(todo):
         print(f'\n[{i+1}/{len(todo)}] {obj_id}  ({ds})')
-        if convert_one(obj_id, mesh_path, sf, ds, canonical_rotations, force=args.force):
+        if convert_one(obj_id, mesh_path, sf, ds, canonical_rotations,
+                       force=args.force, no_rotation=args.no_rotation):
             ok += 1
         else:
             err += 1

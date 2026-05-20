@@ -27,7 +27,9 @@ parser.add_argument("--object_scale", type=float, default=1.0, help="物体缩�
 parser.add_argument("--save-result", action="store_true", default=True,
                     help="保存 Robot GT 结果到 HDF5 (默认开启)")
 parser.add_argument("--result-dir", type=str, default=None,
-                    help="结果保存目录 (默认 Pipeline/output/robot_gt/)")
+                    help="结果保存目录 (默认 sim/output/robot_gt/)")
+parser.add_argument("--max-candidates", type=int, default=None,
+                    help="最多尝试的候选数 (默认全部)")
 args, _ = parser.parse_known_args()
 
 simulation_app = SimulationApp({"headless": args.headless})
@@ -837,6 +839,9 @@ def main():
 
     # 按评分降序排列（纯分数，不加方向权重）
     grasp_candidates.sort(key=lambda c: c["score"], reverse=True)
+    if args.max_candidates is not None and args.max_candidates > 0:
+        grasp_candidates = grasp_candidates[: args.max_candidates]
+        cprint(f"  Limited to top {len(grasp_candidates)} candidates (--max-candidates)", "cyan")
 
     for i, c in enumerate(grasp_candidates):
         R = c["rotation"]
