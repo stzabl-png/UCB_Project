@@ -327,6 +327,63 @@ def make_transform(pos, quat_wxyz):
     return T
 
 
+def world_pose_to_object_mesh(pos_world, quat_wxyz_world, obj_pos_world, obj_quat_wxyz,
+                              object_scale):
+    """世界系位姿 → 物体 mesh 系 (与候选 grasp_point 同一 scale 约定)."""
+    T_world_obj = make_transform(
+        np.asarray(obj_pos_world, dtype=np.float64).reshape(3),
+        np.asarray(obj_quat_wxyz, dtype=np.float64).reshape(4),
+    )
+    T_world_body = make_transform(
+        np.asarray(pos_world, dtype=np.float64).reshape(3),
+        np.asarray(quat_wxyz_world, dtype=np.float64).reshape(4),
+    )
+    T_obj_body = np.linalg.inv(T_world_obj) @ T_world_body
+    scale = float(object_scale) if object_scale else 1.0
+    pos_obj = (T_obj_body[:3, 3] / scale).astype(np.float32)
+    rot_obj = T_obj_body[:3, :3].astype(np.float32)
+    return pos_obj, rot_obj
+
+
+def snapshot_panda_hand_object_mesh(franka, scene, object_scale):
+    """当前 panda_hand 位姿，物体 mesh 局部系 (实时物体 pose)."""
+    pos_w, quat_w = franka.get_cur_ee_pos(local_frame=False)
+    obj_pos, obj_quat = scene["obj"].get_obj_pos()
+    pos_o, rot_o = world_pose_to_object_mesh(
+        pos_w, quat_w, obj_pos, obj_quat, object_scale,
+    )
+    return {
+        'position': pos_o,
+        'rotation': rot_o,
+        'approach_dir': rot_o[:, 2].copy(),
+        'finger_dir': rot_o[:, 1].copy(),
+    }
+
+
+def write_executed_panda_hand_hdf5(parent, snapshot, label):
+    """label: 'at_close' | 'post_lift'."""
+    if snapshot is None:
+        return
+    g = parent.create_group(f'executed_panda_hand_{label}')
+    g.attrs['frame'] = 'object_mesh'
+    g.attrs['ee_frame'] = 'panda_hand'
+    g.attrs['snapshot'] = label
+    g.create_dataset('position', data=snapshot['position'])
+    g.create_dataset('rotation', data=snapshot['rotation'])
+    g.create_dataset('approach_dir', data=snapshot['approach_dir'])
+    g.create_dataset('finger_dir', data=snapshot['finger_dir'])
+
+
+def _grasp_result_base(success=False):
+    return {
+        'success': success,
+        'contact_points_local': None,
+        'finger_width_actual': None,
+        'executed_at_close': None,
+        'executed_post_lift': None,
+    }
+
+
 # ============================================================
 # cuRobo Motion Planning
 # ============================================================
@@ -627,7 +684,7 @@ def execute_grasp(scene, grasp_pos_obj, grasp_rot_obj, gripper_width, object_sca
                 world.step(render=RENDER_SIM)
     else:
         cprint(f"   → Final approach 失败", "red")
-        return {'success': False, 'contact_points_local': None, 'finger_width_actual': None}
+        return _grasp_result_base(success=False)
 
 
     # ---- Phase 4: 闭合夹爪 + 力传感器 ----
@@ -686,6 +743,17 @@ def execute_grasp(scene, grasp_pos_obj, grasp_rot_obj, gripper_width, object_sca
         else:
             cprint(f"      ✅ 夹爪稳定 (变化 {delta*100:.3f}cm)", "green")
 
+    try:
+        executed_at_close = snapshot_panda_hand_object_mesh(franka, scene, object_scale)
+        p = executed_at_close['position']
+        cprint(
+            f"   📌 panda_hand@at_close (obj): [{p[0]:.4f}, {p[1]:.4f}, {p[2]:.4f}]",
+            "magenta",
+        )
+    except Exception as e:
+        executed_at_close = None
+        cprint(f"   ⚠️ panda_hand@at_close 记录失败: {e}", "yellow")
+
     # ---- Phase 5: 提起 (物体 mesh 仍清除 — 物体随夹爪一起移动) ----
     cprint(f"   → [5/5] Planning lift (no object mesh)...", "yellow")
     traj_lift = plan_trajectory(_CUROBO_MG, franka, lift_pos, quat_wxyz,
@@ -718,7 +786,20 @@ def execute_grasp(scene, grasp_pos_obj, grasp_rot_obj, gripper_width, object_sca
 
     cprint(f"   📍 obj Z: {initial_z:.4f} → {obj_after[2]:.4f} (Δ={z_delta:.4f}m)", "cyan")
 
-    result = {'success': success, 'contact_points_local': None, 'finger_width_actual': None}
+    result = _grasp_result_base(success=success)
+    result['executed_at_close'] = executed_at_close
+
+    try:
+        executed_post_lift = snapshot_panda_hand_object_mesh(franka, scene, object_scale)
+        p = executed_post_lift['position']
+        cprint(
+            f"   📌 panda_hand@post_lift (obj): [{p[0]:.4f}, {p[1]:.4f}, {p[2]:.4f}]",
+            "magenta",
+        )
+    except Exception as e:
+        executed_post_lift = None
+        cprint(f"   ⚠️ panda_hand@post_lift 记录失败: {e}", "yellow")
+    result['executed_post_lift'] = executed_post_lift
 
     if success:
         cprint(f"   ✅ GRASP SUCCESS!", "green", "on_green")
@@ -769,6 +850,8 @@ def main():
     cprint("=" * 60, "cyan")
     cprint(f"  HDF5: {h5_path}", "cyan")
 
+    file_prerot = None
+    _no_rotation = True
     with h5py.File(h5_path, 'r') as f:
         # 兼容两种格式: 自动生成 vs 手动标注
         if "metadata" in f:
@@ -780,16 +863,35 @@ def main():
             obj_id = f.attrs.get('object_id', f.attrs.get('obj_id', 'unknown'))
             n_contact = 0
 
+        _proj = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        _tools = os.path.join(_proj, "tools")
+        if _tools not in sys.path:
+            sys.path.insert(0, _tools)
+        from mesh_utils import (
+            applied_mesh_prerotation_record,
+            read_mesh_prerotation_hdf5_pose,
+        )
+
+        _meta = f.get("metadata", None)
+        _no_rotation = bool(_meta.attrs.get("no_rotation", True)) if _meta is not None else True
+        _dataset = (
+            str(_meta.attrs.get("dataset", ""))
+            if _meta is not None and "dataset" in _meta.attrs
+            else None
+        ) or None
+        file_prerot = applied_mesh_prerotation_record(
+            obj_id, _dataset, no_rotation=_no_rotation,
+        )
+
         grasp_candidates = []
 
         if "candidates" in f:
             # v2 自动生成: candidates/candidate_N
             n_cand = f["candidates"].attrs["n_candidates"]
-            # 读取 mesh 预旋转 (默认无)
-            _meta = f.get("metadata", None)
-            mesh_prerot = list(_meta.attrs.get("mesh_prerotation_euler", [0.0, 0.0, 0.0])) if _meta else [0.0, 0.0, 0.0]
             for i in range(n_cand):
                 ci = f[f"candidates/candidate_{i}"]
+                pose_pr = read_mesh_prerotation_hdf5_pose(ci, f) or file_prerot
+                sim_prerot_euler = list(pose_pr["euler_xyz_deg"])
                 grasp_candidates.append({
                     "name": ci.attrs["name"],
                     "score": ci.attrs["score"],
@@ -798,9 +900,13 @@ def main():
                     "gripper_width": ci.attrs["gripper_width"],
                     "approach_type": ci.attrs.get("approach_type", "raycast"),
                     "is_manual": False,          # 自动生成: position=panda_hand, 不减 TCP 偏移
-                    "mesh_prerotation_euler": mesh_prerot,
+                    "mesh_prerotation_euler": sim_prerot_euler,
+                    "mesh_prerotation": pose_pr,
                 })
-            cprint(f"  Candidates: {n_cand} (v2 auto, prerot={mesh_prerot})", "cyan")
+            cprint(
+                f"  Candidates: {n_cand} (v2 auto, no_rotation={_no_rotation})",
+                "cyan",
+            )
 
         elif "candidate_0" in f:
             # 手动标注格式: candidate_N 在根目录
@@ -818,6 +924,7 @@ def main():
                     "approach_type": ci.attrs.get("approach_type", "horizontal"),
                     "is_manual": True,           # 手动标注: position=指尖中心, 需减 TCP 偏移
                     "mesh_prerotation_euler": [0.0, 0.0, 0.0],
+                    "mesh_prerotation": file_prerot,
                 })
             cprint(f"  Candidates: {len(grasp_candidates)} (manual annotation, is_manual=True)", "cyan")
 
@@ -830,10 +937,17 @@ def main():
                 "rotation": f["grasp/rotation"][:],
                 "gripper_width": f["grasp"].attrs["gripper_width"],
                 "approach_type": "horizontal",
+                "mesh_prerotation": file_prerot,
+                "mesh_prerotation_euler": list(file_prerot["euler_xyz_deg"]),
             })
             cprint(f"  Candidates: 1 (v1 legacy)", "cyan")
 
+    if file_prerot is None:
+        from mesh_utils import applied_mesh_prerotation_record
+        file_prerot = applied_mesh_prerotation_record(obj_id, no_rotation=True)
+
     cprint(f"  Object:    {obj_id}", "cyan")
+    cprint(f"  no_rotation (file default): {_no_rotation}", "cyan")
     cprint(f"  Contacts:  {n_contact}", "cyan")
     cprint(f"  Scale:     {args.object_scale}x", "cyan")
 
@@ -861,7 +975,7 @@ def main():
 
     # ---- 等待用户调整视角 (Sim 保持交互) ----
     if not args.headless:
-        import sys, select
+        import select
         cprint("=" * 50, "cyan")
         cprint("🎥 Sim 窗口已就绪，物体已放置到桌面", "cyan")
         cprint("   终端按 Enter 开始抓取...", "cyan")
@@ -898,12 +1012,12 @@ def main():
             )
             # ── fix: execute_grasp 在 cuRobo 初始化失败时可能返回 False ──
             if not isinstance(grasp_result, dict):
-                grasp_result = {'success': bool(grasp_result), 'contact_points_local': None, 'finger_width_actual': None}
+                grasp_result = _grasp_result_base(success=bool(grasp_result))
             success = grasp_result['success']
         except Exception as e:
             cprint(f"  ❌ Error: {e}", "red")
             success = False
-            grasp_result = {'success': False, 'contact_points_local': None, 'finger_width_actual': None}
+            grasp_result = _grasp_result_base(success=False)
 
         candidate_results.append({
             'name': cand['name'],
@@ -915,6 +1029,9 @@ def main():
             'approach_type': cand.get('approach_type', 'unknown'),
             'contact_points_local': grasp_result.get('contact_points_local'),
             'finger_width_actual': grasp_result.get('finger_width_actual'),
+            'mesh_prerotation': cand.get('mesh_prerotation', file_prerot),
+            'executed_at_close': grasp_result.get('executed_at_close'),
+            'executed_post_lift': grasp_result.get('executed_post_lift'),
         })
 
         if success:
@@ -961,6 +1078,13 @@ def main():
         os.makedirs(result_dir, exist_ok=True)
         result_path = os.path.join(result_dir, f"{obj_id}_robot_gt.hdf5")
 
+        _tools = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools"
+        )
+        if _tools not in sys.path:
+            sys.path.insert(0, _tools)
+        from mesh_utils import write_mesh_prerotation_hdf5
+
         with h5py.File(result_path, 'w') as rf:
             rf.attrs['obj_id'] = obj_id
             rf.attrs['success'] = any_success
@@ -968,6 +1092,9 @@ def main():
             rf.attrs['n_candidates_total'] = len(grasp_candidates)
             rf.attrs['n_successful'] = len(successful_grasps)
             rf.attrs['object_scale'] = args.object_scale
+            rf.attrs['robot_gt_schema_version'] = 2
+            rf.attrs['executed_pose_frame'] = 'object_mesh'
+            rf.attrs['executed_ee_frame'] = 'panda_hand'
 
             # 兼容: 保留 winning_candidate (第一个成功的)
             if winning_candidate is not None:
@@ -980,6 +1107,15 @@ def main():
                 wg.create_dataset('rotation', data=winning_candidate['rotation'])
                 wg.create_dataset('approach_dir', data=winning_candidate['rotation'][:, 2])
                 wg.create_dataset('finger_dir', data=winning_candidate['rotation'][:, 0])
+                wpr = winning_candidate.get('mesh_prerotation', file_prerot)
+                write_mesh_prerotation_hdf5(wg, wpr)
+                wc = next(
+                    (cr for cr in candidate_results if cr['name'] == winning_candidate['name']),
+                    None,
+                )
+                if wc is not None:
+                    write_executed_panda_hand_hdf5(wg, wc.get('executed_at_close'), 'at_close')
+                    write_executed_panda_hand_hdf5(wg, wc.get('executed_post_lift'), 'post_lift')
 
             # ★ 所有成功的抓取都保存为 GT
             sg = rf.create_group('successful_grasps')
@@ -1001,6 +1137,11 @@ def main():
                     gi.attrs['has_contact_points'] = True
                 else:
                     gi.attrs['has_contact_points'] = False
+                write_mesh_prerotation_hdf5(
+                    gi, cr.get('mesh_prerotation', file_prerot),
+                )
+                write_executed_panda_hand_hdf5(gi, cr.get('executed_at_close'), 'at_close')
+                write_executed_panda_hand_hdf5(gi, cr.get('executed_post_lift'), 'post_lift')
 
             # 所有候选的结果 (含失败的)
             cg = rf.create_group('candidate_results')
@@ -1013,6 +1154,11 @@ def main():
                 ci.attrs['approach_type'] = cr['approach_type']
                 ci.create_dataset('grasp_point', data=cr['grasp_point'])
                 ci.create_dataset('rotation', data=cr['rotation'])
+                write_mesh_prerotation_hdf5(
+                    ci, cr.get("mesh_prerotation", file_prerot),
+                )
+                write_executed_panda_hand_hdf5(ci, cr.get('executed_at_close'), 'at_close')
+                write_executed_panda_hand_hdf5(ci, cr.get('executed_post_lift'), 'post_lift')
 
         cprint(f"\n  📁 Saved: {result_path}  ({len(successful_grasps)} 个成功GT)", "green")
 
