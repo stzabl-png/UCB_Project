@@ -9,16 +9,22 @@ batch_grasp_collect.py — 批量: 生成 candidate → Isaac Sim 验证 → 记
 前置:
   - conda 环境含 scipy/trimesh/h5py/rtree (生成)
   - ISAAC_SIM_PATH 指向 Isaac Sim (sim)
-  - 建议先: python3 tools/convert_obj_usd.py --dataset oakink --no-rotation --force
+  - 建议先: python3 tools/convert_obj_usd.py --dataset oakink|ycb --no-rotation --force
+
+物体列表与 random_grasp_sampler 一致 (rotated_mesh + train_fp_rotated + scale.json)。
+Sim 使用 run_grasp_sim.py (headless)；录屏请单独 run_grasp_sim_rec.py。
 
 用法:
     export ISAAC_SIM_PATH=/path/to/isaac-sim
 
-    python3 scripts/batch_grasp_collect.py --dataset oakink \\
+    python3 scripts/batch_grasp_collect.py --dataset oakink,ycb \\
         --sampler-workers 8 --sim-per-gpu 1 --sim-gpu-ids 0,1 --headless --no-convert
 
     # 默认 10 轮 (round_0000..0009)；续跑更多轮:
-    python3 scripts/batch_grasp_collect.py --dataset oakink --max-rounds 5 --resume ...
+    python3 scripts/batch_grasp_collect.py --dataset all --max-rounds 5 --resume ...
+
+输出目录（默认）: output/grasp_collect_no_rot/
+  旧实验: output/grasp_collect_legacy/（原 grasp_collect，勿与新区混用 --resume）
 """
 from __future__ import annotations
 
@@ -38,12 +44,11 @@ from typing import Optional
 PROJ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(PROJ, "tools"))
 
-DEFAULT_OUT = os.path.join(PROJ, "output", "grasp_collect")
+DEFAULT_OUT = os.path.join(PROJ, "output", "grasp_collect_no_rot")
 SAMPLER = os.path.join(PROJ, "tools", "random_grasp_sampler.py")
 CONVERT = os.path.join(PROJ, "tools", "convert_obj_usd.py")
 MERGE = os.path.join(PROJ, "tools", "merge_robot_gt.py")
 SIM_SCRIPT = os.path.join(PROJ, "sim", "run_grasp_sim.py")
-OBJ_MESHES = os.path.join(PROJ, "data_hub", "ProcessedData", "obj_meshes")
 
 
 @dataclass
@@ -61,6 +66,7 @@ class JobConfig:
     python_bin: str
     resume: bool
     sim_gpu_ids: tuple[int, ...]
+    merge_deduplicate: bool
 
 
 @dataclass
@@ -91,15 +97,46 @@ class SimResult:
     elapsed_s: float = 0.0
 
 
-def list_objects(dataset: str) -> list[str]:
-    ds_dir = os.path.join(OBJ_MESHES, dataset)
-    if not os.path.isdir(ds_dir):
-        return []
-    return sorted(
-        o for o in os.listdir(ds_dir)
-        if os.path.isfile(os.path.join(ds_dir, o, "mesh.ply"))
-        and "_" not in o
-    )
+# 当前 batch 支持的 dataset（--dataset all 等价于下列全部）
+BATCH_DATASETS = ("oakink", "ycb")
+ObjectJob = tuple[str, str]  # (obj_id, dataset)
+
+
+def parse_datasets(spec: str) -> list[str]:
+    """解析 --dataset：单集 / 逗号多集 / all → ['oakink', 'ycb', ...]。"""
+    s = (spec or "oakink").strip().lower()
+    if s in ("all", "oakink+ycb"):
+        return list(BATCH_DATASETS)
+    parts = [p.strip().lower() for p in s.split(",") if p.strip()]
+    if not parts:
+        return ["oakink"]
+    unknown = [p for p in parts if p not in BATCH_DATASETS]
+    if unknown:
+        raise ValueError(
+            f"unknown dataset(s): {unknown}; supported: {', '.join(BATCH_DATASETS)} or all"
+        )
+    return parts
+
+
+def list_object_jobs(dataset_spec: str) -> list[ObjectJob]:
+    """与 random_grasp_sampler.list_dataset_objs 一致；返回 (obj_id, dataset) 列表。"""
+    from random_grasp_sampler import list_dataset_objs
+
+    jobs: list[ObjectJob] = []
+    for ds in parse_datasets(dataset_spec):
+        for obj_id in list_dataset_objs(ds, use_legacy_assets=False):
+            jobs.append((obj_id, ds))
+    return jobs
+
+
+def resolve_object_jobs(obj_id: str, dataset_spec: str) -> list[ObjectJob]:
+    """--obj 时在指定 dataset 集合中解析所属 dataset。"""
+    from random_grasp_sampler import list_dataset_objs
+
+    for ds in parse_datasets(dataset_spec):
+        if obj_id in list_dataset_objs(ds, use_legacy_assets=False):
+            return [(obj_id, ds)]
+    return []
 
 
 def _run(
@@ -164,8 +201,12 @@ def _merge_all_rounds(cfg: JobConfig, obj_id: str, up_to_round: int) -> str:
         "--output", paths["merged_hdf5"],
         "--inputs", *inputs,
     ]
+    if cfg.merge_deduplicate:
+        cmd.append("--deduplicate")
     rc, _ = _run(cmd)
-    return paths["merged_hdf5"] if rc == 0 else ""
+    if rc != 0:
+        return ""
+    return paths["merged_hdf5"] if os.path.isfile(paths["merged_hdf5"]) else ""
 
 
 def run_gen_job(
@@ -378,8 +419,7 @@ def _partition_objects_by_gpu(objects: list[str], gpu_ids: tuple[int, ...]) -> d
 
 
 def _run_sim_parallel_per_gpu(
-    sim_objects: list[str],
-    dataset: str,
+    sim_jobs: list[ObjectJob],
     round_idx: int,
     cfg_dict: dict,
     gpu_ids: tuple[int, ...],
@@ -389,7 +429,9 @@ def _run_sim_parallel_per_gpu(
     每张 GPU 独立进程池，最多 sim_per_gpu 个 Isaac 同时占用该卡。
     总并行数 = len(gpu_ids) * sim_per_gpu。
     """
-    buckets = _partition_objects_by_gpu(sim_objects, gpu_ids)
+    obj_ids = [o for o, _ in sim_jobs]
+    dataset_by_obj = {o: ds for o, ds in sim_jobs}
+    buckets = _partition_objects_by_gpu(obj_ids, gpu_ids)
     results: list[dict] = []
     executors: dict[int, ProcessPoolExecutor] = {}
     futures: dict = {}
@@ -402,7 +444,12 @@ def _run_sim_parallel_per_gpu(
             executors[gpu_id] = ProcessPoolExecutor(max_workers=sim_per_gpu)
             for obj_id in objs:
                 fut = executors[gpu_id].submit(
-                    run_sim_job, obj_id, dataset, round_idx, gpu_id, cfg_dict
+                    run_sim_job,
+                    obj_id,
+                    dataset_by_obj[obj_id],
+                    round_idx,
+                    gpu_id,
+                    cfg_dict,
                 )
                 futures[fut] = obj_id
 
@@ -455,8 +502,7 @@ def _overall_status(row: dict) -> str:
 
 
 def run_round(
-    objects: list[str],
-    dataset: str,
+    object_jobs: list[ObjectJob],
     round_idx: int,
     cfg_dict: dict,
     sampler_workers: int,
@@ -466,8 +512,12 @@ def run_round(
 ) -> tuple[list[dict], list[dict]]:
     tag = _round_tag(round_idx)
     total_sim_slots = len(sim_gpu_ids) * sim_per_gpu
+    n_by_ds: dict[str, int] = {}
+    for _, ds in object_jobs:
+        n_by_ds[ds] = n_by_ds.get(ds, 0) + 1
+    ds_summary = ", ".join(f"{ds}={n}" for ds, n in sorted(n_by_ds.items()))
     print(f"\n{'='*60}")
-    print(f"Round {round_idx} ({tag})  objects={len(objects)}")
+    print(f"Round {round_idx} ({tag})  objects={len(object_jobs)} ({ds_summary})")
     print(f"  Phase 1: sampler_workers={sampler_workers}")
     print(
         f"  Phase 2: sim_gpu_ids={sim_gpu_ids}  sim_per_gpu={sim_per_gpu}  "
@@ -476,36 +526,41 @@ def run_round(
 
     gen_tasks = [
         (obj_id, dataset, round_idx, i % max(sampler_workers, 1), cfg_dict)
-        for i, obj_id in enumerate(objects)
+        for i, (obj_id, dataset) in enumerate(object_jobs)
     ]
     t_gen = time.time()
     gen_results = _run_parallel(run_gen_job, gen_tasks, sampler_workers, "gen")
     print(f"  Phase 1 done in {time.time() - t_gen:.0f}s")
 
     gen_by_obj = {r["obj_id"]: r for r in gen_results}
-    sim_objects = [
-        o for o in objects
-        if gen_by_obj.get(o, {}).get("grasp_hdf5")
-        and os.path.isfile(gen_by_obj[o]["grasp_hdf5"])
+    sim_jobs = [
+        (obj_id, dataset)
+        for obj_id, dataset in object_jobs
+        if gen_by_obj.get(obj_id, {}).get("grasp_hdf5")
+        and os.path.isfile(gen_by_obj[obj_id]["grasp_hdf5"])
     ]
-    skipped = len(objects) - len(sim_objects)
+    skipped = len(object_jobs) - len(sim_jobs)
     if skipped:
-        print(f"  Sim queue: {len(sim_objects)} objects ({skipped} skipped, no grasp HDF5)")
+        print(f"  Sim queue: {len(sim_jobs)} objects ({skipped} skipped, no grasp HDF5)")
 
     sim_results: list[dict] = []
-    if sim_objects:
-        for gpu_id, objs in _partition_objects_by_gpu(sim_objects, sim_gpu_ids).items():
+    if sim_jobs:
+        for gpu_id, objs in _partition_objects_by_gpu(
+            [o for o, _ in sim_jobs], sim_gpu_ids
+        ).items():
             if objs:
                 print(f"    GPU {gpu_id}: {len(objs)} objects")
         t_sim = time.time()
         sim_results = _run_sim_parallel_per_gpu(
-            sim_objects, dataset, round_idx, cfg_dict, sim_gpu_ids, sim_per_gpu,
+            sim_jobs, round_idx, cfg_dict, sim_gpu_ids, sim_per_gpu,
         )
         print(f"  Phase 2 done in {time.time() - t_sim:.0f}s")
 
     sim_by_obj = {r["obj_id"]: r for r in sim_results}
-    for obj_id in objects:
-        row = _summary_row(obj_id, dataset, round_idx, gen_by_obj.get(obj_id), sim_by_obj.get(obj_id))
+    for obj_id, dataset in object_jobs:
+        row = _summary_row(
+            obj_id, dataset, round_idx, gen_by_obj.get(obj_id), sim_by_obj.get(obj_id),
+        )
         _append_summary(summary_path, row)
 
     return gen_results, sim_results
@@ -541,7 +596,11 @@ def _append_summary(csv_path: str, row: dict):
 
 def main():
     parser = argparse.ArgumentParser(description="Batch grasp: two-phase gen then sim")
-    parser.add_argument("--dataset", default="oakink")
+    parser.add_argument(
+        "--dataset",
+        default="oakink,ycb",
+        help="数据集: oakink / ycb / oakink,ycb / all（默认 oakink+ycb 每轮一起走）",
+    )
     parser.add_argument("--obj", help="只跑单个物体 (smoke test)")
     parser.add_argument("--outdir", default=DEFAULT_OUT)
     parser.add_argument("--target", type=int, default=20, help="每轮每物体 candidate 数")
@@ -576,6 +635,10 @@ def main():
     parser.add_argument("--no-convert", action="store_true", help="跳过 convert_obj_usd")
     parser.add_argument("--headless", action="store_true", default=True)
     parser.add_argument("--resume", action="store_true", help="跳过已有 grasp/gt HDF5")
+    parser.add_argument(
+        "--merge-deduplicate", action="store_true",
+        help="合并 merged/ 时去掉相近 pose（默认不去重）",
+    )
     parser.add_argument("--python-bin", default=sys.executable)
     parser.add_argument("--isaac-python", default=None)
     args = parser.parse_args()
@@ -614,9 +677,19 @@ def main():
     state_path = os.path.join(args.outdir, "state.json")
     summary_path = os.path.join(args.outdir, "summary.csv")
 
-    objects = [args.obj] if args.obj else list_objects(args.dataset)
-    if not objects:
-        print(f"❌ no objects in {args.dataset}")
+    try:
+        if args.obj:
+            object_jobs = resolve_object_jobs(args.obj, args.dataset)
+            if not object_jobs:
+                print(f"❌ --obj {args.obj} not in dataset(s) {args.dataset}")
+                sys.exit(1)
+        else:
+            object_jobs = list_object_jobs(args.dataset)
+    except ValueError as e:
+        print(f"❌ {e}")
+        sys.exit(1)
+    if not object_jobs:
+        print(f"❌ no objects for --dataset {args.dataset}")
         sys.exit(1)
 
     state = _load_state(state_path) if args.resume else {"round": 0, "objects": {}}
@@ -636,10 +709,17 @@ def main():
         python_bin=args.python_bin,
         resume=args.resume,
         sim_gpu_ids=sim_gpu_ids,
+        merge_deduplicate=args.merge_deduplicate,
     )
     cfg_dict = asdict(cfg)
 
-    print(f"Objects: {len(objects)}  rounds: {args.max_rounds}  start_round: {start_round}")
+    n_by_ds: dict[str, int] = {}
+    for _, ds in object_jobs:
+        n_by_ds[ds] = n_by_ds.get(ds, 0) + 1
+    print(
+        f"Objects: {len(object_jobs)} ({', '.join(f'{ds}={n}' for ds, n in sorted(n_by_ds.items()))})  "
+        f"rounds: {args.max_rounds}  start_round: {start_round}"
+    )
     print(f"Out: {args.outdir}")
     print(f"No rotation: {cfg.no_rotation}")
     total_sim = len(sim_gpu_ids) * sim_per_gpu
@@ -650,7 +730,7 @@ def main():
 
     for r in range(start_round, start_round + args.max_rounds):
         run_round(
-            objects, args.dataset, r, cfg_dict,
+            object_jobs, r, cfg_dict,
             sampler_workers, sim_gpu_ids, sim_per_gpu, summary_path,
         )
         state["round"] = r + 1
