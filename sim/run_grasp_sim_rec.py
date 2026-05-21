@@ -1,28 +1,35 @@
 #!/usr/bin/env python3
 """
-Pipeline Stage B: Isaac Sim 抓取执行
-======================================
-输入: Stage A 生成的 HDF5 (抓取位姿)
-输出: Isaac Sim 中 Franka 执行无碰撞抓取
+Pipeline Stage B + per-try viewport 录屏 (run_grasp_sim 同款逻辑)
+================================================================
+与 run_grasp_sim.py 行为一致，额外在每个 candidate try 录制 mp4。
 
-运行:
-    # Run from project root
-    sim45 Pipeline/run_grasp_sim.py --hdf5 Pipeline/output/A16013_grasp.hdf5
-    sim45 Pipeline/run_grasp_sim.py --hdf5 Pipeline/output/A16013_grasp.hdf5 --headless
+运行 (服务器 headed，建议 Xvfb):
+    export DISPLAY=:99
+    Xvfb :99 -screen 0 1920x1080x24 &
+    $ISAAC_SIM_PATH/python.sh sim/run_grasp_sim_rec.py \\
+        --hdf5 output/grasp_collect_no_rot/candidates/smoke_ycb_legacy/ycb_dex_01.hdf5 \\
+        --record-video output/grasp_sim_videos/smoke_ycb \\
+        --max-candidates 5
 
 Pipeline:
-    HDF5 → 搭建场景 → 坐标变换 → cuRobo 规划 → Franka 执行抓取
+    HDF5 → 搭建场景 → 坐标变换 → cuRobo 规划 → Franka 执行抓取 → 每 try 一个 mp4
 """
 from isaacsim import SimulationApp
 import argparse
 import os
 import sys
 import json
+import glob
+import shutil
+import subprocess
 
 # Parse args before SimulationApp (因为 SimulationApp 修改了 sys.argv)
-parser = argparse.ArgumentParser(description="Pipeline Stage B: Isaac Sim Grasp Execution")
+parser = argparse.ArgumentParser(
+    description="Pipeline Stage B: Isaac Sim Grasp Execution + per-try video",
+)
 parser.add_argument("--hdf5", type=str, required=True, help="Stage A 输出的 HDF5 路径")
-parser.add_argument("--headless", action="store_true", help="无头模式")
+parser.add_argument("--headless", action="store_true", help="无头模式 (录屏时建议 headed + Xvfb)")
 parser.add_argument("--object_scale", type=float, default=1.0, help="物体缩放 (默认 1.0)")
 parser.add_argument("--save-result", action="store_true", default=True,
                     help="保存 Robot GT 结果到 HDF5 (默认开启)")
@@ -30,25 +37,24 @@ parser.add_argument("--result-dir", type=str, default=None,
                     help="结果保存目录 (默认 sim/output/robot_gt/)")
 parser.add_argument("--max-candidates", type=int, default=None,
                     help="最多尝试的候选数 (默认全部)")
+parser.add_argument("--record-video", type=str, required=True,
+                    help="录屏输出根目录，如 output/grasp_sim_videos/smoke_ycb")
+parser.add_argument("--record-every", type=int, default=3,
+                    help="每 N 次 world.step 抓 1 帧 viewport")
+parser.add_argument("--record-fps", type=int, default=30, help="合成 mp4 帧率")
+parser.add_argument("--record-keep-frames", action="store_true",
+                    help="保留 PNG 帧目录 (默认 encode 后删除)")
+parser.add_argument("--record-include-reset", action="store_true",
+                    help="try 结束后把场景重置也录进同一段 (默认不含)")
+parser.add_argument("--no-wait-enter", action="store_true",
+                    help="headed 时不等待终端 Enter，直接开始抓取")
 args, _ = parser.parse_known_args()
 
-simulation_app = SimulationApp({
-    "headless": args.headless,
-    "renderer": "RayTracedLighting",   # 清晰稳定，无噪点；Path Tracing 需大量采样才收敛
-})
+simulation_app = SimulationApp({"headless": args.headless})
 
-# render=True 在非 headless 模式显示流畅运动；headless 模式下 render=False 加速
+
+# render=True 在非 headless 模式显示流畅运动；录屏时 step 强制 render
 RENDER_SIM = not args.headless
-
-# ── 彻底关闭 Path Tracing 噪点（设置即时生效）────────────────────────────────
-import carb
-_s = carb.settings.get_settings()
-_s.set("/rtx/rendermode",                   "RayTracedLighting")
-_s.set("/rtx/pathtracing/spp",              1)     # samples per pixel = 1
-_s.set("/rtx/pathtracing/totalSpp",         1)
-_s.set("/rtx/pathtracing/clampSpp",         0)
-_s.set("/rtx/post/aa/op",                   3)     # DLSS / TAA 抗锯齿，平滑画面
-
 
 import numpy as np
 import h5py
@@ -106,6 +112,126 @@ try:
     OBJECT_ROTATION_OVERRIDES = {k: v for k, v in OBJECT_ROTATION_OVERRIDES.items() if not k.startswith('_')}
 except Exception:
     OBJECT_ROTATION_OVERRIDES = {}
+
+
+# ============================================================
+# Per-try viewport recording (route 1: PNG → ffmpeg mp4)
+# ============================================================
+class TryVideoRecorder:
+    """每个 candidate try：start → capture on world.step → stop → mp4."""
+
+    def __init__(self, root_dir, record_every, fps, keep_frames):
+        self.root_dir = os.path.abspath(root_dir)
+        self.record_every = max(1, int(record_every))
+        self.fps = max(1, int(fps))
+        self.keep_frames = keep_frames
+        self._active = False
+        self._frames_dir = None
+        self._frame_idx = 0
+        self._step_counter = 0
+        self._viewport = None
+        self._vu = None
+        self._orig_world_step = None
+        self._manifest = []
+        os.makedirs(self.root_dir, exist_ok=True)
+
+    def _ensure_viewport(self):
+        if self._viewport is not None:
+            return
+        import omni.kit.viewport.utility as vu
+        self._vu = vu
+        self._viewport = vu.get_active_viewport()
+        if self._viewport is None:
+            raise RuntimeError("No active viewport — use headed mode (DISPLAY + Xvfb) for recording")
+
+    def attach_world(self, world):
+        self._orig_world_step = world.step
+
+        def step_with_capture(render=True):
+            use_render = render or self._active
+            self._orig_world_step(render=use_render)
+            if self._active:
+                self._maybe_capture()
+
+        world.step = step_with_capture
+
+    def _maybe_capture(self):
+        self._step_counter += 1
+        if self._step_counter % self.record_every != 0:
+            return
+        self._ensure_viewport()
+        path = os.path.join(self._frames_dir, f"f_{self._frame_idx:05d}.png")
+        self._vu.capture_viewport_to_file(self._viewport, path)
+        self._frame_idx += 1
+
+    def start(self, obj_id, attempt_idx, cand_name):
+        self._ensure_viewport()
+        slug = "".join(c if c.isalnum() or c in "-_" else "_" for c in cand_name)
+        base = f"{attempt_idx + 1:02d}_{slug}"
+        self._frames_dir = os.path.join(self.root_dir, obj_id, base, "frames")
+        os.makedirs(self._frames_dir, exist_ok=True)
+        for p in glob.glob(os.path.join(self._frames_dir, "*.png")):
+            os.remove(p)
+        self._frame_idx = 0
+        self._step_counter = 0
+        self._active = True
+        self._current_base = base
+        self._current_mp4 = os.path.join(self.root_dir, obj_id, f"{base}.mp4")
+        cprint(f"  📹 REC start → {self._current_mp4}", "magenta")
+        for _ in range(3):
+            self._maybe_capture()
+
+    def stop(self, success, score, approach_type):
+        if not self._active:
+            return None
+        self._active = False
+        n_frames = self._frame_idx
+        mp4_path = self._current_mp4
+        if n_frames > 0:
+            self._encode_mp4()
+        else:
+            cprint(f"  📹 REC skip (0 frames): {mp4_path}", "yellow")
+        if not self.keep_frames and self._frames_dir and os.path.isdir(self._frames_dir):
+            shutil.rmtree(os.path.dirname(self._frames_dir), ignore_errors=True)
+        entry = {
+            "video": mp4_path,
+            "name": self._current_base,
+            "n_frames": n_frames,
+            "success": bool(success),
+            "score": float(score),
+            "approach_type": str(approach_type),
+        }
+        self._manifest.append(entry)
+        cprint(f"  📹 REC done  {n_frames} frames → {mp4_path}", "magenta")
+        return mp4_path
+
+    def _encode_mp4(self):
+        pattern = os.path.join(self._frames_dir, "f_%05d.png")
+        cmd = [
+            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+            "-framerate", str(self.fps),
+            "-i", pattern,
+            "-c:v", "libx264", "-pix_fmt", "yuv420p",
+            self._current_mp4,
+        ]
+        try:
+            subprocess.run(cmd, check=True)
+        except FileNotFoundError:
+            cprint("  ❌ ffmpeg not found; PNG frames kept in " + self._frames_dir, "red")
+        except subprocess.CalledProcessError as e:
+            cprint(f"  ❌ ffmpeg failed: {e}; frames in {self._frames_dir}", "red")
+
+    def write_manifest(self, obj_id, hdf5_path):
+        manifest_path = os.path.join(self.root_dir, obj_id, "manifest.jsonl")
+        os.makedirs(os.path.dirname(manifest_path), exist_ok=True)
+        with open(manifest_path, "w", encoding="utf-8") as mf:
+            for row in self._manifest:
+                row = dict(row)
+                row["obj_id"] = obj_id
+                row["hdf5"] = os.path.abspath(hdf5_path)
+                mf.write(json.dumps(row, ensure_ascii=False) + "\n")
+        cprint(f"  📹 manifest → {manifest_path}", "magenta")
+
 
 # ============================================================
 # Scene Setup
@@ -191,27 +317,22 @@ def setup_scene(obj_id, object_scale):
     obj_orientation = list(OBJECT_ORIENTATION)
 
     # ── z_offset 优先级: meta JSON > override config > 启发式 ────────────────
-    # meta JSON 由 interactive_align / batch_write_meta 生成
+    # meta JSON 由 convert_obj_usd.py 生成（精确值：使物体底面落在 Z=0）
     _meta_path = usd_path.replace('.usd', '_meta.json')
-    _meta = {}
     if os.path.exists(_meta_path):
         with open(_meta_path) as _mf:
             _meta = json.load(_mf)
-
-    obj_z_offset = float(_meta.get('z_offset_m', 0.075 * object_scale))
-    cprint(f"   z_offset: {obj_id} → {obj_z_offset*100:.1f}cm", "cyan")
-
-    # ── 朝向：优先用 R_align_euler（人工对齐），其次 override，最后默认 [0,0,0] ──
-    if 'R_align_euler' in _meta:
-        # interactive_align 保存的是绕 USD 坐标轴的旋转，直接用作 Sim 朝向
-        obj_orientation = list(_meta['R_align_euler'])   # [rx, ry, rz] in degrees
-        cprint(f"   orientation (R_align): {[round(e,1) for e in obj_orientation]}°", "cyan")
-    elif isinstance(_override, dict) and 'rotation' in _override:
-        obj_orientation = _override['rotation']
-        cprint(f"   ⮻ 朝向覆盖 (override): {obj_orientation}°", "cyan")
+        obj_z_offset = float(_meta.get('z_offset_m', 0.075 * object_scale))
+        cprint(f"   z_offset (meta): {obj_id} → {obj_z_offset*100:.1f}cm", "cyan")
+    elif isinstance(_override, dict) and 'z_offset' in _override:
+        obj_z_offset = _override['z_offset']
+        cprint(f"   z_offset (override): {obj_id} → {obj_z_offset*100:.1f}cm", "cyan")
     else:
-        obj_orientation = list(OBJECT_ORIENTATION)   # [0, 0, 0]
+        obj_z_offset = 0.075 * object_scale   # 7.5cm 启发式
 
+    if isinstance(_override, dict) and 'rotation' in _override:
+        obj_orientation = _override['rotation']
+        cprint(f"   ⮻ 朝向覆盖: {obj_id} → {obj_orientation}°", "cyan")
 
     obj_pos = list(OBJECT_POSITION)
     obj_pos[2] += obj_z_offset
@@ -285,8 +406,7 @@ def setup_scene(obj_id, object_scale):
         world.step(render=RENDER_SIM)
 
     # ── cuRobo 规划用物体 mesh（规划层碰撞，不影响 PhysX）────────────────────
-    scene_out = {"world": world, "franka": franka, "obj": obj,
-                 "z_offset": obj_z_offset}   # 供 execute_grasp 接触点计算用
+    scene_out = {"world": world, "franka": franka, "obj": obj}
     mesh_info = prepare_curobo_mesh(stage, obj.rigid_prim_path)
     if mesh_info is not None:
         scene_out["curobo_mesh_vertices"] = mesh_info["vertices"]
@@ -761,48 +881,28 @@ def execute_grasp(scene, grasp_pos_obj, grasp_rot_obj, gripper_width, object_sca
         else:
             cprint(f"      ✅ 夹爪稳定 (变化 {delta*100:.3f}cm)", "green")
 
-    # ---- ★ Phase 4 结束后立即记录 pose + 接触点 ----
-    # 此时夹爪已稳定夹住物体，记录的是真实夹持状态
-    # 提起后如果掉落，这份数据会被丢弃
-    cprint(f"   📸 Recording grasp state (before lift)...", "cyan")
-    candidate_record = {'contact_points_local': None, 'finger_width_actual': None,
-                        'obj_pose_at_grasp': None}
     try:
-        from pxr import UsdGeom as _UG
-        _stage = world.stage
-        _lx = _UG.Xformable(_stage.GetPrimAtPath("/World/Franka/panda_leftfinger"))
-        _rx = _UG.Xformable(_stage.GetPrimAtPath("/World/Franka/panda_rightfinger"))
-        _lw = np.array(_lx.ComputeLocalToWorldTransform(0).ExtractTranslation())
-        _rw = np.array(_rx.ComputeLocalToWorldTransform(0).ExtractTranslation())
+        executed_at_close = snapshot_panda_hand_object_mesh(franka, scene, object_scale)
+        p = executed_at_close['position']
+        cprint(
+            f"   📌 panda_hand@at_close (obj): [{p[0]:.4f}, {p[1]:.4f}, {p[2]:.4f}]",
+            "magenta",
+        )
+    except Exception as e:
+        executed_at_close = None
+        cprint(f"   ⚠️ panda_hand@at_close 记录失败: {e}", "yellow")
 
-        _obj_init = np.array(OBJECT_POSITION)
-        _obj_init[2] += scene.get("z_offset", 0.075)
-        _ll = _lw - _obj_init
-        _rl = _rw - _obj_init
-        _fw = float(np.linalg.norm(_lw - _rw))
-
-        # 物体当前世界 pose（夹稳后，可能已相对初始位置有微小偏移）
-        _obj_pos_now, _obj_quat_now = scene["obj"].get_obj_pos()
-
-        candidate_record['contact_points_local'] = np.array([_ll, _rl], dtype=np.float32)
-        candidate_record['finger_width_actual']  = _fw
-        candidate_record['obj_pose_at_grasp']    = {
-            'pos':  _obj_pos_now.copy(),
-            'quat': _obj_quat_now.copy(),
-        }
-        cprint(f"   📐 夹持接触 (lift前): L={_ll.round(4)}, R={_rl.round(4)}, width={_fw*100:.2f}cm", "magenta")
-    except Exception as _e:
-        cprint(f"   ⚠️ 夹持记录失败 (non-fatal): {_e}", "yellow")
-
-    # ---- Phase 5: 提起 ----
+    # ---- Phase 5: 提起 (物体 mesh 仍清除 — 物体随夹爪一起移动) ----
     cprint(f"   → [5/5] Planning lift (no object mesh)...", "yellow")
     traj_lift = plan_trajectory(_CUROBO_MG, franka, lift_pos, quat_wxyz,
                                 label="lift", scene=scene, use_object_mesh=False)
 
     if traj_lift is not None:
         cprint(f"   ✅ Lift trajectory: {len(traj_lift)} steps", "green")
+        # close_gripper() 只需调一次, 控制器会持续施力
         franka.close_gripper()
         for joint_pos in traj_lift:
+            # 用 apply_action 或直接设 DC target, 只设手臂
             from omni.isaac.core.utils.types import ArticulationAction
             action = ArticulationAction(
                 joint_positions=np.concatenate([joint_pos, np.array([None, None])]),
@@ -813,31 +913,60 @@ def execute_grasp(scene, grasp_pos_obj, grasp_rot_obj, gripper_width, object_sca
     else:
         cprint(f"   ⚠️ Lift planning failed, skipping", "yellow")
 
-    # 提起后稳定等待
+    # 稳定 — 夹爪控制器持续施力
     for _ in range(80):
         world.step(render=RENDER_SIM)
 
-    # ---- 检查结果：提起后物体是否还在空中 ----
+    # ---- 检查结果 ----
     obj_after, _ = scene["obj"].get_obj_pos()
     z_delta = obj_after[2] - initial_z
     success = z_delta > 0.03
 
     cprint(f"   📍 obj Z: {initial_z:.4f} → {obj_after[2]:.4f} (Δ={z_delta:.4f}m)", "cyan")
 
+    result = _grasp_result_base(success=success)
+    result['executed_at_close'] = executed_at_close
+
+    try:
+        executed_post_lift = snapshot_panda_hand_object_mesh(franka, scene, object_scale)
+        p = executed_post_lift['position']
+        cprint(
+            f"   📌 panda_hand@post_lift (obj): [{p[0]:.4f}, {p[1]:.4f}, {p[2]:.4f}]",
+            "magenta",
+        )
+    except Exception as e:
+        executed_post_lift = None
+        cprint(f"   ⚠️ panda_hand@post_lift 记录失败: {e}", "yellow")
+    result['executed_post_lift'] = executed_post_lift
+
     if success:
-        # 提起稳定 → 保留 Phase4 记录的接触点数据
-        cprint(f"   ✅ GRASP SUCCESS! 保留夹持记录", "green", "on_green")
-        result = {
-            'success': True,
-            'contact_points_local': candidate_record['contact_points_local'],
-            'finger_width_actual':  candidate_record['finger_width_actual'],
-            'obj_pose_at_grasp':    candidate_record['obj_pose_at_grasp'],
-        }
+        cprint(f"   ✅ GRASP SUCCESS!", "green", "on_green")
+        # ★ 提取手指尖实际位置 (世界坐标)
+        try:
+            from pxr import UsdGeom
+            stage = world.stage
+            # 获取左右手指的世界位置
+            left_xform = UsdGeom.Xformable(stage.GetPrimAtPath("/World/Franka/panda_leftfinger"))
+            right_xform = UsdGeom.Xformable(stage.GetPrimAtPath("/World/Franka/panda_rightfinger"))
+            left_world = np.array(left_xform.ComputeLocalToWorldTransform(0).ExtractTranslation())
+            right_world = np.array(right_xform.ComputeLocalToWorldTransform(0).ExtractTranslation())
+
+            # 转换到物体初始局部坐标系
+            # 物体初始位置 = OBJECT_POSITION + z_offset
+            obj_init_pos = np.array(OBJECT_POSITION)
+            obj_init_pos[2] += 0.075 * object_scale  # z offset
+            left_local = left_world - obj_init_pos
+            right_local = right_world - obj_init_pos
+
+            finger_width = np.linalg.norm(left_world - right_world)
+            cprint(f"   📐 手指接触: L={left_local}, R={right_local}, width={finger_width*100:.2f}cm", "magenta")
+
+            result['contact_points_local'] = np.array([left_local, right_local], dtype=np.float32)
+            result['finger_width_actual'] = float(finger_width)
+        except Exception as e:
+            cprint(f"   ⚠️ 无法提取手指位置: {e}", "yellow")
     else:
-        # 提起后掉落 → 丢弃，不保存任何数据
-        cprint(f"   ❌ GRASP FAILED (物体提起后掉落，丢弃夹持记录)", "red")
-        result = {'success': False, 'contact_points_local': None,
-                  'finger_width_actual': None, 'obj_pose_at_grasp': None}
+        cprint(f"   ❌ GRASP FAILED", "red")
 
     return result
 
@@ -855,9 +984,10 @@ def main():
 
     # ---- 读取 HDF5 ----
     cprint("=" * 60, "cyan")
-    cprint("Pipeline Stage B: Isaac Sim Grasp Execution", "cyan")
+    cprint("Pipeline Stage B: Isaac Sim Grasp Execution (+ per-try video)", "cyan")
     cprint("=" * 60, "cyan")
     cprint(f"  HDF5: {h5_path}", "cyan")
+    cprint(f"  Record: {args.record_video}  every={args.record_every}  fps={args.record_fps}", "magenta")
 
     file_prerot = None
     _no_rotation = True
@@ -866,7 +996,7 @@ def main():
         if "metadata" in f:
             # v2 自动生成格式
             obj_id = f["metadata"].attrs["obj_id"]
-            n_contact = f["affordance"].attrs.get("n_contact", 0) if "affordance" in f else 0
+            n_contact = f["affordance"].attrs.get("n_contact", 0)
         else:
             # 手动标注格式
             obj_id = f.attrs.get('object_id', f.attrs.get('obj_id', 'unknown'))
@@ -896,15 +1026,11 @@ def main():
 
         if "candidates" in f:
             # v2 自动生成: candidates/candidate_N
-            cg = f["candidates"]
-            n_cand = int(cg.attrs.get("n_candidates", len(cg)))
-            # 读取 mesh 预旋转 (默认无)
-            _meta = f.get("metadata", None)
-            mesh_prerot = list(_meta.attrs.get("mesh_prerotation_euler", [0.0, 0.0, 0.0])) if _meta else [0.0, 0.0, 0.0]
+            n_cand = f["candidates"].attrs["n_candidates"]
             for i in range(n_cand):
-                key = f"candidate_{i}"
-                if key not in cg: continue
-                ci = cg[key]
+                ci = f[f"candidates/candidate_{i}"]
+                pose_pr = read_mesh_prerotation_hdf5_pose(ci, f) or file_prerot
+                sim_prerot_euler = list(pose_pr["euler_xyz_deg"])
                 grasp_candidates.append({
                     "name": ci.attrs["name"],
                     "score": ci.attrs["score"],
@@ -986,8 +1112,16 @@ def main():
         simulation_app.close()
         return
 
+    recorder = TryVideoRecorder(
+        args.record_video,
+        args.record_every,
+        args.record_fps,
+        args.record_keep_frames,
+    )
+    recorder.attach_world(scene["world"])
+
     # ---- 等待用户调整视角 (Sim 保持交互) ----
-    if not args.headless:
+    if not args.headless and not args.no_wait_enter:
         import select
         cprint("=" * 50, "cyan")
         cprint("🎥 Sim 窗口已就绪，物体已放置到桌面", "cyan")
@@ -998,7 +1132,8 @@ def main():
             if select.select([sys.stdin], [], [], 0)[0]:
                 sys.stdin.readline()
                 break
-
+    elif not args.headless and args.no_wait_enter:
+        cprint("🎥 --no-wait-enter: 跳过 Enter，直接开始抓取+录屏", "cyan")
 
     # ---- 逐候选尝试抓取 ----
     success = False
@@ -1009,6 +1144,8 @@ def main():
         cprint(f"\n{'='*40}", "yellow")
         cprint(f"  🔄 Attempt {attempt+1}/{len(grasp_candidates)}: {cand['name']} (score={cand['score']:.1f})", "yellow")
         cprint(f"{'='*40}", "yellow")
+
+        recorder.start(obj_id, attempt, cand["name"])
 
         try:
             # 自动生成 (is_manual=False): position=panda_hand, 不减 TCP
@@ -1032,6 +1169,12 @@ def main():
             success = False
             grasp_result = _grasp_result_base(success=False)
 
+        video_path = None
+        if not args.record_include_reset:
+            video_path = recorder.stop(
+                success, cand["score"], cand.get("approach_type", "unknown"),
+            )
+
         candidate_results.append({
             'name': cand['name'],
             'score': cand['score'],
@@ -1043,6 +1186,7 @@ def main():
             'contact_points_local': grasp_result.get('contact_points_local'),
             'finger_width_actual': grasp_result.get('finger_width_actual'),
             'mesh_prerotation': cand.get('mesh_prerotation', file_prerot),
+            'video_path': video_path,
             'executed_at_close': grasp_result.get('executed_at_close'),
             'executed_post_lift': grasp_result.get('executed_post_lift'),
         })
@@ -1080,6 +1224,14 @@ def main():
             # 等物理稳定 (多等几步确保鼠标落稳)
             for _ in range(150):
                 scene["world"].step(render=RENDER_SIM)
+
+        if args.record_include_reset:
+            video_path = recorder.stop(
+                success, cand["score"], cand.get("approach_type", "unknown"),
+            )
+            candidate_results[-1]["video_path"] = video_path
+
+    recorder.write_manifest(obj_id, h5_path)
 
     # ---- 保存 Robot GT 结果 (所有成功的都保存) ----
     successful_grasps = [cr for cr in candidate_results if cr['success']]
@@ -1165,6 +1317,8 @@ def main():
                 ci.attrs['success'] = cr['success']
                 ci.attrs['gripper_width'] = cr['gripper_width']
                 ci.attrs['approach_type'] = cr['approach_type']
+                if cr.get('video_path'):
+                    ci.attrs['video_path'] = cr['video_path']
                 ci.create_dataset('grasp_point', data=cr['grasp_point'])
                 ci.create_dataset('rotation', data=cr['rotation'])
                 write_mesh_prerotation_hdf5(
@@ -1174,6 +1328,7 @@ def main():
                 write_executed_panda_hand_hdf5(ci, cr.get('executed_post_lift'), 'post_lift')
 
         cprint(f"\n  📁 Saved: {result_path}  ({len(successful_grasps)} 个成功GT)", "green")
+        cprint(f"  📹 Videos: {os.path.join(args.record_video, obj_id)}/", "magenta")
 
     # ---- 等待观察 ----
     if not args.headless:
