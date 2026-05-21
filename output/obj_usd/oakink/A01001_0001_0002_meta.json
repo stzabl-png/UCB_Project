@@ -1,0 +1,54 @@
+{
+  "obj_id": "A01001_0001_0002",
+  "R_align_euler": [
+    0.0,
+    0.0,
+    0.0
+  ],
+  "R_align_matrix": [
+    [
+      1.0,
+      0.0,
+      0.0
+    ],
+    [
+      0.0,
+      1.0,
+      0.0
+    ],
+    [
+      0.0,
+      0.0,
+      1.0
+    ]
+  ],
+  "z_offset_m": 0.143396,
+  "source": "interactive_align",
+  "T_ply_to_sim": [
+    [
+      1.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      0.0,
+      2.220446049250313e-16,
+      1.0,
+      0.0
+    ],
+    [
+      0.0,
+      -1.0,
+      2.220446049250313e-16,
+      0.0
+    ],
+    [
+      0.0,
+      0.0,
+      0.0,
+      1.0
+    ]
+  ],
+  "note": "R_align: apply to USD mesh at runtime to get upright pose; z_offset recomputed after R_align"
+}

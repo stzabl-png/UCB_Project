@@ -561,6 +561,62 @@ def visualize_candidates(mesh, candidates, obj_id):
     vis.run()
     vis.destroy_window()
 
+def load_mesh_from_usd(obj_id: str, dataset: str = 'oakink') -> 'trimesh.Trimesh | None':
+    """
+    从 USD 文件加载 mesh 顶点，返回 trimesh 对象。
+
+    为什么用 USD 而不用 PLY：
+      convert_batch_usd 转换时将 PLY 的 Y 轴变成 USD 的 Z 轴（Y-up→Z-up）。
+      Isaac Sim 加载 USD 时物体坚标系 = USD 坚标系。
+      grasp candidates 必须和 USD/Sim 坚标系一致才能正确 transform。
+    """
+    import glob
+    from pxr import Usd, UsdGeom
+
+    # 搜寻 USD 路径
+    usd_root = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            'output', 'obj_usd')
+    usd_path = None
+    for root, _, files in os.walk(usd_root):
+        for f in files:
+            if f == f'{obj_id}.usd':
+                usd_path = os.path.join(root, f)
+                break
+        if usd_path:
+            break
+
+    if usd_path is None:
+        return None
+
+    try:
+        stage = Usd.Stage.Open(usd_path)
+        all_verts, all_faces = [], []
+        offset = 0
+        for prim in stage.Traverse():
+            m = UsdGeom.Mesh(prim)
+            if not m:
+                continue
+            pts = m.GetPointsAttr().Get()
+            idx = m.GetFaceVertexIndicesAttr().Get()
+            if pts is None or idx is None:
+                continue
+            v = np.array(pts, dtype=np.float32)
+            f = np.array(idx, dtype=np.int32).reshape(-1, 3)
+            all_verts.append(v)
+            all_faces.append(f + offset)
+            offset += len(v)
+
+        if not all_verts:
+            return None
+
+        verts = np.concatenate(all_verts, axis=0)
+        faces = np.concatenate(all_faces, axis=0)
+        mesh = trimesh.Trimesh(vertices=verts, faces=faces, process=False)
+        return mesh
+    except Exception as e:
+        print(f'     [USD load failed: {e}, falling back to PLY]')
+        return None
+
 
 def process_one_object(
     obj_id,
@@ -593,10 +649,44 @@ def process_one_object(
     if not os.path.exists(mesh_path):
         return None, 'no_mesh'
 
-    mesh = trimesh.load(mesh_path, force='mesh')
-    if scale != 1.0:
-        mesh.vertices *= scale
+    # ── 加载 mesh：优先用 USD（和 Sim 坚标系一致），PLY 作为 fallback ────────────
+    mesh_usd = load_mesh_from_usd(obj_id, dataset)
+    if mesh_usd is not None:
+        mesh = mesh_usd
 
+        # 读取 R_align（interactive_align 保存的人工标注旋转）
+        usd_root = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                'output', 'obj_usd')
+        meta_path = None
+        for root, _, files in os.walk(usd_root):
+            for f in files:
+                if f == f'{obj_id}_meta.json':
+                    meta_path = os.path.join(root, f)
+                    break
+            if meta_path:
+                break
+
+        if meta_path and os.path.exists(meta_path):
+            import json as _json
+            _meta = _json.load(open(meta_path))
+            if 'R_align_matrix' in _meta:
+                R_align = np.array(_meta['R_align_matrix'], dtype=np.float64)
+                mesh.vertices = (R_align @ np.array(mesh.vertices, dtype=np.float64).T).T
+                euler = _meta.get('R_align_euler', '?')
+                print(f'     [R_align applied: {euler}° → 正立坐标系 ✅]')
+            else:
+                print(f'     [mesh from USD  — 和 Sim 坚标系一致 ✅]')
+        else:
+            print(f'     [mesh from USD  — 和 Sim 坚标系一致 ✅]')
+        # USD 顶点已经是米制（metersPerUnit=1.0），不需要再乘 scale
+    else:
+        mesh = trimesh.load(mesh_path, force='mesh')
+        if scale != 1.0:
+            mesh.vertices *= scale
+        print(f'     [mesh from PLY (USD not found, fallback)]')
+
+
+    # no_rotation 已为默认 True（不应用 rotation.json）
     if not no_rotation:
         import sys as _sys
         _tools_dir = os.path.dirname(os.path.abspath(__file__))
@@ -615,7 +705,10 @@ def process_one_object(
         else:
             print(f'     [canonical rot: identity]')
     else:
-        print(f'     [no rotation: raw SAM3D mesh + scale only]')
+        if mesh_usd is not None:
+            print(f'     [no rotation: USD mesh 坐标系就是 Sim 坐标系]')
+        else:
+            print(f'     [no rotation: raw SAM3D mesh + scale only]')
 
     if not mesh.is_watertight:
         trimesh.repair.fill_holes(mesh)
@@ -666,8 +759,9 @@ def main():
                         help=f'目标候选数 (默认 {TARGET_HIGH_QUALITY})')
     parser.add_argument('--score-threshold', type=float, default=SCORE_THRESHOLD,
                         help=f'分数门槛 (默认 {SCORE_THRESHOLD})')
-    parser.add_argument('--no-rotation', action='store_true',
-                        help='不应用 rotation.json，使用 SAM3D 原始 mesh 朝向')
+    parser.add_argument('--use-rotation', action='store_true',
+                        help='应用 rotation.json（旧行为，向后兼容）'
+                             '；默认已关闭，使用 SAM3D 原始 mesh 朝向')
     args = parser.parse_args()
 
     # 推理模式：切换目录
@@ -717,8 +811,10 @@ def main():
     print('=' * 60)
     print(f'  Grasp Sampler v2 [{mode}] (50%HP + 50%rnd)')
     print(f'  Target: {args.target} candidates ≥ {args.score_threshold} pts')
-    if args.no_rotation:
-        print('  Rotation: OFF (raw mesh)')
+    if not args.use_rotation:
+        print('  Rotation: OFF (SAM3D original mesh, default)')
+    else:
+        print('  Rotation: ON  (rotation.json applied, legacy mode)')
     print('=' * 60)
 
     generated = 0
@@ -736,7 +832,7 @@ def main():
             obj_id, mesh_path, scale, hp_name, hp_dir_use, _out_dir,
             dataset=_ds,
             force=args.force,
-            no_rotation=args.no_rotation,
+            no_rotation=not args.use_rotation,   # 默认 True：SAM3D 原始姿态
             target_n=args.target,
             score_threshold=args.score_threshold,
             arctic=args.arctic,

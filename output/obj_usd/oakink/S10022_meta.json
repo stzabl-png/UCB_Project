@@ -1,0 +1,56 @@
+{
+  "obj_id": "S10022",
+  "z_offset_m": 0.043291,
+  "scale_factor": 0.097831,
+  "source_mesh": "/home/lyh/Project/Affordance2Grasp/data_hub/ProcessedData/obj_meshes/oakink/S10022/mesh.ply",
+  "source": "usd_mesh_ralign",
+  "note": "z_offset computed from USD vertices after R_align (if any)",
+  "R_align_euler": [
+    76.0,
+    0.0,
+    0.0
+  ],
+  "R_align_matrix": [
+    [
+      1.0,
+      0.0,
+      0.0
+    ],
+    [
+      0.0,
+      0.2419218955996677,
+      -0.9702957262759978
+    ],
+    [
+      0.0,
+      0.9702957262759978,
+      0.2419218955996677
+    ]
+  ],
+  "T_ply_to_sim": [
+    [
+      1.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      0.0,
+      0.9702957262759978,
+      0.24192189559966748,
+      0.0
+    ],
+    [
+      0.0,
+      -0.24192189559966748,
+      0.9702957262759978,
+      0.0
+    ],
+    [
+      0.0,
+      0.0,
+      0.0,
+      1.0
+    ]
+  ]
+}

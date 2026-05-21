@@ -32,11 +32,23 @@ parser.add_argument("--max-candidates", type=int, default=None,
                     help="最多尝试的候选数 (默认全部)")
 args, _ = parser.parse_known_args()
 
-simulation_app = SimulationApp({"headless": args.headless})
-
+simulation_app = SimulationApp({
+    "headless": args.headless,
+    "renderer": "RayTracedLighting",   # 清晰稳定，无噪点；Path Tracing 需大量采样才收敛
+})
 
 # render=True 在非 headless 模式显示流畅运动；headless 模式下 render=False 加速
 RENDER_SIM = not args.headless
+
+# ── 彻底关闭 Path Tracing 噪点（设置即时生效）────────────────────────────────
+import carb
+_s = carb.settings.get_settings()
+_s.set("/rtx/rendermode",                   "RayTracedLighting")
+_s.set("/rtx/pathtracing/spp",              1)     # samples per pixel = 1
+_s.set("/rtx/pathtracing/totalSpp",         1)
+_s.set("/rtx/pathtracing/clampSpp",         0)
+_s.set("/rtx/post/aa/op",                   3)     # DLSS / TAA 抗锯齿，平滑画面
+
 
 import numpy as np
 import h5py
@@ -179,22 +191,27 @@ def setup_scene(obj_id, object_scale):
     obj_orientation = list(OBJECT_ORIENTATION)
 
     # ── z_offset 优先级: meta JSON > override config > 启发式 ────────────────
-    # meta JSON 由 convert_obj_usd.py 生成（精确值：使物体底面落在 Z=0）
+    # meta JSON 由 interactive_align / batch_write_meta 生成
     _meta_path = usd_path.replace('.usd', '_meta.json')
+    _meta = {}
     if os.path.exists(_meta_path):
         with open(_meta_path) as _mf:
             _meta = json.load(_mf)
-        obj_z_offset = float(_meta.get('z_offset_m', 0.075 * object_scale))
-        cprint(f"   z_offset (meta): {obj_id} → {obj_z_offset*100:.1f}cm", "cyan")
-    elif isinstance(_override, dict) and 'z_offset' in _override:
-        obj_z_offset = _override['z_offset']
-        cprint(f"   z_offset (override): {obj_id} → {obj_z_offset*100:.1f}cm", "cyan")
-    else:
-        obj_z_offset = 0.075 * object_scale   # 7.5cm 启发式
 
-    if isinstance(_override, dict) and 'rotation' in _override:
+    obj_z_offset = float(_meta.get('z_offset_m', 0.075 * object_scale))
+    cprint(f"   z_offset: {obj_id} → {obj_z_offset*100:.1f}cm", "cyan")
+
+    # ── 朝向：优先用 R_align_euler（人工对齐），其次 override，最后默认 [0,0,0] ──
+    if 'R_align_euler' in _meta:
+        # interactive_align 保存的是绕 USD 坐标轴的旋转，直接用作 Sim 朝向
+        obj_orientation = list(_meta['R_align_euler'])   # [rx, ry, rz] in degrees
+        cprint(f"   orientation (R_align): {[round(e,1) for e in obj_orientation]}°", "cyan")
+    elif isinstance(_override, dict) and 'rotation' in _override:
         obj_orientation = _override['rotation']
-        cprint(f"   ⮻ 朝向覆盖: {obj_id} → {obj_orientation}°", "cyan")
+        cprint(f"   ⮻ 朝向覆盖 (override): {obj_orientation}°", "cyan")
+    else:
+        obj_orientation = list(OBJECT_ORIENTATION)   # [0, 0, 0]
+
 
     obj_pos = list(OBJECT_POSITION)
     obj_pos[2] += obj_z_offset
@@ -268,7 +285,8 @@ def setup_scene(obj_id, object_scale):
         world.step(render=RENDER_SIM)
 
     # ── cuRobo 规划用物体 mesh（规划层碰撞，不影响 PhysX）────────────────────
-    scene_out = {"world": world, "franka": franka, "obj": obj}
+    scene_out = {"world": world, "franka": franka, "obj": obj,
+                 "z_offset": obj_z_offset}   # 供 execute_grasp 接触点计算用
     mesh_info = prepare_curobo_mesh(stage, obj.rigid_prim_path)
     if mesh_info is not None:
         scene_out["curobo_mesh_vertices"] = mesh_info["vertices"]
@@ -686,17 +704,48 @@ def execute_grasp(scene, grasp_pos_obj, grasp_rot_obj, gripper_width, object_sca
         else:
             cprint(f"      ✅ 夹爪稳定 (变化 {delta*100:.3f}cm)", "green")
 
-    # ---- Phase 5: 提起 (物体 mesh 仍清除 — 物体随夹爪一起移动) ----
+    # ---- ★ Phase 4 结束后立即记录 pose + 接触点 ----
+    # 此时夹爪已稳定夹住物体，记录的是真实夹持状态
+    # 提起后如果掉落，这份数据会被丢弃
+    cprint(f"   📸 Recording grasp state (before lift)...", "cyan")
+    candidate_record = {'contact_points_local': None, 'finger_width_actual': None,
+                        'obj_pose_at_grasp': None}
+    try:
+        from pxr import UsdGeom as _UG
+        _stage = world.stage
+        _lx = _UG.Xformable(_stage.GetPrimAtPath("/World/Franka/panda_leftfinger"))
+        _rx = _UG.Xformable(_stage.GetPrimAtPath("/World/Franka/panda_rightfinger"))
+        _lw = np.array(_lx.ComputeLocalToWorldTransform(0).ExtractTranslation())
+        _rw = np.array(_rx.ComputeLocalToWorldTransform(0).ExtractTranslation())
+
+        _obj_init = np.array(OBJECT_POSITION)
+        _obj_init[2] += scene.get("z_offset", 0.075)
+        _ll = _lw - _obj_init
+        _rl = _rw - _obj_init
+        _fw = float(np.linalg.norm(_lw - _rw))
+
+        # 物体当前世界 pose（夹稳后，可能已相对初始位置有微小偏移）
+        _obj_pos_now, _obj_quat_now = scene["obj"].get_obj_pos()
+
+        candidate_record['contact_points_local'] = np.array([_ll, _rl], dtype=np.float32)
+        candidate_record['finger_width_actual']  = _fw
+        candidate_record['obj_pose_at_grasp']    = {
+            'pos':  _obj_pos_now.copy(),
+            'quat': _obj_quat_now.copy(),
+        }
+        cprint(f"   📐 夹持接触 (lift前): L={_ll.round(4)}, R={_rl.round(4)}, width={_fw*100:.2f}cm", "magenta")
+    except Exception as _e:
+        cprint(f"   ⚠️ 夹持记录失败 (non-fatal): {_e}", "yellow")
+
+    # ---- Phase 5: 提起 ----
     cprint(f"   → [5/5] Planning lift (no object mesh)...", "yellow")
     traj_lift = plan_trajectory(_CUROBO_MG, franka, lift_pos, quat_wxyz,
                                 label="lift", scene=scene, use_object_mesh=False)
 
     if traj_lift is not None:
         cprint(f"   ✅ Lift trajectory: {len(traj_lift)} steps", "green")
-        # close_gripper() 只需调一次, 控制器会持续施力
         franka.close_gripper()
         for joint_pos in traj_lift:
-            # 用 apply_action 或直接设 DC target, 只设手臂
             from omni.isaac.core.utils.types import ArticulationAction
             action = ArticulationAction(
                 joint_positions=np.concatenate([joint_pos, np.array([None, None])]),
@@ -707,47 +756,31 @@ def execute_grasp(scene, grasp_pos_obj, grasp_rot_obj, gripper_width, object_sca
     else:
         cprint(f"   ⚠️ Lift planning failed, skipping", "yellow")
 
-    # 稳定 — 夹爪控制器持续施力
+    # 提起后稳定等待
     for _ in range(80):
         world.step(render=RENDER_SIM)
 
-    # ---- 检查结果 ----
+    # ---- 检查结果：提起后物体是否还在空中 ----
     obj_after, _ = scene["obj"].get_obj_pos()
     z_delta = obj_after[2] - initial_z
     success = z_delta > 0.03
 
     cprint(f"   📍 obj Z: {initial_z:.4f} → {obj_after[2]:.4f} (Δ={z_delta:.4f}m)", "cyan")
 
-    result = {'success': success, 'contact_points_local': None, 'finger_width_actual': None}
-
     if success:
-        cprint(f"   ✅ GRASP SUCCESS!", "green", "on_green")
-        # ★ 提取手指尖实际位置 (世界坐标)
-        try:
-            from pxr import UsdGeom
-            stage = world.stage
-            # 获取左右手指的世界位置
-            left_xform = UsdGeom.Xformable(stage.GetPrimAtPath("/World/Franka/panda_leftfinger"))
-            right_xform = UsdGeom.Xformable(stage.GetPrimAtPath("/World/Franka/panda_rightfinger"))
-            left_world = np.array(left_xform.ComputeLocalToWorldTransform(0).ExtractTranslation())
-            right_world = np.array(right_xform.ComputeLocalToWorldTransform(0).ExtractTranslation())
-
-            # 转换到物体初始局部坐标系
-            # 物体初始位置 = OBJECT_POSITION + z_offset
-            obj_init_pos = np.array(OBJECT_POSITION)
-            obj_init_pos[2] += 0.075 * object_scale  # z offset
-            left_local = left_world - obj_init_pos
-            right_local = right_world - obj_init_pos
-
-            finger_width = np.linalg.norm(left_world - right_world)
-            cprint(f"   📐 手指接触: L={left_local}, R={right_local}, width={finger_width*100:.2f}cm", "magenta")
-
-            result['contact_points_local'] = np.array([left_local, right_local], dtype=np.float32)
-            result['finger_width_actual'] = float(finger_width)
-        except Exception as e:
-            cprint(f"   ⚠️ 无法提取手指位置: {e}", "yellow")
+        # 提起稳定 → 保留 Phase4 记录的接触点数据
+        cprint(f"   ✅ GRASP SUCCESS! 保留夹持记录", "green", "on_green")
+        result = {
+            'success': True,
+            'contact_points_local': candidate_record['contact_points_local'],
+            'finger_width_actual':  candidate_record['finger_width_actual'],
+            'obj_pose_at_grasp':    candidate_record['obj_pose_at_grasp'],
+        }
     else:
-        cprint(f"   ❌ GRASP FAILED", "red")
+        # 提起后掉落 → 丢弃，不保存任何数据
+        cprint(f"   ❌ GRASP FAILED (物体提起后掉落，丢弃夹持记录)", "red")
+        result = {'success': False, 'contact_points_local': None,
+                  'finger_width_actual': None, 'obj_pose_at_grasp': None}
 
     return result
 
@@ -774,7 +807,7 @@ def main():
         if "metadata" in f:
             # v2 自动生成格式
             obj_id = f["metadata"].attrs["obj_id"]
-            n_contact = f["affordance"].attrs.get("n_contact", 0)
+            n_contact = f["affordance"].attrs.get("n_contact", 0) if "affordance" in f else 0
         else:
             # 手动标注格式
             obj_id = f.attrs.get('object_id', f.attrs.get('obj_id', 'unknown'))
@@ -784,12 +817,15 @@ def main():
 
         if "candidates" in f:
             # v2 自动生成: candidates/candidate_N
-            n_cand = f["candidates"].attrs["n_candidates"]
+            cg = f["candidates"]
+            n_cand = int(cg.attrs.get("n_candidates", len(cg)))
             # 读取 mesh 预旋转 (默认无)
             _meta = f.get("metadata", None)
             mesh_prerot = list(_meta.attrs.get("mesh_prerotation_euler", [0.0, 0.0, 0.0])) if _meta else [0.0, 0.0, 0.0]
             for i in range(n_cand):
-                ci = f[f"candidates/candidate_{i}"]
+                key = f"candidate_{i}"
+                if key not in cg: continue
+                ci = cg[key]
                 grasp_candidates.append({
                     "name": ci.attrs["name"],
                     "score": ci.attrs["score"],
