@@ -19,11 +19,13 @@ import os, sys, glob, argparse, time
 import numpy as np
 import trimesh
 import h5py
+from scipy.spatial import cKDTree
 from scipy.spatial.transform import Rotation
 
 import json
 PROJ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-HP_DIR        = os.path.join(PROJ, 'data_hub', 'ProcessedData', 'training_fp')  # 主要来源
+HP_DIR        = os.path.join(PROJ, 'data_hub', 'ProcessedData', 'training_fp')
+TRAINING_FP_ROTATED_DIR = os.path.join(PROJ, 'data_hub', 'ProcessedData', 'train_fp_rotated')
 INFER_HP_DIR  = os.path.join(PROJ, 'data_hub', 'human_prior_infer')
 OUTPUT_DIR    = os.path.join(PROJ, 'output', 'grasps_candidate')
 INFER_OUT_DIR = os.path.join(PROJ, 'output', 'grasps_infer')
@@ -32,6 +34,8 @@ INFER_OUT_DIR = os.path.join(PROJ, 'output', 'grasps_infer')
 OBJ_MESHES_DIR  = os.path.join(PROJ, 'data_hub', 'ProcessedData', 'obj_meshes')
 OBJ_MESHES_DATASETS = ['oakink', 'ycb', 'arctic', 'dexycb', 'egocentric', 'ho3d_v3']
 TRAINING_FP_DIR = os.path.join(PROJ, 'data_hub', 'ProcessedData', 'training_fp')
+SAM3D_ROTATED_MESH_DIR = os.path.join(PROJ, 'data_hub', 'meshes', 'SAM3DMesh', 'rotated_mesh')
+HP_FP_SUBDIRS = ('oakink', 'dexycb', 'ycb', 'arctic', 'ho3d_v3')
 # Canonical rotation file (用于 SAM3D mesh 朝向修正)
 CANONICAL_ROT_JSON = os.path.join(PROJ, 'sim', 'canonical_rotation.json')
 
@@ -60,8 +64,19 @@ N_POINTS_PER_BATCH  = 20     # 每批采样点数
 N_APPROACH_PER_PT   = 6      # 每个内部点随机采样的 approach 方向数
 TARGET_HIGH_QUALITY = 50     # 目标高质量候选数
 SCORE_THRESHOLD     = 70.0   # 高质量门槛 (R3 提高到 70)
-SKIP_AFTER_BATCHES  = 8      # 超过此批次仍无高质量候选 → 标记为难抓物体并跳过
-MAX_BATCHES         = 40     # 最大迭代批次
+MAX_BATCHES         = 40     # 最大迭代批次（无「N 批无高质量即放弃」早停）
+REQUIRE_HP_CONTACT_DEFAULT = True   # 至少一个接触点在 human_prior 区域
+HP_CONTACT_LABEL_THRESH = 0.3        # 与 sample_points 高 prior 阈值一致
+HP_CONTACT_MAX_DIST_M = 0.015        # 接触点到 prior 点云最近邻 ≤ 15mm
+
+# ── Structured HP contact-pair sampling (--structured-contacts) ─────────────
+STRUCTURED_N_TANGENT_DIRS = 32
+STRUCTURED_MIN_WIDTH_HARD = 0.02     # 硬约束最小开口 2cm（避免细颈 1cm 假抓取）
+STRUCTURED_NORMAL_INWARD_COS = 0.25  # n₁·chord ≤ -τ 且 n₂·chord ≥ τ（法向朝向对侧接触）
+STRUCTURED_APPROACH_Z_MAX_COS = 0.3    # 与 sample_approach_dirs 一致：禁桌底穿入
+STRUCTURED_LOCAL_THICKNESS_MIN = 0.02  # c₁ 切向最大厚度 < 2cm → 跳过
+SAMPLING_METHOD_RAYCAST = 'raycast_scored_v2'
+SAMPLING_METHOD_STRUCTURED = 'hp_contact_pair_v1'
 
 
 def sample_approach_dirs(n: int, z_max_cos: float = 0.3) -> list:
@@ -93,69 +108,218 @@ def load_canonical_rotations():
     return {}
 
 
-def find_obj_mesh(obj_id, dataset=None):
-    """在 obj_meshes/{dataset}/{obj_id}/ 中查找 mesh.ply + scale.json.
+def infer_obj_dataset(obj_id: str, dataset: str | None = None) -> str:
+    if dataset:
+        return dataset
+    if obj_id.startswith('ycb_dex_'):
+        return 'dexycb'
+    if obj_id.startswith('arctic_'):
+        return 'arctic'
+    return 'oakink'
+
+
+def mesh_scale_json_path(obj_id: str, dataset: str | None = None) -> str | None:
+    """scale.json 仍在 obj_meshes（与 convert_usd / sim 一致）。"""
+    ds = infer_obj_dataset(obj_id, dataset)
+    if obj_id.startswith('ycb_dex_'):
+        path = os.path.join(OBJ_MESHES_DIR, 'ycb', obj_id, 'scale.json')
+    else:
+        path = os.path.join(OBJ_MESHES_DIR, ds, obj_id, 'scale.json')
+    return path if os.path.isfile(path) else None
+
+
+def read_scale_factor(obj_id: str, dataset: str | None = None) -> float:
+    path = mesh_scale_json_path(obj_id, dataset)
+    if path is None:
+        return 1.0
+    with open(path) as f:
+        return float(json.load(f).get('scale_factor', 1.0))
+
+
+def apply_metric_scale_to_mesh(obj_id: str, dataset: str | None = None) -> bool:
+    """rotated_mesh / obj_meshes 顶点是否 × scale.json（与 convert_obj_usd / Sim 米制一致）。"""
+    if obj_id.startswith('arctic_'):
+        return False
+    return abs(read_scale_factor(obj_id, dataset) - 1.0) > 1e-8
+
+
+def apply_metric_scale_to_hp_on_load(obj_id: str, dataset: str | None = None) -> bool:
+    """
+    从 HDF5 读出后是否对 HP 点云 × scale_factor。
+    OakInk train_fp_rotated 盘上为 unscaled；YCB dexycb 盘上通常已是 scaled。
+    """
+    if obj_id.startswith('ycb_dex_'):
+        return False
+    return apply_metric_scale_to_mesh(obj_id, dataset)
+
+
+def scale_hp_to_metric(hp_pc: np.ndarray, scale_factor: float) -> np.ndarray:
+    sf = float(scale_factor)
+    if abs(sf - 1.0) < 1e-8:
+        return hp_pc
+    return (np.asarray(hp_pc, dtype=np.float64) * sf).astype(np.float32)
+
+
+def find_obj_mesh(obj_id, dataset=None, *, use_legacy_assets: bool = False):
+    """
+    查找采样用 mesh + scale.json。
+
+    默认: SAM3DMesh/rotated_mesh/{dataset|ycb}/{obj}/mesh.ply
+    --legacy-assets: obj_meshes/.../mesh.ply
 
     Returns:
-        mesh_path   (str | None)
-        scale_factor (float)  — 1.0 if scale.json not found
-        dataset     (str | None) — 所属数据集名
+        mesh_path, scale_factor, dataset, apply_scale_to_mesh (bool)
     """
-    datasets = [dataset] if dataset else OBJ_MESHES_DATASETS
-    for ds in datasets:
-        mesh_path  = os.path.join(OBJ_MESHES_DIR, ds, obj_id, 'mesh.ply')
-        scale_path = os.path.join(OBJ_MESHES_DIR, ds, obj_id, 'scale.json')
-        if not os.path.exists(mesh_path):
-            continue
-        scale_factor = 1.0
-        if os.path.exists(scale_path):
-            with open(scale_path) as f:
-                scale_factor = float(json.load(f)['scale_factor'])
-        return mesh_path, scale_factor, ds
-    return None, 1.0, None
+    ds = infer_obj_dataset(obj_id, dataset)
+    scale_factor = read_scale_factor(obj_id, ds)
+    apply_scale = apply_metric_scale_to_mesh(obj_id, ds)
+
+    if use_legacy_assets:
+        search_ds = [dataset] if dataset else OBJ_MESHES_DATASETS
+        for sub in search_ds:
+            mesh_path = os.path.join(OBJ_MESHES_DIR, sub, obj_id, 'mesh.ply')
+            if os.path.isfile(mesh_path):
+                return mesh_path, scale_factor, sub, apply_scale
+        return None, scale_factor, None, apply_scale
+
+    if obj_id.startswith('ycb_dex_') or ds in ('ycb', 'dexycb'):
+        mesh_path = os.path.join(SAM3D_ROTATED_MESH_DIR, 'ycb', obj_id, 'mesh.ply')
+        store_ds = 'dexycb'
+    else:
+        mesh_path = os.path.join(SAM3D_ROTATED_MESH_DIR, ds, obj_id, 'mesh.ply')
+        store_ds = ds
+
+    if not os.path.isfile(mesh_path):
+        return None, scale_factor, None, apply_scale
+    return mesh_path, scale_factor, store_ds, apply_scale
 
 
-def list_dataset_objs(dataset):
-    """列出 obj_meshes/{dataset}/ 中有 mesh.ply 的物体 ID 列表."""
-    ds_dir = os.path.join(OBJ_MESHES_DIR, dataset)
-    if not os.path.isdir(ds_dir):
+def list_dataset_objs(dataset, *, use_legacy_assets: bool = False):
+    """列出可采样物体（rotated SAM3D + train_fp_rotated + scale.json）。"""
+    if use_legacy_assets:
+        ds_dir = os.path.join(OBJ_MESHES_DIR, dataset)
+        if not os.path.isdir(ds_dir):
+            return []
+        return sorted(
+            o for o in os.listdir(ds_dir)
+            if os.path.isfile(os.path.join(ds_dir, o, 'mesh.ply'))
+        )
+
+    out: list[str] = []
+    if dataset in ('ycb', 'dexycb'):
+        hp_dir = os.path.join(TRAINING_FP_ROTATED_DIR, 'dexycb')
+        sam_dir = os.path.join(SAM3D_ROTATED_MESH_DIR, 'ycb')
+        if not os.path.isdir(hp_dir) or not os.path.isdir(sam_dir):
+            return []
+        for name in sorted(os.listdir(hp_dir)):
+            if not name.endswith('.hdf5'):
+                continue
+            obj_id = name[:-5]
+            if not obj_id.startswith('ycb_dex_'):
+                continue
+            if not os.path.isfile(os.path.join(sam_dir, obj_id, 'mesh.ply')):
+                continue
+            if mesh_scale_json_path(obj_id, 'dexycb'):
+                out.append(obj_id)
+        return out
+
+    sam_dir = os.path.join(SAM3D_ROTATED_MESH_DIR, dataset)
+    if not os.path.isdir(sam_dir):
         return []
-    return sorted(
-        o for o in os.listdir(ds_dir)
-        if os.path.exists(os.path.join(ds_dir, o, 'mesh.ply'))
-    )
+    for obj_id in sorted(os.listdir(sam_dir)):
+        if not os.path.isfile(os.path.join(sam_dir, obj_id, 'mesh.ply')):
+            continue
+        if not os.path.isfile(os.path.join(TRAINING_FP_ROTATED_DIR, dataset, f'{obj_id}.hdf5')):
+            continue
+        if mesh_scale_json_path(obj_id, dataset):
+            out.append(obj_id)
+    return out
 
 
-def load_human_prior(obj_id, hp_dir=None, dataset=None):
+def _hp_search_paths(obj_id: str, hp_dir: str | None, dataset: str | None, *, use_rotated_hp: bool):
+    roots = []
+    if use_rotated_hp:
+        roots.append(TRAINING_FP_ROTATED_DIR)
+    roots.append(TRAINING_FP_DIR)
+    if hp_dir:
+        roots.append(hp_dir)
+
+    subdirs: list[str] = []
+    if dataset:
+        subdirs.append(dataset)
+    if obj_id.startswith('ycb_dex_'):
+        subdirs.extend(['dexycb', 'ycb'])
+    subdirs.extend(['oakink', 'dexycb', 'ycb', 'arctic'])
+
+    seen: set[str] = set()
+    paths: list[str] = []
+    for root in roots:
+        for sub in subdirs:
+            p = os.path.join(root, sub, f'{obj_id}.hdf5')
+            if p not in seen:
+                seen.add(p)
+                paths.append(p)
+    for root in ([hp_dir] if hp_dir else [HP_DIR]):
+        for name in (f'{obj_id}.hdf5', f'oakink_{obj_id}.hdf5', f'arctic_{obj_id}.hdf5'):
+            p = os.path.join(root, name)
+            if p not in seen:
+                seen.add(p)
+                paths.append(p)
+    return paths
+
+
+def load_human_prior(obj_id, hp_dir=None, dataset=None, *, use_rotated_hp: bool = True):
     """
-    加载 HumanPrior。搜索顺序:
-      1. ProcessedData/training_fp/{dataset}/{obj_id}.hdf5   (新格式 ★推荐)
-      2. ProcessedData/training_fp/oakink/{obj_id}.hdf5
-      3. {hp_dir}/{obj_id}.hdf5  (legacy)
-      4. {hp_dir}/oakink_{obj_id}.hdf5
+    加载 HumanPrior。默认 train_fp_rotated/；--legacy-assets 时优先 training_fp。
     """
-    # 候选路径列表
-    candidates = []
-
-    # 优先搜索 training_fp 各数据集子目录
-    for ds in ([dataset] if dataset else ['oakink', 'ycb', 'dexycb', 'arctic']):
-        candidates.append(os.path.join(TRAINING_FP_DIR, ds, f'{obj_id}.hdf5'))
-
-    # Legacy fallback
-    if hp_dir is None:
-        hp_dir = HP_DIR
-    candidates += [
-        os.path.join(hp_dir, f'{obj_id}.hdf5'),
-        os.path.join(hp_dir, f'oakink_{obj_id}.hdf5'),
-        os.path.join(hp_dir, f'arctic_{obj_id}.hdf5'),
-        os.path.join(hp_dir, f'grab_{obj_id}.hdf5'),
-    ]
-
-    for path in candidates:
-        if os.path.exists(path):
+    use_rot = use_rotated_hp and hp_dir not in (INFER_HP_DIR,)
+    for path in _hp_search_paths(obj_id, hp_dir, dataset, use_rotated_hp=use_rot):
+        if os.path.isfile(path):
             with h5py.File(path, 'r') as f:
-                return f['point_cloud'][()].astype(np.float32), f['human_prior'][()].astype(np.float32)
-    return None, None
+                return (
+                    f['point_cloud'][()].astype(np.float32),
+                    f['human_prior'][()].astype(np.float32),
+                    path,
+                )
+    return None, None, None
+
+
+def _extents_cm(points: np.ndarray) -> tuple[float, float, float]:
+    ext = points.max(axis=0) - points.min(axis=0)
+    return float(ext[0] * 100), float(ext[1] * 100), float(ext[2] * 100)
+
+
+def verify_mesh_hp_scale(
+    mesh: trimesh.Trimesh,
+    hp_pc: np.ndarray,
+    *,
+    apply_scale: bool,
+    scale_factor: float,
+    obj_id: str,
+) -> dict:
+    """检查采样 mesh 与 HP 尺度/extents 是否一致。"""
+    ext_m = _extents_cm(mesh.vertices)
+    ext_h = _extents_cm(hp_pc)
+    n = min(1500, len(mesh.vertices), len(hp_pc))
+    rng = np.random.default_rng(0)
+    vm = mesh.vertices[rng.choice(len(mesh.vertices), n, replace=False)]
+    vh = hp_pc[rng.choice(len(hp_pc), n, replace=False)]
+    nn_cm = float(cKDTree(vh).query(vm, k=1)[0].mean() * 100)
+
+    axis_ratio = max(
+        abs(ext_m[i] - ext_h[i]) / (ext_h[i] + 1e-6) for i in range(3)
+    )
+    ok = nn_cm < 5.0 and axis_ratio < 0.25
+    return {
+        'ok': ok,
+        'nn_cm': nn_cm,
+        'axis_ratio': axis_ratio,
+        'ext_mesh_cm': ext_m,
+        'ext_hp_cm': ext_h,
+        'apply_scale': apply_scale,
+        'scale_factor': scale_factor,
+        'obj_id': obj_id,
+    }
 
 
 def _points_inside(mesh, pts: np.ndarray) -> np.ndarray:
@@ -167,6 +331,347 @@ def _points_inside(mesh, pts: np.ndarray) -> np.ndarray:
     except (IndexError, ValueError) as e:
         print(f"  [warn] mesh.contains failed ({e}); fallback bbox-only sampling")
         return np.ones(len(pts), dtype=bool)
+
+
+def contact_in_human_prior_region(
+    contact,
+    hp_pc: np.ndarray,
+    hp_labels: np.ndarray,
+    *,
+    threshold: float = HP_CONTACT_LABEL_THRESH,
+    max_dist: float = HP_CONTACT_MAX_DIST_M,
+) -> bool:
+    """接触点是否落在 human_prior 高置信区域（prior 点云 KNN）。"""
+    pt = np.asarray(contact, dtype=np.float64).reshape(1, 3)
+    tree = cKDTree(hp_pc)
+    dist, idx = tree.query(pt, k=1)
+    if float(dist[0]) > max_dist:
+        return False
+    return float(hp_labels[int(idx[0])]) > threshold
+
+
+def passes_hp_contact_requirement(
+    contact_L,
+    contact_R,
+    hp_pc,
+    hp_labels,
+    *,
+    require: bool = True,
+    threshold: float = HP_CONTACT_LABEL_THRESH,
+    max_dist: float = HP_CONTACT_MAX_DIST_M,
+) -> bool:
+    """至少一个接触点在 HP 区域；无 prior 数据时不强制。"""
+    if not require:
+        return True
+    if hp_pc is None or hp_labels is None:
+        return True
+    if not np.any(hp_labels > threshold):
+        return True
+    return (
+        contact_in_human_prior_region(
+            contact_L, hp_pc, hp_labels, threshold=threshold, max_dist=max_dist,
+        )
+        or contact_in_human_prior_region(
+            contact_R, hp_pc, hp_labels, threshold=threshold, max_dist=max_dist,
+        )
+    )
+
+
+def _tangent_basis(normal: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """表面法向 n 的切平面正交基 (u, v)。"""
+    n = np.asarray(normal, dtype=np.float64)
+    n = n / (np.linalg.norm(n) + 1e-8)
+    ref = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+    if abs(np.dot(n, ref)) > 0.9:
+        ref = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+    u = np.cross(n, ref)
+    u = u / (np.linalg.norm(u) + 1e-8)
+    v = np.cross(n, u)
+    v = v / (np.linalg.norm(v) + 1e-8)
+    return u.astype(np.float32), v.astype(np.float32)
+
+
+def surface_point_and_normal(mesh, point: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """将点投影到 mesh 表面，返回 (表面点, 朝外法向)。"""
+    closest, _, tri = mesh.nearest.on_surface([np.asarray(point, dtype=np.float64)])
+    n = mesh.face_normals[int(tri[0])].astype(np.float32)
+    return closest[0].astype(np.float32), n
+
+
+def sample_hp_surface_anchors(
+    mesh,
+    hp_pc: np.ndarray,
+    hp_labels: np.ndarray,
+    n_total: int,
+    *,
+    threshold: float = HP_CONTACT_LABEL_THRESH,
+) -> list[tuple[np.ndarray, np.ndarray]]:
+    """从 HP 高 prior 点采样 c₁，并投影到 mesh 表面。"""
+    high_mask = hp_labels > threshold
+    if high_mask.sum() == 0:
+        return []
+    hp_pts = hp_pc[high_mask]
+    weights = hp_labels[high_mask].astype(np.float64)
+    weights = weights / (weights.sum() + 1e-8)
+    n_try = max(n_total * 8, n_total)
+    chosen_idx = np.random.choice(len(hp_pts), size=n_try, replace=True, p=weights)
+    anchors = []
+    seen = set()
+    for idx in chosen_idx:
+        if len(anchors) >= n_total:
+            break
+        c1, n1 = surface_point_and_normal(mesh, hp_pts[idx])
+        key = tuple(np.round(c1, 4))
+        if key in seen:
+            continue
+        seen.add(key)
+        anchors.append((c1, n1))
+    return anchors
+
+
+def estimate_local_tangent_width(mesh, c1: np.ndarray, n1: np.ndarray, n_dirs: int = 8) -> float:
+    """c₁ 切平面多方向射线，估计局部可夹最大厚度。"""
+    u, v = _tangent_basis(n1)
+    origin = c1 + n1 * 1e-4
+    max_w = 0.0
+    for k in range(n_dirs):
+        theta = 2.0 * np.pi * k / n_dirs
+        d = (np.cos(theta) * u + np.sin(theta) * v).astype(np.float32)
+        for sign in (1.0, -1.0):
+            try:
+                hits, _, _ = mesh.ray.intersects_location([origin], [d * sign])
+            except Exception:
+                continue
+            if len(hits) == 0:
+                continue
+            dists = np.linalg.norm(hits - c1, axis=1)
+            valid = dists[(dists >= STRUCTURED_MIN_WIDTH_HARD) & (dists <= MAX_GRIPPER_OPEN)]
+            if len(valid):
+                max_w = max(max_w, float(valid.max()))
+    return max_w
+
+
+def _segment_grasp_valid(mesh, c1: np.ndarray, c2: np.ndarray, tol: float = 0.006) -> bool:
+    """弦 c₁→c₂ 中间无额外穿模交点（空腔中段无交点视为 OK）。"""
+    w = float(np.linalg.norm(c2 - c1))
+    if w < 1e-6:
+        return False
+    d = ((c2 - c1) / w).astype(np.float32)
+    try:
+        hits, _, _ = mesh.ray.intersects_location([c1 + d * 1e-4], [d])
+    except Exception:
+        return False
+    if len(hits) == 0:
+        return False
+    dists = np.linalg.norm(hits - c1, axis=1)
+    mid = dists[(dists > tol) & (dists < w - tol)]
+    return len(mid) == 0
+
+
+def _antipodal_normals_face_each_other(
+    n1: np.ndarray,
+    n2: np.ndarray,
+    c1: np.ndarray,
+    c2: np.ndarray,
+    min_inward: float = STRUCTURED_NORMAL_INWARD_COS,
+) -> bool:
+    """对跖或柱面夹持：法向沿 chord 相向，或一侧径向（n⊥chord）另一侧朝向 c₁。"""
+    chord = (c2 - c1) / (np.linalg.norm(c2 - c1) + 1e-8)
+    d1 = float(np.dot(n1, chord))
+    d2 = float(np.dot(n2, chord))
+    # 两侧近似径向（瓶身侧面）
+    if abs(d1) < 0.35 and abs(d2) < 0.35:
+        return True
+    # 柱面 + 对侧朝向锚点
+    if abs(d1) < 0.35 and d2 >= min_inward:
+        return True
+    if abs(d2) < 0.35 and d1 <= -min_inward:
+        return True
+    # 平坦对跖面
+    return d1 <= -min_inward and d2 >= min_inward
+
+
+def derive_approach_from_normals(
+    n1: np.ndarray,
+    n2: np.ndarray,
+    finger_dir: np.ndarray,
+    z_max_cos: float = STRUCTURED_APPROACH_Z_MAX_COS,
+) -> np.ndarray | None:
+    """由两侧外法向推导 approach（指向物体内部），并满足桌面约束。"""
+    f = finger_dir / (np.linalg.norm(finger_dir) + 1e-8)
+    inward = -(np.asarray(n1, dtype=np.float64) + np.asarray(n2, dtype=np.float64))
+    inward = inward - np.dot(inward, f) * f
+    if np.linalg.norm(inward) < 1e-6:
+        up = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+        inward = np.cross(f, up)
+        if np.linalg.norm(inward) < 1e-6:
+            inward = np.cross(f, np.array([1.0, 0.0, 0.0]))
+    approach = inward / (np.linalg.norm(inward) + 1e-8)
+    if approach[2] > z_max_cos:
+        approach = -approach
+    if approach[2] > z_max_cos:
+        return None
+    return approach.astype(np.float32)
+
+
+def _compute_d_near(mesh, grasp_center: np.ndarray, approach: np.ndarray) -> float:
+    FINGER_ACTIVE_DEPTH = 0.040
+    hits_near, _, _ = mesh.ray.intersects_location([grasp_center], [-approach])
+    if len(hits_near):
+        d_near = float(np.min(np.linalg.norm(hits_near - grasp_center, axis=1)))
+        if d_near > FINGER_ACTIVE_DEPTH:
+            return -1.0
+        return d_near
+    return 0.0
+
+
+def _build_candidate_dict(
+    mesh,
+    z_min,
+    z_max,
+    *,
+    grasp_center,
+    contact_L,
+    contact_R,
+    width,
+    approach,
+    finger_dir,
+    mesh_rc=None,
+):
+    """由接触对组装候选 dict（raycast / structured 共用）。"""
+    rc = mesh_rc if mesh_rc is not None else mesh
+    d_near = _compute_d_near(rc, grasp_center, approach)
+    if d_near < 0:
+        return None
+    R = make_rotation_matrix(approach, finger_dir)
+    gripper_width = float(np.clip(width + 0.005, 0.01, MAX_GRIPPER_OPEN))
+    score = score_candidate(
+        mesh, width, approach, finger_dir,
+        grasp_center, contact_L, contact_R,
+        z_min, z_max, mesh_rc=rc,
+    )
+    return {
+        'name': '',
+        'position': grasp_center,
+        'grasp_point': grasp_center,
+        'rotation': R,
+        'gripper_width': gripper_width,
+        'approach': approach.copy(),
+        'finger_dir': finger_dir.copy(),
+        'contact_L': contact_L.astype(np.float32),
+        'contact_R': contact_R.astype(np.float32),
+        'score': score,
+        'cross_section_width': float(width),
+        'd_near': d_near,
+    }
+
+
+def find_second_contacts_for_c1(
+    mesh,
+    mesh_rc,
+    c1: np.ndarray,
+    n1: np.ndarray,
+    *,
+    hp_pc=None,
+    hp_labels=None,
+    require_hp_contact: bool = True,
+) -> list[tuple[np.ndarray, np.ndarray, float]]:
+    """在 c₁ 切平面搜索满足硬约束的 c₂（每方向取最远有效穿模点 ≈ 对侧壁）。"""
+    rc = mesh_rc if mesh_rc is not None else mesh
+    u, v = _tangent_basis(n1)
+    origin = c1 + n1 * 1e-4
+    pairs: list[tuple[np.ndarray, np.ndarray, float]] = []
+    seen_c2: set[tuple[float, float, float]] = set()
+    for k in range(STRUCTURED_N_TANGENT_DIRS):
+        theta = 2.0 * np.pi * k / STRUCTURED_N_TANGENT_DIRS
+        d = (np.cos(theta) * u + np.sin(theta) * v).astype(np.float32)
+        for sign in (1.0, -1.0):
+            try:
+                hits, _, _ = rc.ray.intersects_location([origin], [d * sign])
+            except Exception:
+                continue
+            if len(hits) == 0:
+                continue
+            dists = np.linalg.norm(hits - c1, axis=1)
+            valid = (dists >= STRUCTURED_MIN_WIDTH_HARD) & (dists <= MAX_GRIPPER_OPEN)
+            if not np.any(valid):
+                continue
+            j = int(np.argmax(dists[valid]))
+            hit = hits[valid][j]
+            w = float(dists[valid][j])
+            c2 = hit.astype(np.float32)
+            key = tuple(np.round(c2, 4))
+            if key in seen_c2:
+                continue
+            seen_c2.add(key)
+            finger_dir = (c2 - c1) / (w + 1e-8)
+            if w < 0.03 and not _segment_grasp_valid(rc, c1, c2, tol=0.01):
+                continue
+            _, n2 = surface_point_and_normal(mesh, c2)
+            if not _antipodal_normals_face_each_other(n1, n2, c1, c2):
+                continue
+            if not passes_hp_contact_requirement(
+                c1, c2, hp_pc, hp_labels, require=require_hp_contact,
+            ):
+                continue
+            pairs.append((c2, n2, w))
+    return pairs
+
+
+def generate_structured_one_batch(
+    mesh,
+    n_anchors: int,
+    z_min,
+    z_max,
+    mesh_rc=None,
+    *,
+    hp_pc=None,
+    hp_labels=None,
+    require_hp_contact: bool = REQUIRE_HP_CONTACT_DEFAULT,
+):
+    """HP 表面 c₁ + 约束搜索 c₂ → 打分。"""
+    if hp_pc is None or hp_labels is None or not np.any(hp_labels > HP_CONTACT_LABEL_THRESH):
+        return []
+
+    rc = mesh_rc if mesh_rc is not None else mesh
+    anchors = sample_hp_surface_anchors(
+        mesh, hp_pc, hp_labels, n_anchors, threshold=HP_CONTACT_LABEL_THRESH,
+    )
+    candidates = []
+    for c1, n1 in anchors:
+        if estimate_local_tangent_width(rc, c1, n1) < STRUCTURED_LOCAL_THICKNESS_MIN:
+            continue
+        pairs = find_second_contacts_for_c1(
+            mesh, rc, c1, n1,
+            hp_pc=hp_pc, hp_labels=hp_labels,
+            require_hp_contact=require_hp_contact,
+        )
+        if not pairs:
+            continue
+        best = None
+        for c2, n2, w in pairs:
+            finger_dir = ((c2 - c1) / (w + 1e-8)).astype(np.float32)
+            approach = derive_approach_from_normals(n1, n2, finger_dir)
+            if approach is None:
+                continue
+            grasp_center = ((c1 + c2) / 2.0).astype(np.float32)
+            cand = _build_candidate_dict(
+                mesh, z_min, z_max,
+                grasp_center=grasp_center,
+                contact_L=c1,
+                contact_R=c2,
+                width=w,
+                approach=approach,
+                finger_dir=finger_dir,
+                mesh_rc=rc,
+            )
+            if cand is None:
+                continue
+            if best is None or cand['score'] > best['score']:
+                best = cand
+        if best is not None:
+            candidates.append(best)
+    return candidates
 
 
 def sample_points(mesh, hp_pc, hp_labels, n_total, has_hp, mesh_contains=None):
@@ -316,7 +821,17 @@ def check_finger_reachable(mesh, grasp_center, approach, max_finger_depth=0.04):
     return nearest_dist <= max_finger_depth
 
 
-def generate_one_batch(mesh, points, z_min, z_max, mesh_rc=None):
+def generate_one_batch(
+    mesh,
+    points,
+    z_min,
+    z_max,
+    mesh_rc=None,
+    *,
+    hp_pc=None,
+    hp_labels=None,
+    require_hp_contact: bool = REQUIRE_HP_CONTACT_DEFAULT,
+):
     """从一批采样点生成候选并评分."""
     PALM_CLEARANCE  = 0.010   # 手掌到近端面最小间距 1cm
     FRANKA_FINGER_D = 0.040   # Franka 指深 4cm
@@ -344,45 +859,24 @@ def generate_one_batch(mesh, points, z_min, z_max, mesh_rc=None):
 
             grasp_center = ((nearest_pos + nearest_neg) / 2.0).astype(np.float32)
 
-            # ── 手指深度检查: d_near ≤ 夹爪活动段长度(4cm) ─────────────────
-            # Franka TCP_OFFSET=10.5cm, 固定段6.5cm, 活动段4cm
-            # 手掌面在 grasp_center - approach*4cm
-            # d_near > 4cm → 手掌面会顶进物体 → 丢弃
-            FINGER_ACTIVE_DEPTH = 0.040   # = TCP_OFFSET(10.5) - palm_fixed(6.5)
-            hits_near, _, _ = rc.ray.intersects_location(
-                [grasp_center], [-approach]
-            )
-            if len(hits_near):
-                d_near = float(np.min(
-                    np.linalg.norm(hits_near - grasp_center, axis=1)
-                ))
-                if d_near > FINGER_ACTIVE_DEPTH:
-                    continue   # 手掌会顶物体，丢弃
-            else:
-                d_near = 0.0
+            if not passes_hp_contact_requirement(
+                nearest_neg, nearest_pos, hp_pc, hp_labels,
+                require=require_hp_contact,
+            ):
+                continue
 
-            R = make_rotation_matrix(approach, finger_dir)
-            gripper_width = float(np.clip(width + 0.005, 0.01, MAX_GRIPPER_OPEN))
-            score = score_candidate(
-                mesh, width, approach, finger_dir,
-                grasp_center, nearest_neg, nearest_pos,
-                z_min, z_max, mesh_rc=rc
+            cand = _build_candidate_dict(
+                mesh, z_min, z_max,
+                grasp_center=grasp_center,
+                contact_L=nearest_neg.astype(np.float32),
+                contact_R=nearest_pos.astype(np.float32),
+                width=float(width),
+                approach=approach,
+                finger_dir=finger_dir,
+                mesh_rc=rc,
             )
-
-            candidates.append({
-                'name':               '',
-                'position':           grasp_center,   # 接触中点 (Sim 再减 TCP_OFFSET=0.105)
-                'grasp_point':        grasp_center,   # 同上，保留字段
-                'rotation':           R,
-                'gripper_width':      gripper_width,
-                'approach':           approach.copy(),
-                'finger_dir':         finger_dir.copy(),
-                'contact_L':          nearest_neg.astype(np.float32),
-                'contact_R':          nearest_pos.astype(np.float32),
-                'score':              score,
-                'cross_section_width': float(width),
-                'd_near':             d_near,
-            })
+            if cand is not None:
+                candidates.append(cand)
     return candidates
 
 
@@ -393,54 +887,81 @@ def generate_candidates_iterative(
     mesh_rc=None,
     target_n=None,
     score_threshold=None,
+    require_hp_contact: bool = REQUIRE_HP_CONTACT_DEFAULT,
+    hp_pc=None,
+    hp_labels=None,
+    *,
+    structured: bool = False,
 ):
     """迭代生成候选, 直到有 target_n 个分数 > score_threshold."""
     target_n = TARGET_HIGH_QUALITY if target_n is None else target_n
     score_threshold = SCORE_THRESHOLD if score_threshold is None else score_threshold
 
-    hp_pc, hp_labels = load_human_prior(obj_id, hp_dir=hp_dir)
+    if hp_pc is None or hp_labels is None:
+        hp_pc, hp_labels, _ = load_human_prior(obj_id, hp_dir=hp_dir)
     has_hp = hp_pc is not None and np.any(hp_labels > 0.5)
+    hp_contact_on = (
+        require_hp_contact
+        and hp_pc is not None
+        and hp_labels is not None
+        and np.any(hp_labels > HP_CONTACT_LABEL_THRESH)
+    )
 
-    # 尺寸预检: 物体最小边 > 2× 夹持器开口 → 极难抓, 快速跳过
+    # 尺寸预检（米制 mesh）: bbox 最小边 > 2×夹爪开口 → 跳过
     extents = mesh.bounding_box.extents
     min_ext = extents.min()
     if min_ext > 2 * MAX_GRIPPER_OPEN:
         print(f"  [SKIP LARGE] 最小边 {min_ext*100:.1f}cm > {2*MAX_GRIPPER_OPEN*100:.0f}cm, 跳过")
         return []
 
+    if structured and (hp_pc is None or not np.any(hp_labels > HP_CONTACT_LABEL_THRESH)):
+        print('  [structured] 无 HP 或 label>阈值 为空，无法采样 c₁')
+        return []
+
     z_min, z_max = mesh.bounds[0][2], mesh.bounds[1][2]
     all_candidates = []
     
     m_contains = mesh_rc if mesh_rc is not None else mesh
+    name_prefix = 'hp_pair' if structured else 'raycast'
     for batch in range(MAX_BATCHES):
-        pts = sample_points(
-            mesh, hp_pc, hp_labels, N_POINTS_PER_BATCH, has_hp, mesh_contains=m_contains,
-        )
-        new_cands = generate_one_batch(mesh, pts, z_min, z_max, mesh_rc=mesh_rc)
+        if structured:
+            new_cands = generate_structured_one_batch(
+                mesh, N_POINTS_PER_BATCH, z_min, z_max, mesh_rc=mesh_rc,
+                hp_pc=hp_pc, hp_labels=hp_labels,
+                require_hp_contact=require_hp_contact,
+            )
+        else:
+            pts = sample_points(
+                mesh, hp_pc, hp_labels, N_POINTS_PER_BATCH, has_hp, mesh_contains=m_contains,
+            )
+            new_cands = generate_one_batch(
+                mesh, pts, z_min, z_max, mesh_rc=mesh_rc,
+                hp_pc=hp_pc, hp_labels=hp_labels,
+                require_hp_contact=require_hp_contact,
+            )
         all_candidates.extend(new_cands)
 
         # 统计高质量候选
         high_quality = [c for c in all_candidates if c['score'] >= score_threshold]
-        hp_ratio = "50%HP+50%rnd" if has_hp else "100%rnd"
+        if structured:
+            hp_ratio = f'HP→c2 (minW={STRUCTURED_MIN_WIDTH_HARD*100:.0f}cm)'
+        else:
+            hp_ratio = "50%HP+50%rnd" if has_hp else "100%rnd"
+        if hp_contact_on:
+            hp_ratio += "+HP-contact"
         print(f"    batch {batch+1}: +{len(new_cands)} 候选, "
               f"高质量≥{score_threshold:.0f}分: {len(high_quality)}/{target_n} ({hp_ratio})")
 
         if len(high_quality) >= target_n:
             break
 
-        # 快速放弃: 超过 SKIP_AFTER_BATCHES 批仍无高质量 → 物体难抓, 跳过
-        if batch + 1 >= SKIP_AFTER_BATCHES and len(high_quality) == 0:
-            print(f"  [SKIP] {batch+1} 批次 ({(batch+1)*N_POINTS_PER_BATCH} 个随机位置) 均无 ≥{score_threshold:.0f} 分候选"
-                  f" → 标记为难抓物体")
-            return []   # 返回空 → 调用方写 .skip 标记
-    
     # 按分数排序, 取 top target_n
     all_candidates.sort(key=lambda c: -c['score'])
     selected = all_candidates[:target_n]
     
     # 重命名
     for i, c in enumerate(selected):
-        c['name'] = f'raycast_{i}'
+        c['name'] = f'{name_prefix}_{i}'
     
     if selected:
         print(f"  → 最终选出 {len(selected)} 个候选 "
@@ -451,27 +972,51 @@ def generate_candidates_iterative(
     return selected
 
 
-def save_candidates_hdf5(candidates, obj_id, mesh_path, output_dir, no_rotation=False):
+def save_candidates_hdf5(
+    candidates,
+    obj_id,
+    mesh_path,
+    output_dir,
+    no_rotation=False,
+    dataset='oakink',
+    *,
+    scale_factor: float = 1.0,
+    apply_scale_to_mesh: bool = False,
+    hp_scale_applied: bool = False,
+    hp_path: str | None = None,
+    sampling_method: str = SAMPLING_METHOD_RAYCAST,
+):
     os.makedirs(output_dir, exist_ok=True)
     path = os.path.join(output_dir, f'{obj_id}_grasp.hdf5')
-    
+
+    _tools_dir = os.path.dirname(os.path.abspath(__file__))
+    if _tools_dir not in sys.path:
+        sys.path.insert(0, _tools_dir)
+    from mesh_utils import (
+        applied_mesh_prerotation_record,
+        infer_dataset as _infer_ds,
+        write_mesh_prerotation_hdf5,
+    )
+    _dataset_m = _infer_ds(obj_id, dataset)
+    _prerot = applied_mesh_prerotation_record(
+        obj_id, _dataset_m, no_rotation=no_rotation,
+    )
+
     with h5py.File(path, 'w') as f:
         m = f.create_group('metadata')
         m.attrs['obj_id'] = obj_id
         m.attrs['mesh_path'] = os.path.abspath(mesh_path)
-        m.attrs['method'] = 'raycast_scored_v2'
+        m.attrs['method'] = sampling_method
+        m.attrs['sampling_method'] = sampling_method
         m.attrs['no_rotation'] = bool(no_rotation)
-        _dataset_m = 'dexycb' if obj_id.startswith('ycb_') else 'oakink'
-        import sys as _sys2; import os as _os2
-        _tdir = _os2.path.dirname(_os2.path.abspath(__file__))
-        if _tdir not in _sys2.path: _sys2.path.insert(0, _tdir)
-        from mesh_utils import get_canonical_euler as _gce
-        _euler = [0.0, 0.0, 0.0] if no_rotation else _gce(obj_id, _dataset_m)
-        m.attrs['mesh_prerotation_euler'] = [0.0, 0.0, 0.0]
-        m.attrs['canonical_rotation_applied'] = (
-            False if no_rotation else any(abs(e) > 0.5 for e in _euler)
-        )
-        m.attrs['canonical_euler_info'] = _euler
+        m.attrs['dataset'] = _dataset_m
+        m.attrs['mesh_source'] = 'SAM3DMesh/rotated_mesh'
+        m.attrs['scale_factor'] = float(scale_factor)
+        m.attrs['scale_applied_to_mesh'] = bool(apply_scale_to_mesh)
+        m.attrs['hp_scale_applied_on_load'] = bool(hp_scale_applied)
+        m.attrs['coordinate_frame'] = 'metric_scaled' if apply_scale_to_mesh else 'raw_unscaled'
+        if hp_path:
+            m.attrs['hp_path'] = os.path.abspath(hp_path)
         cg = f.create_group('candidates')
         cg.attrs['n_candidates'] = len(candidates)
         for i, c in enumerate(candidates):
@@ -484,10 +1029,12 @@ def save_candidates_hdf5(candidates, obj_id, mesh_path, output_dir, no_rotation=
             ci.attrs['gripper_width'] = c['gripper_width']
             ci.attrs['cross_section_width'] = c.get('cross_section_width', 0)
             ci.attrs['d_near'] = c.get('d_near', -1.0)
-        
+            write_mesh_prerotation_hdf5(ci, c.get('mesh_prerotation', _prerot))
+
         if candidates:
             best = candidates[0]
             g = f.create_group('grasp')
+            write_mesh_prerotation_hdf5(g, best.get('mesh_prerotation', _prerot))
             g.create_dataset('position', data=best['position'])
             g.create_dataset('grasp_point', data=best['grasp_point'])
             g.create_dataset('rotation', data=best['rotation'])
@@ -565,7 +1112,8 @@ def visualize_candidates(mesh, candidates, obj_id):
 def process_one_object(
     obj_id,
     mesh_path,
-    scale,
+    scale_factor,
+    apply_scale_to_mesh,
     hp_name,
     hp_dir,
     output_dir,
@@ -576,6 +1124,9 @@ def process_one_object(
     target_n=TARGET_HIGH_QUALITY,
     score_threshold=SCORE_THRESHOLD,
     arctic=False,
+    require_hp_contact=REQUIRE_HP_CONTACT_DEFAULT,
+    use_legacy_assets: bool = False,
+    structured: bool = False,
 ):
     """
     为单个物体生成 grasp candidates HDF5。
@@ -593,11 +1144,37 @@ def process_one_object(
     if not os.path.exists(mesh_path):
         return None, 'no_mesh'
 
-    mesh = trimesh.load(mesh_path, force='mesh')
-    if scale != 1.0:
-        mesh.vertices *= scale
+    mesh = trimesh.load(mesh_path, force='mesh', process=False)
+    hp_scale_applied = False
+    if apply_scale_to_mesh and abs(scale_factor - 1.0) > 1e-8:
+        mesh.vertices = mesh.vertices * float(scale_factor)
+        print(f'     [scale] mesh × {scale_factor:.6f}  (metric, same as obj_meshes / USD)')
 
-    if not no_rotation:
+    hp_pc, hp_labels, hp_path = load_human_prior(
+        hp_name, hp_dir=hp_dir, dataset=dataset,
+        use_rotated_hp=not use_legacy_assets and not arctic,
+    )
+    if hp_pc is not None and apply_metric_scale_to_hp_on_load(obj_id, dataset):
+        hp_pc = scale_hp_to_metric(hp_pc, scale_factor)
+        hp_scale_applied = True
+        print(f'     [scale] HP point_cloud × {scale_factor:.6f}  (train_fp_rotated was unscaled on disk)')
+
+    if hp_pc is None:
+        print('  ⚠️  no HP found (train_fp_rotated / training_fp)')
+    else:
+        chk = verify_mesh_hp_scale(
+            mesh, hp_pc, apply_scale=apply_scale_to_mesh,
+            scale_factor=scale_factor, obj_id=obj_id,
+        )
+        print(f'     [align] HP {os.path.relpath(hp_path, PROJ) if hp_path else "?"}')
+        print(f'     [align] ext mesh {chk["ext_mesh_cm"]}  HP {chk["ext_hp_cm"]}  '
+              f'NN≈{chk["nn_cm"]:.2f}cm  axisΔ≈{chk["axis_ratio"]*100:.1f}%')
+        if not chk['ok']:
+            print('  ⚠️  mesh/HP scale or frame mismatch — check assets')
+
+    # rotated SAM3D 已含 +90°X；不再叠 rotation.json
+    force_no_rot = (not use_legacy_assets and not arctic) or no_rotation
+    if not force_no_rot:
         import sys as _sys
         _tools_dir = os.path.dirname(os.path.abspath(__file__))
         if _tools_dir not in _sys.path:
@@ -615,7 +1192,7 @@ def process_one_object(
         else:
             print(f'     [canonical rot: identity]')
     else:
-        print(f'     [no rotation: raw SAM3D mesh + scale only]')
+        print(f'     [no rotation: rotated SAM3D / identity frame]')
 
     if not mesh.is_watertight:
         trimesh.repair.fill_holes(mesh)
@@ -633,20 +1210,40 @@ def process_one_object(
             trimesh.repair.fix_normals(mesh_rc)
         print(f'  → 简化为 {len(mesh_rc.faces):,} 面 (raycast用, {time.time()-t_s:.2f}s)')
 
+    if require_hp_contact:
+        print("  [scoring] require ≥1 contact in human_prior region (label>0.3)")
+    if structured:
+        print(
+            f'  [structured] HP c1 (label>{HP_CONTACT_LABEL_THRESH}) -> c2 search '
+            f'({STRUCTURED_N_TANGENT_DIRS} dirs, minW={STRUCTURED_MIN_WIDTH_HARD*100:.0f}cm, '
+            f'inward-normal>={STRUCTURED_NORMAL_INWARD_COS})'
+        )
     candidates = generate_candidates_iterative(
         mesh, hp_name, hp_dir=hp_dir, mesh_rc=mesh_rc,
         target_n=target_n, score_threshold=score_threshold,
+        require_hp_contact=require_hp_contact,
+        hp_pc=hp_pc, hp_labels=hp_labels,
+        structured=structured,
     )
 
+    sampling_method = (
+        SAMPLING_METHOD_STRUCTURED if structured else SAMPLING_METHOD_RAYCAST
+    )
     if candidates:
         path = save_candidates_hdf5(
-            candidates, obj_id, mesh_path, output_dir, no_rotation=no_rotation,
+            candidates, obj_id, mesh_path, output_dir,
+            no_rotation=force_no_rot, dataset=dataset,
+            scale_factor=scale_factor,
+            apply_scale_to_mesh=apply_scale_to_mesh,
+            hp_scale_applied=hp_scale_applied,
+            hp_path=hp_path,
+            sampling_method=sampling_method,
         )
         print(f'  ✅ → {os.path.basename(path)} ({len(candidates)} 候选)')
         return path, None
 
     open(skip_path, 'w').write(
-        f'SKIP: {SKIP_AFTER_BATCHES} batches, 0 candidates >= {score_threshold}\n'
+        f'SKIP: {MAX_BATCHES} sampler batches exhausted, 0 candidates >= {score_threshold}\n'
     )
     print(f'  ⬛ → {obj_id}.skip (难抓物体，已标记)')
     return None, 'no_candidates'
@@ -667,7 +1264,22 @@ def main():
     parser.add_argument('--score-threshold', type=float, default=SCORE_THRESHOLD,
                         help=f'分数门槛 (默认 {SCORE_THRESHOLD})')
     parser.add_argument('--no-rotation', action='store_true',
-                        help='不应用 rotation.json，使用 SAM3D 原始 mesh 朝向')
+                        help='legacy: 不应用 rotation.json；默认 rotated mesh 已是 canonical')
+    parser.add_argument(
+        '--legacy-assets',
+        action='store_true',
+        help='回退 obj_meshes + training_fp（不用 rotated_mesh / train_fp_rotated）',
+    )
+    parser.add_argument(
+        '--no-hp-contact-required',
+        action='store_true',
+        help='关闭硬性要求：至少一个接触点在 human_prior 区域 (默认开启)',
+    )
+    parser.add_argument(
+        '--structured-contacts',
+        action='store_true',
+        help='HP 表面 c₁ + 切向搜索 c₂（硬约束 antipodal/宽度/弦）再打分；默认 raycast 内部采样',
+    )
     args = parser.parse_args()
 
     # 推理模式：切换目录
@@ -683,27 +1295,32 @@ def main():
         for obj in objs:
             mp = os.path.join(ARCTIC_ROOT, 'meta', 'object_vtemplates', obj, 'mesh_tex.obj')
             arctic_id = f'arctic_{obj}'
-            obj_list.append((arctic_id, mp, 1.0 / 1000.0, obj, _hp_dir))
+            obj_list.append((arctic_id, mp, 1.0 / 1000.0, False, obj, _hp_dir))
 
     elif args.obj:
-        # ── 统一从 obj_meshes/ 查找 ──────────────────────────────────────
-        mesh_path, scale_factor, ds = find_obj_mesh(args.obj, dataset=args.dataset)
+        mesh_path, scale_factor, ds, apply_scale = find_obj_mesh(
+            args.obj, dataset=args.dataset, use_legacy_assets=args.legacy_assets,
+        )
         if mesh_path is None:
-            print(f'❌ obj_meshes/ 中未找到: {args.obj}')
-            print(f'   搜索路径: {OBJ_MESHES_DIR}')
+            root = OBJ_MESHES_DIR if args.legacy_assets else SAM3D_ROTATED_MESH_DIR
+            print(f'❌ mesh 未找到: {args.obj}')
+            print(f'   搜索根目录: {root}')
             return
-        print(f'   mesh: {mesh_path}  scale={scale_factor:.6f}  dataset={ds}')
-        obj_list = [(args.obj, mesh_path, scale_factor, args.obj, _hp_dir)]
+        print(f'   mesh: {mesh_path}')
+        print(f'   scale.json factor={scale_factor:.6f}  apply_to_mesh={apply_scale}  dataset={ds}')
+        obj_list = [(args.obj, mesh_path, scale_factor, apply_scale, args.obj, _hp_dir)]
 
     elif args.all or args.dataset:
-        # ── 按数据集批量处理 ──────────────────────────────────────────────
         target_ds = [args.dataset] if args.dataset else ['oakink']
         for ds in target_ds:
-            for obj_id in list_dataset_objs(ds):
-                mesh_path, scale_factor, _ = find_obj_mesh(obj_id, dataset=ds)
+            list_ds = 'dexycb' if ds == 'ycb' else ds
+            for obj_id in list_dataset_objs(list_ds, use_legacy_assets=args.legacy_assets):
+                mesh_path, scale_factor, _, apply_scale = find_obj_mesh(
+                    obj_id, dataset=list_ds, use_legacy_assets=args.legacy_assets,
+                )
                 if mesh_path:
-                    obj_list.append((obj_id, mesh_path, scale_factor, obj_id, _hp_dir))
-        print(f'数据集 {target_ds}: {len(obj_list)} 个物体')
+                    obj_list.append((obj_id, mesh_path, scale_factor, apply_scale, obj_id, _hp_dir))
+        print(f'数据集 {target_ds}: {len(obj_list)} 个 ready 物体')
 
     else:
         print("用法:")
@@ -713,33 +1330,59 @@ def main():
         print("  python3 tools/random_grasp_sampler.py --arctic              # ARCTIC (mm→m)")
         return
 
-    mode = 'ARCTIC' if args.arctic else f'obj_meshes/{getattr(args,"dataset","oakink") or "oakink"}'
+    if args.arctic:
+        mode = 'ARCTIC'
+    elif args.legacy_assets:
+        mode = f'legacy obj_meshes/{args.dataset or "oakink"}'
+    else:
+        mode = f'rotated_mesh + train_fp_rotated ({args.dataset or "oakink"})'
+    sample_mode = (
+        f'structured HP→c₂ (min {STRUCTURED_MIN_WIDTH_HARD*100:.0f}cm)'
+        if args.structured_contacts
+        else '50%HP + 50%rnd raycast'
+    )
     print('=' * 60)
-    print(f'  Grasp Sampler v2 [{mode}] (50%HP + 50%rnd)')
+    print(f'  Grasp Sampler v2 [{mode}] ({sample_mode})')
     print(f'  Target: {args.target} candidates ≥ {args.score_threshold} pts')
-    if args.no_rotation:
-        print('  Rotation: OFF (raw mesh)')
+    if args.legacy_assets:
+        print('  Assets: obj_meshes + training_fp')
+    else:
+        print(f'  Mesh: {SAM3D_ROTATED_MESH_DIR}  × scale.json (metric)')
+        print(f'  HP:   {TRAINING_FP_ROTATED_DIR}  (OakInk × scale on load; YCB already scaled on disk)')
+    if args.no_rotation or not args.legacy_assets:
+        print('  Rotation: identity (+90° already in rotated_mesh; no rotation.json)')
+    print(
+        f'  HP contact required: {not args.no_hp_contact_required} '
+        f'(label>{HP_CONTACT_LABEL_THRESH}, dist≤{HP_CONTACT_MAX_DIST_M*1000:.0f}mm)'
+    )
     print('=' * 60)
 
     generated = 0
     for idx, entry in enumerate(obj_list):
-        if len(entry) == 5:
-            obj_id, mesh_path, scale, hp_name, hp_dir_use = entry
+        if len(entry) >= 6:
+            obj_id, mesh_path, scale_factor, apply_scale, hp_name, hp_dir_use = entry[:6]
+        elif len(entry) == 5:
+            obj_id, mesh_path, scale_factor, hp_name, hp_dir_use = entry
+            apply_scale = apply_metric_scale_to_mesh(obj_id, args.dataset)
         else:
-            obj_id, mesh_path, scale, hp_name = entry
+            obj_id, mesh_path, scale_factor, hp_name = entry
             hp_dir_use = _hp_dir
+            apply_scale = apply_metric_scale_to_mesh(obj_id, args.dataset)
 
         print(f'\n[{idx+1}/{len(obj_list)}] {obj_id}')
 
         _ds = args.dataset or ('arctic' if args.arctic else 'oakink')
         out_path, reason = process_one_object(
-            obj_id, mesh_path, scale, hp_name, hp_dir_use, _out_dir,
+            obj_id, mesh_path, scale_factor, apply_scale, hp_name, hp_dir_use, _out_dir,
             dataset=_ds,
             force=args.force,
             no_rotation=args.no_rotation,
             target_n=args.target,
             score_threshold=args.score_threshold,
             arctic=args.arctic,
+            require_hp_contact=not args.no_hp_contact_required,
+            use_legacy_assets=args.legacy_assets,
+            structured=args.structured_contacts,
         )
         if reason == 'skip_marked':
             print(f' ⏭️ [SKIP标记] 已知难抓物体')
