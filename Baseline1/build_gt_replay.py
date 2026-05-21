@@ -410,7 +410,8 @@ def build_one_episode(session_id, cam, obj_class_id, n_points, verbose=False, re
         R_ee_G = R_W_G @ R_ee_W
         q_xyzw = Rotation.from_matrix(R_ee_G).as_quat()
         q_wxyz = np.array([q_xyzw[3], q_xyzw[0], q_xyzw[1], q_xyzw[2]])
-        pc_W = (py[:, :3] @ pts_M.T).T + py[:, 3]
+        pc_C = (py[:, :3] @ pts_M.T).T + py[:, 3]        # CAD pts in cam-C frame (py is the C-frame object pose)
+        pc_W = (T[:3, :3] @ pc_C.T).T + T[:3, 3]         # C → W  (same extrinsic as the joints above; was missing → non-master cams left in C)
         pc_G = (R_W_G @ pc_W.T).T - origin_G_in_G
         rec.append(dict(p=p_ee_G.astype(np.float32), q=q_wxyz.astype(np.float32),
                         oc=obj_G.astype(np.float32), pc=pc_G.astype(np.float32),

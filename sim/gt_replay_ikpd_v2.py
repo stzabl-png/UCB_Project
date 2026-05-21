@@ -39,6 +39,19 @@ parser.add_argument("--video-every", type=int, default=3, help="capture 1 frame 
 parser.add_argument("--ik-solver", choices=["lula", "curobo"], default="lula",
                     help="offline IK backend: lula (18-seed local) or curobo (1024-seed GPU)")
 parser.add_argument("--curobo-seeds", type=int, default=1024, help="cuRobo IK seed count")
+parser.add_argument("--drive", choices=["pd", "kinematic"], default="pd",
+                    help="pd = PhysX implicit-PD position control (ArticulationController); "
+                         "kinematic = set_joint_positions teleport (no PD dynamics — diagnostic)")
+# ── opt-in DP3 closed-loop eval mode (additive; --dp3 off ⇒ identical replay behaviour) ──
+parser.add_argument("--dp3", action="store_true",
+                    help="run the trained DP3 policy CLOSED-LOOP instead of replaying the "
+                         "recorded trajectory (reuses all of gt_replay's sim setup)")
+parser.add_argument("--dp3-server", default="http://127.0.0.1:8765",
+                    help="DP3 inference server base URL (--dp3 mode)")
+parser.add_argument("--dp3-max-steps", type=int, default=60,
+                    help="max DP3 query steps per closed-loop rollout (--dp3 mode)")
+parser.add_argument("--grasp-lift", action="store_true",
+                    help="after the replay, close the gripper and lift the EE +15cm")
 args, _ = parser.parse_known_args()
 
 PROJ_ROOT = "/home/accelerator/UCB_Project"
@@ -213,6 +226,83 @@ def parallel_to_table_quat(ee_pos_W, obj_pos_W):
     R = np.column_stack([ex, ey, ez])
     q_xyzw_retarget = Rotation.from_matrix(R).as_quat()
     return retarget_to_franka_quat(quat_xyzw_to_wxyz(q_xyzw_retarget))
+
+
+# ── DP3 closed-loop helpers (only used when --dp3 is set; additive) ──────────
+# These mirror sim/eval_dp3_sim.py so the closed-loop observation + EE-convention
+# conversions exactly match what the DP3 policy was trained on (Baseline1).
+_FRANKA_TO_RETARGET_R = Rotation.from_euler("z", +90, degrees=True)
+def franka_to_retarget_quat(q_wxyz_franka):
+    """Franka panda_hand convention quat → RETARGET-convention quat (both wxyz).
+    Exact INVERSE of retarget_to_franka_quat (which post-multiplies by Rz(-90°)).
+    Used when BUILDING observations: panda_hand FK gives the Franka-convention quat,
+    but the policy was trained on retarget-convention orientations (local +X = gripper
+    opening axis, +Z = approach)."""
+    r_franka = Rotation.from_quat(quat_wxyz_to_xyzw(np.asarray(q_wxyz_franka)))
+    r_retarget = r_franka * _FRANKA_TO_RETARGET_R     # post-multiply by Rz(+90°)
+    return quat_xyzw_to_wxyz(r_retarget.as_quat())
+
+# YCB class id → DexYCB CAD model folder (textured.obj). Identical mapping to
+# build_gt_replay.YCB_CLASS_TO_CAD — the eval point cloud MUST come from the same mesh.
+YCB_CLASS_TO_CAD = {
+    1: "002_master_chef_can", 2: "003_cracker_box", 3: "004_sugar_box",
+    4: "005_tomato_soup_can", 5: "006_mustard_bottle", 6: "007_tuna_fish_can",
+    7: "008_pudding_box", 8: "009_gelatin_box", 9: "010_potted_meat_can",
+    10: "011_banana", 11: "019_pitcher_base", 12: "021_bleach_cleanser",
+    13: "024_bowl", 14: "025_mug", 15: "035_power_drill", 16: "036_wood_block",
+    17: "037_scissors", 18: "040_large_marker", 19: "051_large_clamp",
+    20: "052_extra_large_clamp", 21: "061_foam_brick",
+}
+_DEXYCB_RAW = f"{PROJ_ROOT}/data_hub/RawData/ThirdPersonRawData/dexycb"
+
+def load_cad_points(ycb_class_id, n_points=4096):
+    """Surface-sample the DexYCB CAD model textured.obj. Returns local CAD-frame points.
+    The CAD mesh is already in metres + the CAD/object frame — NO scaling, NO extra
+    rotation (Phase 1 CAD-first path; identical source to build_gt_replay)."""
+    import trimesh
+    cad_name = YCB_CLASS_TO_CAD.get(ycb_class_id)
+    if cad_name is None:
+        raise ValueError(f"no CAD mapping for ycb_class_id {ycb_class_id}")
+    mesh_path = f"{_DEXYCB_RAW}/models/{cad_name}/textured.obj"
+    if not os.path.exists(mesh_path):
+        raise FileNotFoundError(f"CAD mesh missing: {mesh_path}")
+    mesh = trimesh.load(mesh_path, force="mesh", process=False)
+    pts, _ = trimesh.sample.sample_surface(mesh, n_points)
+    return np.asarray(pts, dtype=np.float64)              # (N, 3) CAD local frame
+
+def cad_points_to_world(cad_pts_local, obj_pos, obj_quat_wxyz):
+    """Transform local CAD points to world frame using the object's current sim pose."""
+    R = Rotation.from_quat(quat_wxyz_to_xyzw(np.asarray(obj_quat_wxyz))).as_matrix()
+    return (R @ cad_pts_local.T).T + np.asarray(obj_pos, dtype=np.float64)
+
+def compute_origin_world(cad_pts_local, obj_pos, obj_quat_wxyz):
+    """G-frame origin in the sim world frame (replicates build_gt_replay's
+    compute_session_origin_G): object xy-centroid + object-bottom z (1st-pct z),
+    measured from the CAD surface points placed at the object's current sim pose.
+    Because sim gravity is -Z_world and the policy is yaw-invariant, the G-frame
+    rotation relative to the world is IDENTITY → this origin IS the pure translation
+    between world and G frame:  v_G = v_world - origin_world."""
+    pts_world = cad_points_to_world(cad_pts_local, obj_pos, obj_quat_wxyz)
+    return np.array([pts_world[:, 0].mean(),                  # object x-centroid
+                     pts_world[:, 1].mean(),                  # object y-centroid
+                     np.percentile(pts_world[:, 2], 1)],      # object bottom (1st pct z)
+                    dtype=np.float64)
+
+def dp3_get_policy_info(server_url):
+    """GET /info → {horizon, n_obs_steps, n_action_steps, action_dim, ...}."""
+    import requests
+    return requests.get(f"{server_url}/info", timeout=10).json()
+
+def dp3_query_policy(server_url, pc_obs, ap_obs, timeout=10.0):
+    """POST the observation window to the DP3 server.
+    pc_obs: (n_obs, N, 3)  ap_obs: (n_obs, 8) → returns action (n_action, 8)."""
+    import requests
+    r = requests.post(f"{server_url}/predict",
+                      json={"point_cloud": pc_obs.tolist(),
+                            "agent_pos":   ap_obs.tolist()},
+                      timeout=timeout)
+    r.raise_for_status()
+    return np.asarray(r.json()["action"], dtype=np.float32)   # (n_action, 8)
 
 
 # ── load trajectory ──────────────────────────────────────────────────────────
@@ -453,7 +543,10 @@ targets_traj = [(actions[t, :3] + sim_origin_W, actions[t, 3:7], f"T_{t}") for t
 home_qpos = franka.get_joint_positions()[:ARM_DOF].copy()
 gripper_q = franka.get_joint_positions()[ARM_DOF:].copy()
 state0_target = (state0_pos_W, state0_quat, "state0")
-targets_combined = [state0_target] + targets_traj
+# --dp3 mode does NOT replay the recorded trajectory, so the trajectory's qpos chain is
+# unneeded — solve ONLY qpos_state0 (much faster). The home→state[0] seeding chain still
+# runs to bias the IK onto a smooth branch for state[0]. qpos_traj is unused in --dp3 mode.
+targets_combined = [state0_target] if args.dp3 else ([state0_target] + targets_traj)
 
 def _ok_str(oks): return f"{sum(oks)}/{len(oks)} ({100*sum(oks)/max(len(oks),1):.0f}%)"
 
@@ -595,11 +688,173 @@ cprint(f"   object reference at {obj_pos_post.round(3)}", "cyan")
 
 # ── prep online driver (zero IK in loop) ─────────────────────────────────────
 def drive_qpos(qpos, n_phys_steps):
-    """Set joint position target → step physics. Skip if qpos is None (IK failed for this frame)."""
+    """Drive Franka to qpos. --drive pd: PhysX implicit-PD position control. --drive
+    kinematic: set_joint_positions teleport (no PD dynamics) — a diagnostic mode that
+    isolates 'PD can't track' from 'cuRobo↔sim frame mismatch'. Skip if qpos is None."""
     if qpos is not None:
+        if args.drive == "kinematic":
+            full = np.concatenate([qpos, gripper_q])
+            # PD target = qpos too, so the drive doesn't fight the teleport during steps
+            franka._articulation_controller.apply_action(
+                ArticulationAction(joint_positions=np.concatenate([qpos, np.array([np.nan, np.nan])])))
+            franka.set_joint_positions(full)
+            franka.set_joint_velocities(np.zeros(9))
+            for _ in range(n_phys_steps): world.step(render=True)
+            franka.set_joint_positions(full)            # re-assert: joints exact at qpos for measurement
+            franka.set_joint_velocities(np.zeros(9))
+            return
         franka._articulation_controller.apply_action(
             ArticulationAction(joint_positions=np.concatenate([qpos, np.array([np.nan, np.nan])])))
     for _ in range(n_phys_steps): world.step(render=True)
+
+
+# ── DP3 PHASE 1: collect the closed-loop trajectory (opt-in via --dp3) ───────
+# Two-phase DP3 eval. Phase 1 (this block) runs the trained DP3 policy closed-loop
+# ONLY to COLLECT the trajectory it produces — it writes that trajectory to an HDF5
+# and exits. Phase 2 (a separate invocation: --traj <that hdf5>, no --dp3) replays
+# the collected trajectory through gt_replay's normal global-continuity IK chain,
+# which solves the WHOLE known trajectory at once → smooth joints (no per-chunk IK
+# branch-switching). IK quality in this phase does NOT matter: this run produces no
+# kept video, only the collected DP3 poses matter, so the arm is teleported via a
+# single Lula IK + set_joint_positions so the EE exactly tracks the policy's pose.
+# This branch ends the script (sim_app.close()); the default replay path is untouched.
+if args.dp3:
+    cprint(f"\n🤖 DP3 PHASE 1 (collect) — server {args.dp3_server}, max_steps={args.dp3_max_steps}", "green")
+
+    # ── server handshake: obs/action window sizes ────────────────────────────
+    _info = dp3_get_policy_info(args.dp3_server)
+    n_obs_steps    = int(_info["n_obs_steps"])
+    n_action_steps = int(_info["n_action_steps"])
+    cprint(f"   policy info: horizon={_info.get('horizon')} n_obs={n_obs_steps} "
+           f"n_action={n_action_steps} action_dim={_info.get('action_dim')}", "cyan")
+
+    # ── G-frame origin: pure translation between sim world and the training G-frame ──
+    # Sample the object's CAD mesh at its current (frozen) sim world pose. The object is
+    # frozen, so origin_world is computed ONCE. (G-frame rotation = identity: sim gravity
+    # is -Z_world and the policy was trained with yaw augmentation → yaw-invariant.)
+    dp3_cad_pts = load_cad_points(obj_meta["ycb_class_id"], n_points=4096)
+    _obj_pos_now, _obj_quat_now = obj.get_obj_pos()
+    origin_world = compute_origin_world(dp3_cad_pts, _obj_pos_now, _obj_quat_now)
+    obj_centroid_W = cad_points_to_world(dp3_cad_pts, _obj_pos_now, _obj_quat_now).mean(axis=0)
+    cprint(f"   CAD pts {dp3_cad_pts.shape}  origin_world={origin_world.round(3)}  "
+           f"obj_centroid_W={obj_centroid_W.round(3)}", "cyan")
+
+    def dp3_build_observation():
+        """One (point_cloud, agent_pos) observation frame in the G-frame.
+        point_cloud (4096,3): CAD points at the object's frozen sim pose, minus origin_world.
+        agent_pos (8,): [xyz, qw,qx,qy,qz, gripper] — panda_hand EE in G-frame, retarget
+        orientation convention, gripper=0.0 (approach only, gripper stays open)."""
+        _op, _oq = obj.get_obj_pos()
+        pc_G = (cad_points_to_world(dp3_cad_pts, _op, _oq) - origin_world).astype(np.float32)
+        _ee_pos_W, _ee_quat_franka = measure_ee_W()                  # panda_hand FK (world)
+        ee_pos_G = (_ee_pos_W - origin_world).astype(np.float32)      # world → G
+        ee_quat_retarget = franka_to_retarget_quat(_ee_quat_franka).astype(np.float32)
+        agent = np.concatenate([ee_pos_G, ee_quat_retarget,
+                                [np.float32(0.0)]]).astype(np.float32)
+        return pc_G, agent
+
+    def dp3_teleport_to(pos_world, q_franka_wxyz):
+        """Advance the sim one DP3 sub-step: one Lula IK to (pos_world, q_franka), then
+        franka.set_joint_positions (kinematic teleport — so the EE exactly tracks the DP3
+        pose and the policy observes clean execution), then world.step(). IK quality here
+        does NOT matter (Phase 1 produces no kept video) — only the collected poses do.
+        Returns ik_ok (bool)."""
+        kw = dict(target_position=np.asarray(pos_world, dtype=np.float64),
+                  position_tolerance=args.ik_pos_tol)
+        if not args.position_only and q_franka_wxyz is not None:
+            kw["target_orientation"] = np.asarray(q_franka_wxyz, dtype=np.float64)
+            kw["orientation_tolerance"] = args.ik_ori_tol
+        action_obj, success = ik.compute_inverse_kinematics(**kw)
+        if success:
+            qpos7 = np.asarray(action_obj.joint_positions[:ARM_DOF], dtype=np.float64)
+            franka.set_joint_positions(np.concatenate([qpos7, gripper_q]))
+            franka.set_joint_velocities(np.zeros(9))
+        world.step(render=True)
+        return bool(success)
+
+    # ── sliding-window obs buffer: fill with the frame-0 observation repeated ──
+    _obs0 = dp3_build_observation()
+    obs_window = [_obs0] * n_obs_steps                          # [(pc, agent)] * n_obs
+
+    # Collected DP3 trajectory: each entry is a raw policy action sub-step (shape (8,)),
+    # G-frame, RETARGET quaternion convention — the policy's raw output, NOT axis-swapped.
+    dp3_traj = []
+    arrived_idx = None                                          # index into dp3_traj of the "arrived" step
+    dp3_ik_fail = 0
+    dp3_n_queries = 0
+
+    while len(dp3_traj) < args.dp3_max_steps:
+        dp3_n_queries += 1
+        pc_obs = np.stack([o[0] for o in obs_window])           # (n_obs, 4096, 3)
+        ap_obs = np.stack([o[1] for o in obs_window])           # (n_obs, 8)
+        try:
+            dp3_action = dp3_query_policy(args.dp3_server, pc_obs, ap_obs)   # (n_action, 8)
+        except Exception as e:
+            cprint(f"   ❌ DP3 server error @ query {dp3_n_queries-1}: {e}", "red")
+            break
+
+        stop = False
+        for sub in range(dp3_action.shape[0]):
+            if len(dp3_traj) >= args.dp3_max_steps:
+                stop = True
+                break
+            a = dp3_action[sub]
+            # COLLECT the raw policy output (G-frame, RETARGET quat convention) verbatim.
+            dp3_traj.append(np.asarray(a, dtype=np.float64).copy())
+            # Advance the sim: G→world position, retarget→Franka quat just for the IK target.
+            ik_ok = dp3_teleport_to(a[:3].astype(np.float64) + origin_world,
+                                    retarget_to_franka_quat(a[3:7].astype(np.float64)))
+            if not ik_ok:
+                dp3_ik_fail += 1
+            # "arrived": the policy's gripper channel first crosses 0.5
+            if float(a[7]) >= 0.5:
+                arrived_idx = len(dp3_traj) - 1
+                stop = True
+                break
+
+        # ── refresh the sliding window with a fresh world observation ──
+        obs_window = obs_window[1:] + [dp3_build_observation()]
+
+        _ee_w, _ = measure_ee_W()
+        cprint(f"   query {dp3_n_queries-1:3d}: ee={_ee_w.round(3)}  collected={len(dp3_traj)}  "
+               f"grip={dp3_action[-1,7]:.2f}  ik_fail={dp3_ik_fail}", "cyan")
+        if stop:
+            if arrived_idx is not None:
+                cprint(f"   policy signalled 'arrived' @ collected idx {arrived_idx}", "magenta")
+            break
+
+    if arrived_idx is None:
+        cprint(f"   reached --dp3-max-steps ({args.dp3_max_steps}) without an 'arrived' signal",
+               "yellow")
+
+    # ── write the collected trajectory as an HDF5 for Phase 2 to replay ──────
+    # Quat convention: the policy output AND raw_state0 are RETARGET-convention. Phase 2's
+    # gt_replay load applies retarget_to_franka_quat itself — so we store RETARGET quats
+    # here and do NOT pre-apply the axis swap.
+    N = len(dp3_traj)
+    # raw_state0 = the session's RAW state[0] (RETARGET convention). Re-open the --traj
+    # HDF5 and read state[0] directly — gt_replay's in-memory states[0] has already been
+    # axis-swapped to Franka convention, so we must NOT use it.
+    with h5py.File(TRAJ, "r") as _hsrc:
+        raw_state0 = np.asarray(_hsrc["state"][0], dtype=np.float64)
+    dp3_action_arr = np.asarray(dp3_traj, dtype=np.float64).reshape(N, 8)
+    dp3_state_arr  = np.vstack([raw_state0[None, :], dp3_action_arr])   # (N+1, 8)
+    dp3_out_path = f"/tmp/dp3_traj_{OBJECT}.hdf5"
+    with h5py.File(dp3_out_path, "w") as _hout:
+        _hout.create_dataset("state", data=dp3_state_arr)               # (N+1, 8) RETARGET conv
+        _hout.create_dataset("action", data=dp3_action_arr)             # (N, 8)   RETARGET conv
+        _hout.attrs["n_steps"] = N
+        _hout.attrs["grasp_onset_idx"] = arrived_idx if arrived_idx is not None else N
+        _hout.attrs["obj_quat_G_wxyz"] = obj_quat_G_wxyz
+        # obj_origin_G may be None for legacy source HDF5s; HDF5 attrs can't hold None,
+        # so only write it when present (Phase 2 falls back to its old behaviour if absent).
+        if obj_origin_G is not None:
+            _hout.attrs["obj_origin_G"] = obj_origin_G
+
+    cprint(f"\nDP3 trajectory written -> {dp3_out_path}  "
+           f"({N} steps, arrived@{arrived_idx})", "green")
+    sim_app.close()
+    sys.exit(0)
 
 
 # ── Trajectory replay ────────────────────────────────────────────────────────
@@ -628,8 +883,38 @@ for t in range(n_steps):
                f"track={track_err_mm:4.0f}mm", "cyan")
 
 
+# ── optional: close the gripper + lift the EE +15cm (visual grasp gesture) ───
+# Opt-in via --grasp-lift. Purely a visual close+lift after the replay finishes —
+# the object stays frozen (kinematic, collision-off), so nothing is actually picked
+# up; this is fine and intended. --grasp-lift off ⇒ replay behaves exactly as before.
+if args.grasp_lift:
+    cprint(f"\n🤏 grasp+lift — close gripper, raise EE +15cm over 12 steps", "green")
+    franka.close_gripper()
+    for _ in range(HOLD_AFTER_GRIP): world.step(render=True)     # let the gripper close
+    _lift_pos0, _lift_quat = measure_ee_W()                      # hold this orientation
+    _lift_n = 12
+    for i in range(1, _lift_n + 1):
+        _lift_target = _lift_pos0 + np.array([0.0, 0.0, 0.15 * i / _lift_n])
+        kw = dict(target_position=np.asarray(_lift_target, dtype=np.float64),
+                  position_tolerance=args.ik_pos_tol)
+        if not args.position_only:
+            kw["target_orientation"] = np.asarray(_lift_quat, dtype=np.float64)
+            kw["orientation_tolerance"] = args.ik_ori_tol
+        _lift_action, _lift_ok = ik.compute_inverse_kinematics(**kw)
+        if _lift_ok:
+            drive_qpos(np.asarray(_lift_action.joint_positions[:ARM_DOF], dtype=np.float64),
+                       args.phys_per_action)
+        else:
+            drive_qpos(None, args.phys_per_action)               # IK miss → hold
+    _lift_ee, _ = measure_ee_W()
+    cprint(f"   grasp+lift done — EE {_lift_pos0.round(3)} → {_lift_ee.round(3)}", "cyan")
+
+
 # ── result: did the EE faithfully reach the human grasp pose? ────────────────
-for _ in range(30): world.step(render=True)
+# Measured at the LAST trajectory frame. The trajectory (= DP3 training data) ends
+# here — it is the retargeted human approach truncated at grasp_onset. Whatever the
+# arm does during an idle post-replay settle (gravity sag etc.) is out of scope:
+# Baseline1 stops at "gripper beside the object"; close+lift is hardcoded later.
 ee_final_W, q_final = measure_ee_W()
 obj_final_W, _ = obj.get_obj_pos()
 # Final EE target = last action (= the human grasp pose, retargeted)
@@ -640,6 +925,7 @@ lf_W, _ = ik._kinematics_solver.compute_forward_kinematics("panda_leftfingertip"
 rf_W, _ = ik._kinematics_solver.compute_forward_kinematics("panda_rightfingertip", franka.get_joint_positions()[:7])
 fingertip_mid = (np.asarray(lf_W) + np.asarray(rf_W)) / 2
 ft_to_obj_cm = float(np.linalg.norm(fingertip_mid - obj_final_W) * 100.0)
+for _ in range(30): world.step(render=True)   # brief idle hold for the video viewer — NOT measured
 
 cprint(f"\n{'=' * 60}", "yellow")
 cprint(f"=== Gate 3 RESULT (session {args.session}, object {obj_meta['name']}) ===", "yellow")

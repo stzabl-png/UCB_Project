@@ -68,3 +68,6 @@ Baseline1/dp3_runs/
 
 # NVIDIA profiling artifacts
 NvStreamer-*.etli
+
+# partner handoff package (contains 4GB ckpt) — do not track
+dp3_aug_handoff/

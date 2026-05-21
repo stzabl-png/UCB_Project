@@ -87,7 +87,7 @@ def predict(model: DP3, pc: np.ndarray, ap: np.ndarray, device: str = "cuda:0"):
 def self_test(model: DP3, cfg, zarr_path: str = None):
     """Run policy on a val episode, compare predicted action to GT."""
     if zarr_path is None:
-        zarr_path = "/home/accelerator/UCB_Project/Baseline1/data/human_dp_baseline_v2_all.zarr"
+        zarr_path = "/home/accelerator/UCB_Project/Baseline1/data/human_dp_baseline.zarr"
     print(f"\nself-test: reading val sample from {zarr_path}")
     import zarr
     r = zarr.open(zarr_path, "r")
