@@ -195,7 +195,7 @@ cuRobo: plan home → pre-grasp → grasp → lift
 
 Full commands and troubleshooting: [`docs/grasp_collect_pipeline.md`](docs/grasp_collect_pipeline.md).
 
-**Layout** (`output/grasp_collect/` by default):
+**Layout** (`output/grasp_collect_no_rot/` by default; old runs in `output/grasp_collect_legacy/`):
 
 | Path | Notes |
 |------|--------|
