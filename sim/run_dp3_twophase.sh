@@ -55,7 +55,6 @@ for row in "${OBJECTS[@]}"; do
   timeout 1500 "$PY" -u sim/gt_replay_ikpd_v2.py \
     --session "$SESS" --object "$OBJID" \
     --traj "/tmp/dp3_traj_${OBJID}.hdf5" \
-    --ik-solver curobo \
     --drive pd --grasp-lift --headless \
     --video "$VID_DIR" --video-every 2 \
     > "/tmp/dp3_tp_${OBJNAME}_p2.log" 2>&1

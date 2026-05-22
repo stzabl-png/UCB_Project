@@ -36,8 +36,6 @@ parser.add_argument("--grip-delay", type=int, default=0,
                     help="delay gripper close by N frames after grasp_onset_idx")
 parser.add_argument("--video", default=None, help="save PNG frames here (omitted = no recording)")
 parser.add_argument("--video-every", type=int, default=3, help="capture 1 frame every N sim steps")
-parser.add_argument("--ik-solver", choices=["lula", "curobo"], default="lula",
-                    help="offline IK backend: lula (18-seed local) or curobo (1024-seed GPU)")
 parser.add_argument("--curobo-seeds", type=int, default=1024, help="cuRobo IK seed count")
 parser.add_argument("--drive", choices=["pd", "kinematic"], default="pd",
                     help="pd = PhysX implicit-PD position control (ArticulationController); "
@@ -440,36 +438,11 @@ cprint(f"Franka home: pos={ee_home_W.round(3)} quat={q_home.round(3)}", "cyan")
 #   (a) wrist-flip / branch-switching when IK has multiple solutions (no warm-start chain)
 #   (b) failures only surface after sim already stepped → wasted work
 #   (c) IK calls inside the physics loop block CPU; offline batches once
-# We build ONE qpos sequence covering pre-position A + B + 73 trajectory frames,
-# using Lula's warm_start (current joint positions at call time) for continuity.
+# We solve ONE qpos sequence (state[0] + trajectory) offline with cuRobo's
+# 1024-seed GPU IK + minimax-DP continuity-chain selection.
 # At sim run time, we just apply_action(qpos[k]) per step. Zero IK in the hot loop.
 
 ARM_DOF = 7  # panda_joint1..7
-
-def precompute_ik_sequence(targets_pose, seed_qpos):
-    """targets_pose: list of (pos_W, quat_wxyz, label_str)
-    seed_qpos: initial joint positions (used as warm-start for the FIRST IK).
-    Subsequent IKs warm-start from the PREVIOUS IK's qpos → forces a continuous IK branch.
-    Returns: (qpos_list, ok_list, where qpos_list[i] is np.array(ARM_DOF,) or None if failed)."""
-    qpos_list, ok_list = [], []
-    cur_seed = np.array(seed_qpos[:ARM_DOF], dtype=np.float64)
-    for i, (pos, quat, _label) in enumerate(targets_pose):
-        kw = dict(target_position=np.asarray(pos, dtype=np.float64),
-                  position_tolerance=args.ik_pos_tol)
-        if not args.position_only and quat is not None:
-            kw["target_orientation"] = np.asarray(quat, dtype=np.float64)
-            kw["orientation_tolerance"] = args.ik_ori_tol
-        # Lula's IK warm-starts from the current articulation joint positions; to bias
-        # toward the previous solution, we temporarily set the articulation to cur_seed.
-        franka.set_joint_positions(np.concatenate([cur_seed, franka.get_joint_positions()[ARM_DOF:]]))
-        action, success = ik.compute_inverse_kinematics(**kw)
-        if success:
-            qpos = np.asarray(action.joint_positions[:ARM_DOF], dtype=np.float64)
-            qpos_list.append(qpos); ok_list.append(True)
-            cur_seed = qpos          # next IK warm-starts from this qpos
-        else:
-            qpos_list.append(None); ok_list.append(False)
-    return qpos_list, ok_list
 
 def analyze_qpos_continuity(qpos_list, label):
     """Report max joint-step between consecutive frames (wrist flips show up as huge jumps)."""
@@ -487,136 +460,60 @@ def analyze_qpos_continuity(qpos_list, label):
            "green" if max_step_per_joint.max() < 0.5 else ("yellow" if max_step_per_joint.max() < 1.0 else "red"))
 
 
-def _chain_max_step(qpos_list):
-    """Largest single-frame joint angle jump across the whole chain (∞-norm). inf if any None."""
-    if any(q is None for q in qpos_list): return float("inf")
-    return max((np.abs(qpos_list[k] - qpos_list[k - 1]).max() for k in range(1, len(qpos_list))), default=0.0)
-
-
-def find_best_ik_chain(targets, seed_candidates, label=""):
-    """Try each seed candidate, run the full IK chain from it, return the chain with the
-       smallest max-joint-step. This is how we dodge IK branch flips: different seeds bias
-       IK toward different redundant-DoF branches; the one whose 'whole-trajectory ribbon'
-       has the smallest discontinuity is the one PD can physically follow."""
-    best = dict(qpos=None, max_step=float("inf"), seed_idx=-1, ok=None)
-    for idx, seed in enumerate(seed_candidates):
-        qpos_list, ok_list = precompute_ik_sequence(targets, seed)
-        ms = _chain_max_step(qpos_list)
-        flag = "✓" if ms < 0.5 else ("·" if ms < 1.5 else "✗")
-        cprint(f"   [{label}] seed {idx}: IK={sum(ok_list)}/{len(ok_list)}  max_step={np.rad2deg(ms):6.0f}°  {flag}",
-               "cyan" if ms < best["max_step"] else None)
-        if ms < best["max_step"]:
-            best = dict(qpos=qpos_list, max_step=ms, seed_idx=idx, ok=ok_list)
-    return best
-
-
 # ── build target sequence ────────────────────────────────────────────────────
-# Rationale: training data IS the human trajectory. We DON'T drive Franka through
-# a pre-position phase in sim — we set Franka directly to IK(state[0]) at scene
-# init. But the IK *seed* for state[0] matters: seeding directly from default
-# Franka home picks a poor branch that causes a wrist flip ~24 frames into the
-# replay. So we keep a SHORT offline IK seeding chain (home → parallel-to-table
-# → state[0].quat, 30 hops) just to bias the seed onto a smooth branch. No sim
-# steps executed during this — it's pure IK arithmetic.
+# Training data IS the human trajectory. Franka is set directly to IK(state[0]) at
+# scene init (no in-sim pre-position phase). cuRobo's 1024-seed solver chooses the
+# IK branch globally, so no Lula-style seeding chain is needed.
 state0_pos_W = states[0, :3] + sim_origin_W
-state0_quat = states[0, 3:7]
-pre_quat = parallel_to_table_quat(state0_pos_W, sim_origin_W)
-
-# Seeding chain (offline IK, no sim drive) — 30 frames is enough to bias the branch
-SEED_HOPS_A = 30   # cartesian-and-quat interp: home_EE → (state[0].pos, parallel-to-table)
-SEED_HOPS_B = 20   # orientation slerp at state[0].pos: parallel-to-table → state[0].quat
-key_times = [0.0, 1.0]
-from scipy.spatial.transform import Slerp as _Slerp
-slerp_A_seed = _Slerp(key_times, Rotation.from_quat(np.vstack([quat_wxyz_to_xyzw(q_home), quat_wxyz_to_xyzw(pre_quat)])))
-slerp_B_seed = _Slerp(key_times, Rotation.from_quat(np.vstack([quat_wxyz_to_xyzw(pre_quat), quat_wxyz_to_xyzw(state0_quat)])))
-targets_seed_A = [((1-a/SEED_HOPS_A)*ee_home_W + (a/SEED_HOPS_A)*state0_pos_W,
-                   quat_xyzw_to_wxyz(slerp_A_seed([a/SEED_HOPS_A]).as_quat()[0]),
-                   f"sA_{a}") for a in range(1, SEED_HOPS_A + 1)]
-targets_seed_B = [(state0_pos_W,
-                   quat_xyzw_to_wxyz(slerp_B_seed([a/SEED_HOPS_B]).as_quat()[0]),
-                   f"sB_{a}") for a in range(1, SEED_HOPS_B + 1)]
+state0_quat  = states[0, 3:7]
 targets_traj = [(actions[t, :3] + sim_origin_W, actions[t, 3:7], f"T_{t}") for t in range(n_steps)]
 
 # ── precompute IK chain: state[0] + trajectory (offline, no sim drive) ───────
 # HDF5 stores action[t]=state[t+1] → targets_traj[0] is state[1]. The combined chain
 # [state0]+traj: qpos[0] becomes Franka's spawn pose, qpos[1:] drives the replay.
-home_qpos = franka.get_joint_positions()[:ARM_DOF].copy()
 gripper_q = franka.get_joint_positions()[ARM_DOF:].copy()
 state0_target = (state0_pos_W, state0_quat, "state0")
-# --dp3 mode does NOT replay the recorded trajectory, so the trajectory's qpos chain is
-# unneeded — solve ONLY qpos_state0 (much faster). The home→state[0] seeding chain still
-# runs to bias the IK onto a smooth branch for state[0]. qpos_traj is unused in --dp3 mode.
+# --dp3 mode does NOT replay the recorded trajectory → solve ONLY qpos_state0.
 targets_combined = [state0_target] if args.dp3 else ([state0_target] + targets_traj)
 
 def _ok_str(oks): return f"{sum(oks)}/{len(oks)} ({100*sum(oks)/max(len(oks),1):.0f}%)"
 
-if args.ik_solver == "curobo":
-    # cuRobo GPU IK: 1024-seed parallel search + minimax-DP continuity chain selection.
-    # Run OUT-OF-PROCESS: cuRobo 0.8's collision module needs a newer Warp than IsaacSim
-    # bundles, so importing it in this process crashes. The offline IK is a standalone
-    # precompute — a fresh subprocess picks up the correct (pip-installed) Warp.
-    cprint(f"\n🧮 Offline IK — cuRobo GPU solver, out-of-process  ({len(targets_combined)} frames)", "yellow")
-    import subprocess
-    _tag = f"/tmp/cik_{os.getpid()}"
-    _cik_in, _cik_out = _tag + "_in.npz", _tag + "_out.npz"
-    np.savez(_cik_in,
-             pos=np.array([p for (p, q, _) in targets_combined], dtype=np.float64),
-             quat=np.array([q for (p, q, _) in targets_combined], dtype=np.float64),
-             robot_pos=np.array(ROBOT_POS, dtype=np.float64),
-             robot_ori=np.array(ROBOT_ORI, dtype=np.float64),
-             num_seeds=args.curobo_seeds, pos_tol=args.ik_pos_tol, ori_tol=args.ik_ori_tol)
-    _cik_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "curobo_ik.py")
-    _env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}   # avoid IsaacSim's Warp
-    _r = subprocess.run([sys.executable, _cik_script, "--solve", _cik_in, _cik_out],
-                        capture_output=True, text=True, env=_env)
-    if _r.returncode != 0 or not os.path.exists(_cik_out):
-        cprint(f"   ❌ FATAL: cuRobo IK subprocess failed (rc={_r.returncode})", "red")
-        cprint((_r.stdout or "")[-1500:] + "\n" + (_r.stderr or "")[-1500:], "red")
-        sim_app.close(); sys.exit(1)
-    for _ln in _r.stdout.strip().splitlines()[-3:]:
-        cprint(f"   {_ln}", "cyan")
-    _d = np.load(_cik_out)
-    _qp, _ok = _d["qpos"], _d["ok"]
-    qpos_combined = [(_qp[i] if _ok[i] else None) for i in range(len(_ok))]
-    ok_combined   = [bool(x) for x in _ok]
-    qpos_state0 = qpos_combined[0]
-    qpos_traj   = qpos_combined[1:]
-    ok_traj     = ok_combined[1:]
-    if qpos_state0 is None:
-        cprint(f"   ❌ FATAL: cuRobo IK failed at state[0]", "red")
-        sim_app.close(); sys.exit(1)
-    cprint(f"   IK success — Traj: {_ok_str(ok_traj)}", "cyan")
-    analyze_qpos_continuity(qpos_traj, "trajectory")
-else:
-    # ── Lula multi-seed IK (the wrist-flip fix) ──────────────────────────────
-    # Same EE pose has multiple valid 7-DoF configs; consecutive frames can flip
-    # branch abruptly (260° joint jumps). Run the whole chain from N seeds, keep the
-    # one with the smallest joint step. Seeds: perturbations of a home→state[0]
-    # seeding chain, biased on joints 5 & 7 (the flip-prone wrist DoFs).
-    cprint(f"\n🧮 Offline IK chain (Lula) — seed: {len(targets_seed_A)} A + {len(targets_seed_B)} B  +  trajectory: {len(targets_traj)}", "yellow")
-    qpos_sA, ok_sA = precompute_ik_sequence(targets_seed_A, home_qpos)
-    qpos_sB, ok_sB = precompute_ik_sequence(targets_seed_B,
-                                            next((q for q in reversed(qpos_sA) if q is not None), home_qpos))
-    seed_for_state0 = next((q for q in reversed(qpos_sB) if q is not None),
-                           next((q for q in reversed(qpos_sA) if q is not None), home_qpos))
-    def _perturb(base, joint_idx, delta):
-        p = base.copy(); p[joint_idx] += delta; return p
-    seed_candidates = [seed_for_state0, home_qpos]
-    for j in (4, 6):
-        for d in (-2.0, -1.0, 1.0, 2.0):
-            seed_candidates.append(_perturb(seed_for_state0, j, d))
-            seed_candidates.append(_perturb(home_qpos,        j, d))
-    best = find_best_ik_chain(targets_combined, seed_candidates, label="combined (state0+traj)")
-    if best["qpos"] is None:
-        cprint(f"   ❌ FATAL: no seed produced a complete IK chain", "red")
-        sim_app.close(); sys.exit(1)
-    cprint(f"   → picked seed #{best['seed_idx']}  max_step={np.rad2deg(best['max_step']):.1f}°  ({len(seed_candidates)} candidates tried)", "green")
-    qpos_state0 = best["qpos"][0]
-    qpos_traj   = best["qpos"][1:]
-    ok_traj     = best["ok"][1:]
-    cprint(f"   IK success — seed_A: {_ok_str(ok_sA)}  seed_B: {_ok_str(ok_sB)}  Traj: {_ok_str(ok_traj)}", "cyan")
-    analyze_qpos_continuity(qpos_sA + qpos_sB, "seeding chain (offline)")
-    analyze_qpos_continuity(qpos_traj, "trajectory")
+# cuRobo GPU IK: 1024-seed parallel search + minimax-DP continuity chain selection.
+# Run OUT-OF-PROCESS: cuRobo 0.8's collision module needs a newer Warp than IsaacSim
+# bundles, so importing it in this process crashes. The offline IK is a standalone
+# precompute — a fresh subprocess picks up the correct (pip-installed) Warp.
+cprint(f"\n🧮 Offline IK — cuRobo GPU solver, out-of-process  ({len(targets_combined)} frames)", "yellow")
+import subprocess
+_tag = f"/tmp/cik_{os.getpid()}"
+_cik_in, _cik_out = _tag + "_in.npz", _tag + "_out.npz"
+np.savez(_cik_in,
+         pos=np.array([p for (p, q, _) in targets_combined], dtype=np.float64),
+         quat=np.array([q for (p, q, _) in targets_combined], dtype=np.float64),
+         robot_pos=np.array(ROBOT_POS, dtype=np.float64),
+         robot_ori=np.array(ROBOT_ORI, dtype=np.float64),
+         num_seeds=args.curobo_seeds, pos_tol=args.ik_pos_tol, ori_tol=args.ik_ori_tol)
+_cik_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "curobo_ik.py")
+_env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}   # avoid IsaacSim's Warp
+_r = subprocess.run([sys.executable, _cik_script, "--solve", _cik_in, _cik_out],
+                    capture_output=True, text=True, env=_env)
+if _r.returncode != 0 or not os.path.exists(_cik_out):
+    cprint(f"   ❌ FATAL: cuRobo IK subprocess failed (rc={_r.returncode})", "red")
+    cprint((_r.stdout or "")[-1500:] + "\n" + (_r.stderr or "")[-1500:], "red")
+    sim_app.close(); sys.exit(1)
+for _ln in _r.stdout.strip().splitlines()[-3:]:
+    cprint(f"   {_ln}", "cyan")
+_d = np.load(_cik_out)
+_qp, _ok = _d["qpos"], _d["ok"]
+qpos_combined = [(_qp[i] if _ok[i] else None) for i in range(len(_ok))]
+ok_combined   = [bool(x) for x in _ok]
+qpos_state0 = qpos_combined[0]
+qpos_traj   = qpos_combined[1:]
+ok_traj     = ok_combined[1:]
+if qpos_state0 is None:
+    cprint(f"   ❌ FATAL: cuRobo IK failed at state[0]", "red")
+    sim_app.close(); sys.exit(1)
+cprint(f"   IK success — Traj: {_ok_str(ok_traj)}", "cyan")
+analyze_qpos_continuity(qpos_traj, "trajectory")
 if not all(q is not None for q in qpos_traj):
     bad = [i for i, q in enumerate(qpos_traj) if q is None]
     cprint(f"   ⚠️  trajectory has {len(bad)} unreachable frames: {bad[:10]}{'...' if len(bad)>10 else ''}", "red")
@@ -712,11 +609,14 @@ def drive_qpos(qpos, n_phys_steps):
 # Two-phase DP3 eval. Phase 1 (this block) runs the trained DP3 policy closed-loop
 # ONLY to COLLECT the trajectory it produces — it writes that trajectory to an HDF5
 # and exits. Phase 2 (a separate invocation: --traj <that hdf5>, no --dp3) replays
-# the collected trajectory through gt_replay's normal global-continuity IK chain,
-# which solves the WHOLE known trajectory at once → smooth joints (no per-chunk IK
-# branch-switching). IK quality in this phase does NOT matter: this run produces no
-# kept video, only the collected DP3 poses matter, so the arm is teleported via a
-# single Lula IK + set_joint_positions so the EE exactly tracks the policy's pose.
+# the collected trajectory through cuRobo's whole-trajectory continuity IK.
+#
+# Phase 1 is a PURE EE-SPACE rollout — there is NO Franka and NO IK in the loop.
+# DP3 is an object-centric EE-space policy (obs = object point cloud + EE pose;
+# action = future EE poses); its closed-loop semantics are "policy output → fed
+# back as the next observation's EE". So the EE state fed back is the policy's OWN
+# last action (state[0] for the first frame), not a robot FK. This keeps Phase 1
+# free of robot-specific IK error; reachability/execution is assessed in Phase 2.
 # This branch ends the script (sim_app.close()); the default replay path is untouched.
 if args.dp3:
     cprint(f"\n🤖 DP3 PHASE 1 (collect) — server {args.dp3_server}, max_steps={args.dp3_max_steps}", "green")
@@ -739,49 +639,34 @@ if args.dp3:
     cprint(f"   CAD pts {dp3_cad_pts.shape}  origin_world={origin_world.round(3)}  "
            f"obj_centroid_W={obj_centroid_W.round(3)}", "cyan")
 
-    def dp3_build_observation():
+    def dp3_build_observation(ee_vec):
         """One (point_cloud, agent_pos) observation frame in the G-frame.
         point_cloud (4096,3): CAD points at the object's frozen sim pose, minus origin_world.
-        agent_pos (8,): [xyz, qw,qx,qy,qz, gripper] — panda_hand EE in G-frame, retarget
-        orientation convention, gripper=0.0 (approach only, gripper stays open)."""
+        agent_pos (8,): [xyz, qw,qx,qy,qz, gripper] — EE in G-frame, retarget orientation
+        convention, gripper=0.0 (the training-data state keeps the gripper open through
+        the whole approach — feed 0.0, NOT the policy's commanded gripper).
+        ee_vec is the VIRTUAL EE state (8,): state[0] for the first frame, then the
+        policy's own last action. No IK, no Franka FK — a pure EE-space rollout."""
         _op, _oq = obj.get_obj_pos()
         pc_G = (cad_points_to_world(dp3_cad_pts, _op, _oq) - origin_world).astype(np.float32)
-        _ee_pos_W, _ee_quat_franka = measure_ee_W()                  # panda_hand FK (world)
-        ee_pos_G = (_ee_pos_W - origin_world).astype(np.float32)      # world → G
-        ee_quat_retarget = franka_to_retarget_quat(_ee_quat_franka).astype(np.float32)
-        agent = np.concatenate([ee_pos_G, ee_quat_retarget,
+        ee_vec = np.asarray(ee_vec, dtype=np.float32)
+        agent = np.concatenate([ee_vec[:3], ee_vec[3:7],
                                 [np.float32(0.0)]]).astype(np.float32)
         return pc_G, agent
 
-    def dp3_teleport_to(pos_world, q_franka_wxyz):
-        """Advance the sim one DP3 sub-step: one Lula IK to (pos_world, q_franka), then
-        franka.set_joint_positions (kinematic teleport — so the EE exactly tracks the DP3
-        pose and the policy observes clean execution), then world.step(). IK quality here
-        does NOT matter (Phase 1 produces no kept video) — only the collected poses do.
-        Returns ik_ok (bool)."""
-        kw = dict(target_position=np.asarray(pos_world, dtype=np.float64),
-                  position_tolerance=args.ik_pos_tol)
-        if not args.position_only and q_franka_wxyz is not None:
-            kw["target_orientation"] = np.asarray(q_franka_wxyz, dtype=np.float64)
-            kw["orientation_tolerance"] = args.ik_ori_tol
-        action_obj, success = ik.compute_inverse_kinematics(**kw)
-        if success:
-            qpos7 = np.asarray(action_obj.joint_positions[:ARM_DOF], dtype=np.float64)
-            franka.set_joint_positions(np.concatenate([qpos7, gripper_q]))
-            franka.set_joint_velocities(np.zeros(9))
-        world.step(render=True)
-        return bool(success)
-
-    # ── sliding-window obs buffer: fill with the frame-0 observation repeated ──
-    _obs0 = dp3_build_observation()
-    obs_window = [_obs0] * n_obs_steps                          # [(pc, agent)] * n_obs
+    # ── virtual EE state: raw state[0] (RETARGET convention). gt_replay's in-memory
+    # states[0] is axis-swapped to Franka convention, so re-read it from the HDF5. ──
+    with h5py.File(TRAJ, "r") as _hsrc:
+        raw_state0 = np.asarray(_hsrc["state"][0], dtype=np.float64)
 
     # Collected DP3 trajectory: each entry is a raw policy action sub-step (shape (8,)),
-    # G-frame, RETARGET quaternion convention — the policy's raw output, NOT axis-swapped.
+    # G-frame, RETARGET quaternion convention — the policy's raw output, verbatim.
     dp3_traj = []
     arrived_idx = None                                          # index into dp3_traj of the "arrived" step
-    dp3_ik_fail = 0
     dp3_n_queries = 0
+
+    # sliding-window obs buffer: filled with the frame-0 observation (virtual EE = state[0]).
+    obs_window = [dp3_build_observation(raw_state0)] * n_obs_steps   # [(pc, agent)] * n_obs
 
     while len(dp3_traj) < args.dp3_max_steps:
         dp3_n_queries += 1
@@ -800,24 +685,21 @@ if args.dp3:
                 break
             a = dp3_action[sub]
             # COLLECT the raw policy output (G-frame, RETARGET quat convention) verbatim.
+            # This IS the virtual EE state — no IK, no Franka: the policy's own last
+            # action becomes the EE fed back in the next observation.
             dp3_traj.append(np.asarray(a, dtype=np.float64).copy())
-            # Advance the sim: G→world position, retarget→Franka quat just for the IK target.
-            ik_ok = dp3_teleport_to(a[:3].astype(np.float64) + origin_world,
-                                    retarget_to_franka_quat(a[3:7].astype(np.float64)))
-            if not ik_ok:
-                dp3_ik_fail += 1
             # "arrived": the policy's gripper channel first crosses 0.5
             if float(a[7]) >= 0.5:
                 arrived_idx = len(dp3_traj) - 1
                 stop = True
                 break
 
-        # ── refresh the sliding window with a fresh world observation ──
-        obs_window = obs_window[1:] + [dp3_build_observation()]
+        # ── refresh the sliding window: EE fed back = the policy's own last action ──
+        obs_window = obs_window[1:] + [dp3_build_observation(dp3_traj[-1])]
 
-        _ee_w, _ = measure_ee_W()
-        cprint(f"   query {dp3_n_queries-1:3d}: ee={_ee_w.round(3)}  collected={len(dp3_traj)}  "
-               f"grip={dp3_action[-1,7]:.2f}  ik_fail={dp3_ik_fail}", "cyan")
+        _ee_g = dp3_traj[-1][:3]
+        cprint(f"   query {dp3_n_queries-1:3d}: ee_G={_ee_g.round(3)}  collected={len(dp3_traj)}  "
+               f"grip={dp3_action[-1,7]:.2f}", "cyan")
         if stop:
             if arrived_idx is not None:
                 cprint(f"   policy signalled 'arrived' @ collected idx {arrived_idx}", "magenta")
@@ -830,13 +712,8 @@ if args.dp3:
     # ── write the collected trajectory as an HDF5 for Phase 2 to replay ──────
     # Quat convention: the policy output AND raw_state0 are RETARGET-convention. Phase 2's
     # gt_replay load applies retarget_to_franka_quat itself — so we store RETARGET quats
-    # here and do NOT pre-apply the axis swap.
+    # here and do NOT pre-apply the axis swap. (raw_state0 was read at rollout init.)
     N = len(dp3_traj)
-    # raw_state0 = the session's RAW state[0] (RETARGET convention). Re-open the --traj
-    # HDF5 and read state[0] directly — gt_replay's in-memory states[0] has already been
-    # axis-swapped to Franka convention, so we must NOT use it.
-    with h5py.File(TRAJ, "r") as _hsrc:
-        raw_state0 = np.asarray(_hsrc["state"][0], dtype=np.float64)
     dp3_action_arr = np.asarray(dp3_traj, dtype=np.float64).reshape(N, 8)
     dp3_state_arr  = np.vstack([raw_state0[None, :], dp3_action_arr])   # (N+1, 8)
     dp3_out_path = f"/tmp/dp3_traj_{OBJECT}.hdf5"
