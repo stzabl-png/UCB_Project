@@ -50,6 +50,14 @@ parser.add_argument("--dp3-max-steps", type=int, default=60,
                     help="max DP3 query steps per closed-loop rollout (--dp3 mode)")
 parser.add_argument("--grasp-lift", action="store_true",
                     help="after the replay, close the gripper and lift the EE +15cm")
+parser.add_argument("--grasp-collision", action="store_true",
+                    help="real grasp eval: object is a DYNAMIC rigid body with a convex-hull "
+                         "collider, collision ON — the closing gripper actually contacts and "
+                         "lifts it. Off (default) = frozen non-colliding visual reference. "
+                         "Ignored in --dp3 mode (Phase 1 keeps the object frozen).")
+parser.add_argument("--object-mass", type=float, default=None,
+                    help="override object mass in kg for the grasp eval "
+                         "(default = grasp_physics.GRASP_OBJECT_MASS_KG)")
 args, _ = parser.parse_known_args()
 
 PROJ_ROOT = "/home/accelerator/UCB_Project"
@@ -174,6 +182,7 @@ import omni.replicator.core as rep
 
 SIM_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, SIM_DIR)
+import grasp_physics                       # shared grasp-physics setup (= run_grasp_sim.py)
 from env_config.robot.Franka import Franka
 from env_config.rigid.RigidObject import RigidObject
 
@@ -418,8 +427,12 @@ else:
     obj_place_pos = np.array([sim_origin_W[0], sim_origin_W[1], TABLE_TOP_Z + obj_meta["height"] / 2])
 for i in range(10): delete_prim(f"/World/Rigid/rigid_{i}")
 delete_prim("/World/Rigid/rigid")
+obj_mass_kg = args.object_mass if args.object_mass is not None else grasp_physics.GRASP_OBJECT_MASS_KG
 obj = RigidObject(world, usd_path=obj_meta["usd"], pos=np.array(obj_place_pos),
-                  ori=np.array([0., 0., 0.]), scale=np.array([1., 1., 1.]), mass=0.1)
+                  ori=np.array([0., 0., 0.]), scale=np.array([1., 1., 1.]),
+                  mass=obj_mass_kg)
+if args.object_mass is not None:
+    cprint(f"  ⚖️  object mass OVERRIDE: {obj_mass_kg} kg (default {grasp_physics.GRASP_OBJECT_MASS_KG})", "yellow")
 obj.rigid.set_world_pose(np.asarray(obj_place_pos, dtype=np.float64), obj_quat_G_wxyz)
 cprint(f"  obj placed at G-frame pose: pos={obj_place_pos.round(3)}  quat_G(wxyz)={obj_quat_G_wxyz.round(3)}", "cyan")
 
@@ -548,30 +561,46 @@ quat_err_init = np.rad2deg(2 * np.arccos(min(1.0, abs(np.dot(q_init, state0_quat
 cprint(f"   after re-spawn: ee={ee_init.round(3)} dist={dist_init*100:.2f}cm  quat_err={quat_err_init:.1f}°",
        "green" if (dist_init < 0.02 and quat_err_init < 5) else "yellow")
 
-# ── freeze object as a non-colliding visual reference ───────────────────────
-# Baseline1 Gate 3 only verifies the EE trajectory — it does NOT grasp. The object is a
-# pure visual/geometric reference placed at its exact G-frame pose. Make it kinematic
-# (frozen, gravity-immune) AND collision-off so the replay drives past without the open
-# gripper ramming it (a collision impulse blows up the Franka articulation → joint NaN).
-_rb = UsdPhysics.RigidBodyAPI.Get(stage, obj_prim.GetPath())
-if _rb:
-    _ke = _rb.GetKinematicEnabledAttr()
-    (_ke if _ke else _rb.CreateKinematicEnabledAttr()).Set(True)
-_n_col_off = 0
-for prim in Usd.PrimRange(obj_prim):
-    if prim.IsA(UsdGeom.Mesh):
-        _ca = UsdPhysics.CollisionAPI.Get(stage, prim.GetPath())
-        if _ca:
-            _ce = _ca.GetCollisionEnabledAttr()
-            (_ce if _ce else _ca.CreateCollisionEnabledAttr()).Set(False)
-            _n_col_off += 1
-# Re-assert the pose after freezing (kinematic flag can reset it to the prim default)
-obj.rigid.set_world_pose(np.asarray(obj_place_pos, dtype=np.float64), obj_quat_G_wxyz)
-for _ in range(SETTLE_AT_STATE0): world.step(render=True)            # let Franka PD lock; object stays put
-obj_pos_chk, obj_quat_chk = obj.get_obj_pos()
-qe = np.rad2deg(2 * np.arccos(min(1.0, abs(np.dot(obj_quat_chk, obj_quat_G_wxyz)))))
-cprint(f"   object frozen at G-frame pose: pos={obj_pos_chk.round(3)} (target {np.asarray(obj_place_pos).round(3)}) "
-       f"quat_err={qe:.1f}°  kinematic + collision-OFF on {_n_col_off} mesh(es)", "cyan")
+# ── object physics: frozen visual reference, or dynamic+collidable for a real grasp ──
+if args.grasp_collision and not args.dp3:
+    # Real grasp eval (--grasp-collision): object is a DYNAMIC rigid body; the collider
+    # + friction materials come from the shared sim/grasp_physics.py helper — identical
+    # physics to run_grasp_sim.py. It rests on the table under gravity.
+    _rb = UsdPhysics.RigidBodyAPI.Get(stage, obj_prim.GetPath())
+    if _rb:
+        _ke = _rb.GetKinematicEnabledAttr()
+        (_ke if _ke else _rb.CreateKinematicEnabledAttr()).Set(False)   # dynamic
+    _n_col = grasp_physics.setup_object_grasp_physics(
+        stage, obj.rigid_prim_path, log=lambda m: cprint(m, "green"))
+    grasp_physics.setup_finger_friction(stage, log=lambda m: cprint(m, "green"))
+    obj.rigid.set_world_pose(np.asarray(obj_place_pos, dtype=np.float64), obj_quat_G_wxyz)
+    for _ in range(SETTLE_AT_STATE0): world.step(render=True)        # object settles on the table
+    obj_pos_chk, obj_quat_chk = obj.get_obj_pos()
+    cprint(f"   object DYNAMIC + collision-ON ({_n_col} mesh collider(s)) — settled at "
+           f"pos={obj_pos_chk.round(3)} (placed {np.asarray(obj_place_pos).round(3)})", "cyan")
+else:
+    # Frozen non-colliding visual reference: kinematic (gravity-immune) + collision-off so
+    # the replay drives past without the open gripper ramming it (a collision impulse
+    # blows up the Franka articulation → joint NaN).
+    _rb = UsdPhysics.RigidBodyAPI.Get(stage, obj_prim.GetPath())
+    if _rb:
+        _ke = _rb.GetKinematicEnabledAttr()
+        (_ke if _ke else _rb.CreateKinematicEnabledAttr()).Set(True)
+    _n_col_off = 0
+    for prim in Usd.PrimRange(obj_prim):
+        if prim.IsA(UsdGeom.Mesh):
+            _ca = UsdPhysics.CollisionAPI.Get(stage, prim.GetPath())
+            if _ca:
+                _ce = _ca.GetCollisionEnabledAttr()
+                (_ce if _ce else _ca.CreateCollisionEnabledAttr()).Set(False)
+                _n_col_off += 1
+    # Re-assert the pose after freezing (kinematic flag can reset it to the prim default)
+    obj.rigid.set_world_pose(np.asarray(obj_place_pos, dtype=np.float64), obj_quat_G_wxyz)
+    for _ in range(SETTLE_AT_STATE0): world.step(render=True)        # let Franka PD lock; object stays put
+    obj_pos_chk, obj_quat_chk = obj.get_obj_pos()
+    qe = np.rad2deg(2 * np.arccos(min(1.0, abs(np.dot(obj_quat_chk, obj_quat_G_wxyz)))))
+    cprint(f"   object frozen at G-frame pose: pos={obj_pos_chk.round(3)} (target {np.asarray(obj_place_pos).round(3)}) "
+           f"quat_err={qe:.1f}°  kinematic + collision-OFF on {_n_col_off} mesh(es)", "cyan")
 
 # ── flip on video recording: from here the viewer sees Franka in state[0] pose ──
 if VIDEO_DIR:
@@ -760,10 +789,26 @@ for t in range(n_steps):
                f"track={track_err_mm:4.0f}mm", "cyan")
 
 
-# ── optional: close the gripper + lift the EE +15cm (visual grasp gesture) ───
-# Opt-in via --grasp-lift. Purely a visual close+lift after the replay finishes —
-# the object stays frozen (kinematic, collision-off), so nothing is actually picked
-# up; this is fine and intended. --grasp-lift off ⇒ replay behaves exactly as before.
+# ── replay-fidelity metrics — measured at the LAST trajectory frame, BEFORE the
+# grasp-lift gesture. Pre-lift is essential: the hardcoded +15cm lift would otherwise
+# inflate final_track_mm and false-fail Gate 3. "Did the replay reach the human grasp
+# pose" and "was the object lifted" are kept as SEPARATE metrics.
+ee_final_W, q_final = measure_ee_W()
+obj_final_W, _ = obj.get_obj_pos()
+final_target_W = actions[n_steps - 1, :3] + sim_origin_W       # last action = human grasp pose
+final_track_mm = float(np.linalg.norm(ee_final_W - final_target_W) * 1000.0)
+# Fingertip-center → object distance: "is the gripper beside the object?" (also pre-lift)
+lf_W, _ = ik._kinematics_solver.compute_forward_kinematics("panda_leftfingertip", franka.get_joint_positions()[:7])
+rf_W, _ = ik._kinematics_solver.compute_forward_kinematics("panda_rightfingertip", franka.get_joint_positions()[:7])
+fingertip_mid = (np.asarray(lf_W) + np.asarray(rf_W)) / 2
+ft_to_obj_cm = float(np.linalg.norm(fingertip_mid - obj_final_W) * 100.0)
+
+
+# ── optional: close the gripper + lift the EE +15cm (hard-coded grasp gesture) ───
+# Opt-in via --grasp-lift. With --grasp-collision the object is dynamic + collidable, so
+# a successful close+lift physically picks it up — object dz is the grasp signal,
+# reported SEPARATELY from the pre-lift replay-fidelity metrics above.
+obj_lift_dz = None
 if args.grasp_lift:
     cprint(f"\n🤏 grasp+lift — close gripper, raise EE +15cm over 12 steps", "green")
     franka.close_gripper()
@@ -784,24 +829,12 @@ if args.grasp_lift:
         else:
             drive_qpos(None, args.phys_per_action)               # IK miss → hold
     _lift_ee, _ = measure_ee_W()
-    cprint(f"   grasp+lift done — EE {_lift_pos0.round(3)} → {_lift_ee.round(3)}", "cyan")
+    _obj_post_lift, _ = obj.get_obj_pos()
+    obj_lift_dz = float(_obj_post_lift[2] - obj_final_W[2])       # vs object pose at replay end
+    cprint(f"   grasp+lift done — EE {_lift_pos0.round(3)} → {_lift_ee.round(3)}  "
+           f"object dz = {obj_lift_dz*100:+.1f}cm "
+           f"({'GRASPED + LIFTED' if obj_lift_dz > 0.03 else 'not lifted'})", "cyan")
 
-
-# ── result: did the EE faithfully reach the human grasp pose? ────────────────
-# Measured at the LAST trajectory frame. The trajectory (= DP3 training data) ends
-# here — it is the retargeted human approach truncated at grasp_onset. Whatever the
-# arm does during an idle post-replay settle (gravity sag etc.) is out of scope:
-# Baseline1 stops at "gripper beside the object"; close+lift is hardcoded later.
-ee_final_W, q_final = measure_ee_W()
-obj_final_W, _ = obj.get_obj_pos()
-# Final EE target = last action (= the human grasp pose, retargeted)
-final_target_W = actions[n_steps - 1, :3] + sim_origin_W
-final_track_mm = float(np.linalg.norm(ee_final_W - final_target_W) * 1000.0)
-# Fingertip-center → object distance: "is the gripper beside the object?"
-lf_W, _ = ik._kinematics_solver.compute_forward_kinematics("panda_leftfingertip", franka.get_joint_positions()[:7])
-rf_W, _ = ik._kinematics_solver.compute_forward_kinematics("panda_rightfingertip", franka.get_joint_positions()[:7])
-fingertip_mid = (np.asarray(lf_W) + np.asarray(rf_W)) / 2
-ft_to_obj_cm = float(np.linalg.norm(fingertip_mid - obj_final_W) * 100.0)
 for _ in range(30): world.step(render=True)   # brief idle hold for the video viewer — NOT measured
 
 cprint(f"\n{'=' * 60}", "yellow")
@@ -812,9 +845,12 @@ cprint(f"  Replay unreachable frames (skipped): {ik_fail_count}/{n_steps}", "yel
 if ee_track_errs_mm:
     cprint(f"  Replay EE tracking: avg {np.mean(ee_track_errs_mm):.0f}mm  "
            f"max {np.max(ee_track_errs_mm):.0f}mm  p50 {np.median(ee_track_errs_mm):.0f}mm", "cyan")
-cprint(f"  Final EE vs human grasp pose: track_err={final_track_mm:.0f}mm  ← the real fidelity metric", "cyan")
+cprint(f"  Final EE vs human grasp pose: track_err={final_track_mm:.0f}mm  (replay end, pre-lift)  ← fidelity metric", "cyan")
 cprint(f"  Final fingertip-center → object centroid: {ft_to_obj_cm:.1f}cm  (info only; large for tall "
        f"objects since the human grasps the body, not the centroid)", "cyan")
+if obj_lift_dz is not None:
+    cprint(f"  Grasp-lift: object dz = {obj_lift_dz*100:+.1f}cm  →  "
+           f"{'GRASPED + LIFTED' if obj_lift_dz > 0.03 else 'not lifted'}  (grasp success, separate from fidelity)", "cyan")
 
 # Baseline1 Gate 3 PASS = the sim Franka FAITHFULLY reproduces the retargeted human
 # trajectory. Three conditions:

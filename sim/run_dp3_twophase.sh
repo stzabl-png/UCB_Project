@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# run_dp3_twophase.sh — two-phase DP3 eval for 3 objects (sugar / banana / tomato).
+# run_dp3_twophase.sh — two-phase DP3 eval (currently sugar / tomato).
 #
 # Phase 1: run the DP3 policy CLOSED-LOOP just to COLLECT the trajectory it produces;
 #          gt_replay_ikpd_v2.py --dp3 writes /tmp/dp3_traj_ycb_dex_NN.hdf5 and exits.
@@ -23,8 +23,8 @@ mkdir -p "$VID_DIR" replay_video_check
 # objname  subject                  session          objid
 OBJECTS=(
   "sugar   20200709-subject-01      20200709_142517  ycb_dex_03"
-  "banana  20200709-subject-01      20200709_145401  ycb_dex_10"
   "tomato  20201015-subject-09      20201015_143403  ycb_dex_04"
+  # "banana 20200709-subject-01      20200709_145401  ycb_dex_10"   # re-enable later
 )
 
 for row in "${OBJECTS[@]}"; do
@@ -55,7 +55,7 @@ for row in "${OBJECTS[@]}"; do
   timeout 1500 "$PY" -u sim/gt_replay_ikpd_v2.py \
     --session "$SESS" --object "$OBJID" \
     --traj "/tmp/dp3_traj_${OBJID}.hdf5" \
-    --drive pd --grasp-lift --headless \
+    --drive pd --grasp-lift --grasp-collision --headless \
     --video "$VID_DIR" --video-every 2 \
     > "/tmp/dp3_tp_${OBJNAME}_p2.log" 2>&1
   P2_RC=$?

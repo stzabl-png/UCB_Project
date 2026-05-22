@@ -162,60 +162,12 @@ def setup_scene(obj_id, object_scale):
         scale=np.array([object_scale] * 3), mass=0.05,
     )
 
-    # 碰撞 + 摩擦力设置
-    from pxr import Usd, UsdGeom, UsdPhysics, PhysxSchema, Sdf, UsdShade
-    stage = world.stage
-
-    # 1. 创建高摩擦材料
-    material_path = "/World/PhysicsMaterials/BottleMaterial"
-    UsdShade.Material.Define(stage, material_path)
-    mat_prim = stage.GetPrimAtPath(material_path)
-    physics_mat = UsdPhysics.MaterialAPI.Apply(mat_prim)
-    physics_mat.CreateStaticFrictionAttr(1.0)    # 高静摩擦
-    physics_mat.CreateDynamicFrictionAttr(0.8)   # 高动摩擦
-    physics_mat.CreateRestitutionAttr(0.0)       # 不弹跳
-    cprint(f"   ✅ Physics material: friction=1.0/0.8", "green")
-
-    # 2. 物体碰撞 + 绑定摩擦材料
-    obj_prim = stage.GetPrimAtPath(obj.rigid_prim_path)
-    for prim in Usd.PrimRange(obj_prim):
-        if prim.IsA(UsdGeom.Mesh):
-            UsdPhysics.CollisionAPI.Apply(prim)
-            mesh_col = UsdPhysics.MeshCollisionAPI.Apply(prim)
-            mesh_col.GetApproximationAttr().Set("convexHull")
-            col_api = PhysxSchema.PhysxCollisionAPI.Apply(prim)
-            col_api.GetContactOffsetAttr().Set(0.02)
-            col_api.GetRestOffsetAttr().Set(0.001)
-            # 绑定摩擦材料
-            binding = UsdShade.MaterialBindingAPI.Apply(prim)
-            binding.Bind(
-                UsdShade.Material(mat_prim),
-                UsdShade.Tokens.weakerThanDescendants,
-                "physics"
-            )
-
-    # 3. 给夹爪指尖也加摩擦
-    finger_material_path = "/World/PhysicsMaterials/FingerMaterial"
-    UsdShade.Material.Define(stage, finger_material_path)
-    finger_mat_prim = stage.GetPrimAtPath(finger_material_path)
-    finger_physics_mat = UsdPhysics.MaterialAPI.Apply(finger_mat_prim)
-    finger_physics_mat.CreateStaticFrictionAttr(1.2)   # 更高摩擦 (橡胶指尖)
-    finger_physics_mat.CreateDynamicFrictionAttr(1.0)
-    finger_physics_mat.CreateRestitutionAttr(0.0)
-
-    for finger_name in ["panda_leftfinger", "panda_rightfinger"]:
-        finger_path = f"/World/Franka/{finger_name}"
-        finger_prim = stage.GetPrimAtPath(finger_path)
-        if finger_prim.IsValid():
-            for child in Usd.PrimRange(finger_prim):
-                if child.IsA(UsdGeom.Mesh) or child.IsA(UsdGeom.Gprim):
-                    binding = UsdShade.MaterialBindingAPI.Apply(child)
-                    binding.Bind(
-                        UsdShade.Material(finger_mat_prim),
-                        UsdShade.Tokens.weakerThanDescendants,
-                        "physics"
-                    )
-            cprint(f"   ✅ Finger friction on {finger_name}", "green")
+    # 碰撞 + 摩擦力设置 — 抽到共享 helper (sim/grasp_physics.py),与 gt_replay
+    # --grasp-collision 共用同一份物理设置,保证两个 eval 物理参数一致、不漂移。
+    import grasp_physics
+    grasp_physics.setup_object_grasp_physics(
+        world.stage, obj.rigid_prim_path, log=lambda m: cprint(m, "green"))
+    grasp_physics.setup_finger_friction(world.stage, log=lambda m: cprint(m, "green"))
 
     for _ in range(100):
         world.step(render=True)
