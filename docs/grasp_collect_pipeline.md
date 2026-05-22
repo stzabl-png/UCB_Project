@@ -151,7 +151,7 @@ $ISAAC_SIM_PATH/python.sh sim/run_grasp_sim.py \
 - **`grasp_point` / `rotation`**：Stage A **规划候选**（grasp 帧），不是 Sim 执行真值。
 - **`executed_panda_hand_at_close`**：闭合结束、**lift 前**，真实 **`panda_hand` 手腕** 在物体系下的位姿（`position`, `rotation`, `approach_dir`, `finger_dir`）。
 - **`executed_panda_hand_post_lift`**：提起稳定后、与 **Δz>3cm 成功判定** 同刻的 `panda_hand` 位姿。
-- **`contact_points_local`**（仅 successful）：左右 **finger 连杆原点**（指根侧），旧 spawn 平移近似坐标 → **deprecated，勿当接触点**。
+- **`gripper_tips_loc`** `(2,3)`：闭合后、lift 前（与 `executed_panda_hand_at_close` 同时刻）左右指尖在 **物体 mesh 局部系**；`finger_width_actual` 为两点距离。凡执行到 close 的候选都会写入 `candidate_results`（不限 success）。
 
 **录屏：** batch **不**录屏。调试时用 `sim/run_grasp_sim_rec.py`（每 try 一个 mp4，与 headless sim 结果可能不一致）。
 
@@ -425,6 +425,15 @@ python3 tools/merge_robot_gt.py --obj A01001 \
 ```
 
 默认 **保留全部** 成功条目（不去重），并拷贝每条成功的 **`executed_panda_hand_at_close` / `post_lift`**。需要 dedup 时加 `--deduplicate`（按候选 `grasp_point` 判近，不是 executed）。
+
+**指尖 / 接触点来源（merged schema v3，必读）：**
+
+| 字段 | 含义 | 训练可用？ |
+|------|------|------------|
+| `gripper_tips_loc` | 新 Sim：`at_close` 真指尖（物体系） | ✅ `gripper_tips_trusted=True` |
+| `contact_points_local` | 旧轮：lift 后伪接触点 | ❌ `contact_points_trusted=False` |
+
+每条 `successful_grasps/grasp_*` 有 **`gripper_tips_source`**：`at_close` / `legacy_post_lift` / `none`。**不会**再把旧 `contact_points_local` 改名成 `gripper_tips_loc`。训练读 merged 时请只看 `gripper_tips_trusted`（`build_dataset.py` 已按此过滤）。若 merged 里不要任何 legacy 指尖，merge 时加 **`--exclude-legacy-contact`**（只丢接触点，抓取 pose 仍保留）。
 
 整库重 merge 示例（bash）：
 

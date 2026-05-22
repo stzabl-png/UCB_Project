@@ -91,13 +91,24 @@ def _load_successful(path: str) -> list[dict]:
             if pr is not None:
                 row["mesh_prerotation"] = pr
             rows.append(row)
-            if "contact_points_local" in g:
+            if "gripper_tips_loc" in g:
+                rows[-1]["gripper_tips_loc"] = np.array(
+                    g["gripper_tips_loc"][:], dtype=np.float64
+                )
+                rows[-1]["finger_width_actual"] = float(
+                    g.attrs.get("finger_width_actual", 0.0)
+                )
+                rows[-1]["gripper_tips_source"] = str(
+                    g.attrs.get("gripper_tips_snapshot", "at_close")
+                )
+            elif "contact_points_local" in g:
                 rows[-1]["contact_points_local"] = np.array(
                     g["contact_points_local"][:], dtype=np.float64
                 )
                 rows[-1]["finger_width_actual"] = float(
                     g.attrs.get("finger_width_actual", 0.0)
                 )
+                rows[-1]["gripper_tips_source"] = "legacy_post_lift"
             for label in _EXECUTED_SNAPSHOTS:
                 sub = f"executed_panda_hand_{label}"
                 if sub in g:
@@ -122,8 +133,14 @@ def merge_grasps(
     deduplicate: bool = False,
     pos_tol: float = 0.005,
     rot_tol_deg: float = 12.0,
+    exclude_legacy_contact: bool = False,
 ) -> list[dict]:
     ordered = sorted(all_rows, key=lambda r: -r["score"])
+    if exclude_legacy_contact:
+        ordered = [
+            r for r in ordered
+            if r.get("gripper_tips_source") != "legacy_post_lift"
+        ]
     if not deduplicate:
         return ordered
     merged: list[dict] = []
@@ -176,6 +193,7 @@ def merge_robot_gt_files(
     deduplicate: bool = False,
     pos_tol: float = 0.005,
     rot_tol_deg: float = 12.0,
+    exclude_legacy_contact: bool = False,
     verbose: bool = True,
 ) -> str | None:
     """
@@ -200,6 +218,7 @@ def merge_robot_gt_files(
         deduplicate=deduplicate,
         pos_tol=pos_tol,
         rot_tol_deg=rot_tol_deg,
+        exclude_legacy_contact=exclude_legacy_contact,
     )
     if not merged:
         if os.path.isfile(output):
@@ -242,7 +261,11 @@ def write_merged(
         rf.attrs["n_before_merge"] = int(n_before)
         rf.attrs["n_source_files"] = len(source_files)
         rf.attrs["source_files"] = np.array(source_files, dtype=h5py.string_dtype())
-        rf.attrs["robot_gt_schema_version"] = 2
+        rf.attrs["robot_gt_schema_version"] = 3
+        rf.attrs["gripper_tips_provenance"] = (
+            "gripper_tips_loc=Sim@at_close; "
+            "contact_points_local=legacy post-lift (untrusted)"
+        )
         rf.attrs["executed_pose_frame"] = "object_mesh"
         rf.attrs["executed_ee_frame"] = "panda_hand"
         rf.attrs["includes_executed_pose"] = True
@@ -260,12 +283,26 @@ def write_merged(
             gi.create_dataset("rotation", data=cr["rotation"])
             gi.create_dataset("approach_dir", data=cr["rotation"][:, 2])
             gi.create_dataset("finger_dir", data=cr["rotation"][:, 0])
-            if "contact_points_local" in cr:
-                gi.create_dataset("contact_points_local", data=cr["contact_points_local"])
+            tips_src = cr.get("gripper_tips_source", "none")
+            gi.attrs["gripper_tips_source"] = tips_src
+            gi.attrs["gripper_tips_trusted"] = tips_src == "at_close"
+            if cr.get("gripper_tips_loc") is not None:
+                gi.create_dataset("gripper_tips_loc", data=cr["gripper_tips_loc"])
                 gi.attrs["finger_width_actual"] = cr.get("finger_width_actual", 0.0)
+                gi.attrs["has_gripper_tips"] = True
+                gi.attrs["gripper_tips_frame"] = "object_mesh"
+                gi.attrs["gripper_tips_snapshot"] = tips_src
+            else:
+                gi.attrs["has_gripper_tips"] = False
+            if cr.get("contact_points_local") is not None:
+                gi.create_dataset(
+                    "contact_points_local", data=cr["contact_points_local"]
+                )
                 gi.attrs["has_contact_points"] = True
+                gi.attrs["contact_points_trusted"] = False
             else:
                 gi.attrs["has_contact_points"] = False
+                gi.attrs["contact_points_trusted"] = False
             pr = cr.get("mesh_prerotation") or default_pr
             write_mesh_prerotation_hdf5(gi, pr)
             for label in _EXECUTED_SNAPSHOTS:
@@ -280,6 +317,10 @@ def main():
     parser.add_argument(
         "--deduplicate", action="store_true",
         help="去掉相近 pose（默认不去重，保留各轮全部成功）",
+    )
+    parser.add_argument(
+        "--exclude-legacy-contact", action="store_true",
+        help="不合并仅有 contact_points_local（旧 post-lift）的条目",
     )
     parser.add_argument("--pos-tol", type=float, default=0.005,
                         help="--deduplicate 时抓取点距离阈值 (m)")
@@ -307,6 +348,7 @@ def main():
         deduplicate=args.deduplicate,
         pos_tol=args.pos_tol,
         rot_tol_deg=args.rot_tol_deg,
+        exclude_legacy_contact=args.exclude_legacy_contact,
     )
 
 

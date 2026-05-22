@@ -12,6 +12,10 @@ Pipeline Stage B + per-try viewport 录屏 (run_grasp_sim 同款逻辑)
         --record-video output/grasp_sim_videos/smoke_ycb \\
         --max-candidates 5
 
+    # 跳过 15cm pre-grasp，只 direct + final approach:
+    $ISAAC_SIM_PATH/python.sh sim/run_grasp_sim_rec.py \\
+        --hdf5 ... --record-video ... --skip-pre-grasp
+
 Pipeline:
     HDF5 → 搭建场景 → 坐标变换 → cuRobo 规划 → Franka 执行抓取 → 每 try 一个 mp4
 """
@@ -46,8 +50,11 @@ parser.add_argument("--record-keep-frames", action="store_true",
                     help="保留 PNG 帧目录 (默认 encode 后删除)")
 parser.add_argument("--record-include-reset", action="store_true",
                     help="try 结束后把场景重置也录进同一段 (默认不含)")
-parser.add_argument("--no-wait-enter", action="store_true",
-                    help="headed 时不等待终端 Enter，直接开始抓取")
+parser.add_argument(
+    "--skip-pre-grasp",
+    action="store_true",
+    help="跳过 15cm pre-grasp，直接 cuRobo 规划到抓取点 (object mesh)，再 final approach",
+)
 args, _ = parser.parse_known_args()
 
 simulation_app = SimulationApp({"headless": args.headless})
@@ -498,6 +505,60 @@ def snapshot_panda_hand_object_mesh(franka, scene, object_scale):
     }
 
 
+def world_point_to_object_mesh(point_world, obj_pos_world, obj_quat_wxyz, object_scale):
+    """世界系点 → 物体 mesh 局部系 (与 grasp_point / executed_panda_hand 同一 scale 约定)."""
+    T_world_obj = make_transform(
+        np.asarray(obj_pos_world, dtype=np.float64).reshape(3),
+        np.asarray(obj_quat_wxyz, dtype=np.float64).reshape(4),
+    )
+    p_h = np.append(np.asarray(point_world, dtype=np.float64).reshape(3), 1.0)
+    p_obj = (np.linalg.inv(T_world_obj) @ p_h)[:3]
+    scale = float(object_scale) if object_scale else 1.0
+    return (p_obj / scale).astype(np.float32)
+
+
+def snapshot_gripper_tips_object_mesh(stage, scene, object_scale):
+    """
+    与 executed_panda_hand_at_close 同时刻：左右指尖在物体 mesh 局部系。
+    finger 连杆原点作为指尖代理 (panda_leftfinger / panda_rightfinger)。
+    """
+    from pxr import UsdGeom
+
+    left_path = "/World/Franka/panda_leftfinger"
+    right_path = "/World/Franka/panda_rightfinger"
+    left_prim = stage.GetPrimAtPath(left_path)
+    right_prim = stage.GetPrimAtPath(right_path)
+    if not left_prim.IsValid() or not right_prim.IsValid():
+        raise RuntimeError("finger prims not found")
+
+    left_world = np.array(
+        UsdGeom.Xformable(left_prim).ComputeLocalToWorldTransform(0).ExtractTranslation(),
+        dtype=np.float64,
+    )
+    right_world = np.array(
+        UsdGeom.Xformable(right_prim).ComputeLocalToWorldTransform(0).ExtractTranslation(),
+        dtype=np.float64,
+    )
+    obj_pos, obj_quat = scene["obj"].get_obj_pos()
+    left_o = world_point_to_object_mesh(left_world, obj_pos, obj_quat, object_scale)
+    right_o = world_point_to_object_mesh(right_world, obj_pos, obj_quat, object_scale)
+    tips = np.stack([left_o, right_o]).astype(np.float32)
+    width = float(np.linalg.norm(tips[0] - tips[1]))
+    return {'gripper_tips_loc': tips, 'finger_width_actual': width}
+
+
+def write_gripper_tips_loc_hdf5(parent, gripper_tips_loc, finger_width_actual):
+    """gripper_tips_loc: (2,3) 左/右指尖，物体 mesh 系，at_close 时刻。"""
+    if gripper_tips_loc is None:
+        parent.attrs['has_gripper_tips'] = False
+        return
+    parent.create_dataset('gripper_tips_loc', data=gripper_tips_loc)
+    parent.attrs['finger_width_actual'] = float(finger_width_actual)
+    parent.attrs['has_gripper_tips'] = True
+    parent.attrs['gripper_tips_frame'] = 'object_mesh'
+    parent.attrs['gripper_tips_snapshot'] = 'at_close'
+
+
 def write_executed_panda_hand_hdf5(parent, snapshot, label):
     """label: 'at_close' | 'post_lift'."""
     if snapshot is None:
@@ -515,7 +576,7 @@ def write_executed_panda_hand_hdf5(parent, snapshot, label):
 def _grasp_result_base(success=False):
     return {
         'success': success,
-        'contact_points_local': None,
+        'gripper_tips_loc': None,
         'finger_width_actual': None,
         'executed_at_close': None,
         'executed_post_lift': None,
@@ -695,7 +756,7 @@ def execute_trajectory(franka, world, traj):
 # Main Grasp Execution
 # ============================================================
 def execute_grasp(scene, grasp_pos_obj, grasp_rot_obj, gripper_width, object_scale,
-                  is_manual=False, mesh_prerotation_euler=None):
+                  is_manual=False, mesh_prerotation_euler=None, skip_pre_grasp=False):
     """完整抓取流程.
     is_manual: 手动标注时 position=指尖中心 → sim 里减 TCP偏移
                自动生成时 position=panda_hand 已含偏移 → 不再减 (防双重)
@@ -777,31 +838,39 @@ def execute_grasp(scene, grasp_pos_obj, grasp_rot_obj, gripper_width, object_sca
     for _ in range(30):
         world.step(render=RENDER_SIM)
 
-    # ---- Phase 1: 规划到预抓取点 (Pre-grasp) ----
-    # 预抓取点 = 抓取点沿接近方向后退 12cm, 避免轨迹穿过瓶子
-    approach_dir = rot_world[:, 2]  # z 轴 = 接近方向 (已做 R_adapt)
-    pre_grasp_offset = 0.15  # 15cm
-    pre_grasp_pos = pos_world - approach_dir * pre_grasp_offset
-
-    cprint(f"   → [1/5] Planning to pre-grasp point (with object mesh)...", "yellow")
-    cprint(f"      pre-grasp: [{pre_grasp_pos[0]:.4f}, {pre_grasp_pos[1]:.4f}, {pre_grasp_pos[2]:.4f}]", "magenta")
-    traj = plan_trajectory(_CUROBO_MG, franka, pre_grasp_pos, quat_wxyz,
-                           label="pre-grasp", scene=scene, use_object_mesh=True)
-
-    if traj is None:
-        # Fallback: 直接规划到抓取点
-        cprint(f"   → Pre-grasp 失败, 直接规划到抓取点...", "yellow")
+    if skip_pre_grasp:
+        cprint(f"   → [1/5] Direct approach (--skip-pre-grasp, with object mesh)...", "yellow")
         traj = plan_trajectory(_CUROBO_MG, franka, pos_world, quat_wxyz,
                                label="direct", scene=scene, use_object_mesh=True)
+        if traj is None:
+            cprint(f"   ❌ Direct approach 规划失败", "red")
+            return False
+        cprint(f"   ✅ Direct approach trajectory: {len(traj)} steps", "green")
+    else:
+        # ---- Phase 1: 规划到预抓取点 (Pre-grasp) ----
+        approach_dir = rot_world[:, 2]
+        pre_grasp_offset = 0.15  # 15cm
+        pre_grasp_pos = pos_world - approach_dir * pre_grasp_offset
 
-    if traj is None:
-        cprint(f"   ❌ cuRobo 规划全部失败", "red")
-        return False
+        cprint(f"   → [1/5] Planning to pre-grasp point (with object mesh)...", "yellow")
+        cprint(f"      pre-grasp: [{pre_grasp_pos[0]:.4f}, {pre_grasp_pos[1]:.4f}, {pre_grasp_pos[2]:.4f}]", "magenta")
+        traj = plan_trajectory(_CUROBO_MG, franka, pre_grasp_pos, quat_wxyz,
+                               label="pre-grasp", scene=scene, use_object_mesh=True)
 
-    cprint(f"   ✅ Pre-grasp trajectory: {len(traj)} steps", "green")
+        if traj is None:
+            cprint(f"   → Pre-grasp 失败, 直接规划到抓取点...", "yellow")
+            traj = plan_trajectory(_CUROBO_MG, franka, pos_world, quat_wxyz,
+                                   label="direct", scene=scene, use_object_mesh=True)
 
-    # ---- Phase 2: 执行到预抓取点 ----
-    cprint(f"   → [2/5] Moving to pre-grasp...", "yellow")
+        if traj is None:
+            cprint(f"   ❌ cuRobo 规划全部失败", "red")
+            return False
+
+        cprint(f"   ✅ Pre-grasp trajectory: {len(traj)} steps", "green")
+
+    # ---- Phase 2: 执行 approach 轨迹 (pre-grasp 或 direct) ----
+    move_label = "direct" if skip_pre_grasp else "pre-grasp"
+    cprint(f"   → [2/5] Moving to {move_label}...", "yellow")
     for joint_pos in traj:
         gripper = franka.get_joint_positions()[7:9]
         franka.set_joint_positions(np.concatenate([joint_pos, gripper]))
@@ -881,6 +950,8 @@ def execute_grasp(scene, grasp_pos_obj, grasp_rot_obj, gripper_width, object_sca
         else:
             cprint(f"      ✅ 夹爪稳定 (变化 {delta*100:.3f}cm)", "green")
 
+    gripper_tips_loc = None
+    finger_width_actual = None
     try:
         executed_at_close = snapshot_panda_hand_object_mesh(franka, scene, object_scale)
         p = executed_at_close['position']
@@ -891,6 +962,18 @@ def execute_grasp(scene, grasp_pos_obj, grasp_rot_obj, gripper_width, object_sca
     except Exception as e:
         executed_at_close = None
         cprint(f"   ⚠️ panda_hand@at_close 记录失败: {e}", "yellow")
+
+    try:
+        tips_snap = snapshot_gripper_tips_object_mesh(world.stage, scene, object_scale)
+        gripper_tips_loc = tips_snap['gripper_tips_loc']
+        finger_width_actual = tips_snap['finger_width_actual']
+        cprint(
+            f"   📐 gripper_tips@at_close (obj): L={gripper_tips_loc[0]}  "
+            f"R={gripper_tips_loc[1]}  width={finger_width_actual*100:.2f}cm",
+            "magenta",
+        )
+    except Exception as e:
+        cprint(f"   ⚠️ gripper_tips@at_close 记录失败: {e}", "yellow")
 
     # ---- Phase 5: 提起 (物体 mesh 仍清除 — 物体随夹爪一起移动) ----
     cprint(f"   → [5/5] Planning lift (no object mesh)...", "yellow")
@@ -926,6 +1009,8 @@ def execute_grasp(scene, grasp_pos_obj, grasp_rot_obj, gripper_width, object_sca
 
     result = _grasp_result_base(success=success)
     result['executed_at_close'] = executed_at_close
+    result['gripper_tips_loc'] = gripper_tips_loc
+    result['finger_width_actual'] = finger_width_actual
 
     try:
         executed_post_lift = snapshot_panda_hand_object_mesh(franka, scene, object_scale)
@@ -941,30 +1026,6 @@ def execute_grasp(scene, grasp_pos_obj, grasp_rot_obj, gripper_width, object_sca
 
     if success:
         cprint(f"   ✅ GRASP SUCCESS!", "green", "on_green")
-        # ★ 提取手指尖实际位置 (世界坐标)
-        try:
-            from pxr import UsdGeom
-            stage = world.stage
-            # 获取左右手指的世界位置
-            left_xform = UsdGeom.Xformable(stage.GetPrimAtPath("/World/Franka/panda_leftfinger"))
-            right_xform = UsdGeom.Xformable(stage.GetPrimAtPath("/World/Franka/panda_rightfinger"))
-            left_world = np.array(left_xform.ComputeLocalToWorldTransform(0).ExtractTranslation())
-            right_world = np.array(right_xform.ComputeLocalToWorldTransform(0).ExtractTranslation())
-
-            # 转换到物体初始局部坐标系
-            # 物体初始位置 = OBJECT_POSITION + z_offset
-            obj_init_pos = np.array(OBJECT_POSITION)
-            obj_init_pos[2] += 0.075 * object_scale  # z offset
-            left_local = left_world - obj_init_pos
-            right_local = right_world - obj_init_pos
-
-            finger_width = np.linalg.norm(left_world - right_world)
-            cprint(f"   📐 手指接触: L={left_local}, R={right_local}, width={finger_width*100:.2f}cm", "magenta")
-
-            result['contact_points_local'] = np.array([left_local, right_local], dtype=np.float32)
-            result['finger_width_actual'] = float(finger_width)
-        except Exception as e:
-            cprint(f"   ⚠️ 无法提取手指位置: {e}", "yellow")
     else:
         cprint(f"   ❌ GRASP FAILED", "red")
 
@@ -988,6 +1049,8 @@ def main():
     cprint("=" * 60, "cyan")
     cprint(f"  HDF5: {h5_path}", "cyan")
     cprint(f"  Record: {args.record_video}  every={args.record_every}  fps={args.record_fps}", "magenta")
+    if args.skip_pre_grasp:
+        cprint("  Approach: direct only (--skip-pre-grasp), then final (no object mesh)", "magenta")
 
     file_prerot = None
     _no_rotation = True
@@ -1120,20 +1183,7 @@ def main():
     )
     recorder.attach_world(scene["world"])
 
-    # ---- 等待用户调整视角 (Sim 保持交互) ----
-    if not args.headless and not args.no_wait_enter:
-        import select
-        cprint("=" * 50, "cyan")
-        cprint("🎥 Sim 窗口已就绪，物体已放置到桌面", "cyan")
-        cprint("   终端按 Enter 开始抓取...", "cyan")
-        cprint("=" * 50, "cyan")
-        while True:
-            scene["world"].step(render=True)   # render=True: 保持 viewport 实时更新
-            if select.select([sys.stdin], [], [], 0)[0]:
-                sys.stdin.readline()
-                break
-    elif not args.headless and args.no_wait_enter:
-        cprint("🎥 --no-wait-enter: 跳过 Enter，直接开始抓取+录屏", "cyan")
+    cprint("🎥 场景就绪，直接开始抓取+录屏", "cyan")
 
     # ---- 逐候选尝试抓取 ----
     success = False
@@ -1158,7 +1208,8 @@ def main():
                 cand["gripper_width"],
                 args.object_scale,
                 is_manual=is_manual,
-                mesh_prerotation_euler=cand.get("mesh_prerotation_euler", None)
+                mesh_prerotation_euler=cand.get("mesh_prerotation_euler", None),
+                skip_pre_grasp=args.skip_pre_grasp,
             )
             # ── fix: execute_grasp 在 cuRobo 初始化失败时可能返回 False ──
             if not isinstance(grasp_result, dict):
@@ -1183,7 +1234,7 @@ def main():
             'rotation': cand.get('rotation', np.eye(3)),
             'gripper_width': cand['gripper_width'],
             'approach_type': cand.get('approach_type', 'unknown'),
-            'contact_points_local': grasp_result.get('contact_points_local'),
+            'gripper_tips_loc': grasp_result.get('gripper_tips_loc'),
             'finger_width_actual': grasp_result.get('finger_width_actual'),
             'mesh_prerotation': cand.get('mesh_prerotation', file_prerot),
             'video_path': video_path,
@@ -1281,6 +1332,9 @@ def main():
                 if wc is not None:
                     write_executed_panda_hand_hdf5(wg, wc.get('executed_at_close'), 'at_close')
                     write_executed_panda_hand_hdf5(wg, wc.get('executed_post_lift'), 'post_lift')
+                    write_gripper_tips_loc_hdf5(
+                        wg, wc.get('gripper_tips_loc'), wc.get('finger_width_actual'),
+                    )
 
             # ★ 所有成功的抓取都保存为 GT
             sg = rf.create_group('successful_grasps')
@@ -1295,13 +1349,9 @@ def main():
                 gi.create_dataset('rotation', data=cr['rotation'])
                 gi.create_dataset('approach_dir', data=cr['rotation'][:, 2])
                 gi.create_dataset('finger_dir', data=cr['rotation'][:, 0])
-                # ★ 真实接触点 (物体局部坐标系)
-                if cr.get('contact_points_local') is not None:
-                    gi.create_dataset('contact_points_local', data=cr['contact_points_local'])
-                    gi.attrs['finger_width_actual'] = cr.get('finger_width_actual', 0.0)
-                    gi.attrs['has_contact_points'] = True
-                else:
-                    gi.attrs['has_contact_points'] = False
+                write_gripper_tips_loc_hdf5(
+                    gi, cr.get('gripper_tips_loc'), cr.get('finger_width_actual'),
+                )
                 write_mesh_prerotation_hdf5(
                     gi, cr.get('mesh_prerotation', file_prerot),
                 )
@@ -1326,6 +1376,9 @@ def main():
                 )
                 write_executed_panda_hand_hdf5(ci, cr.get('executed_at_close'), 'at_close')
                 write_executed_panda_hand_hdf5(ci, cr.get('executed_post_lift'), 'post_lift')
+                write_gripper_tips_loc_hdf5(
+                    ci, cr.get('gripper_tips_loc'), cr.get('finger_width_actual'),
+                )
 
         cprint(f"\n  📁 Saved: {result_path}  ({len(successful_grasps)} 个成功GT)", "green")
         cprint(f"  📹 Videos: {os.path.join(args.record_video, obj_id)}/", "magenta")
