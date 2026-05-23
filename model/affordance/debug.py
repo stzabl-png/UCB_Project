@@ -154,6 +154,20 @@ def select_debug_indices(ds: SoftAffordanceDataset, args: argparse.Namespace) ->
     return np.asarray(out, dtype=np.int64)
 
 
+def pick_random_vis_object_ids(
+    sample_obj_ids: list[str],
+    *,
+    max_objects: int = 10,
+    seed: int = 42,
+) -> list[str]:
+    """Random subset of object ids, fixed across epochs when seed is fixed."""
+    unique = sorted(set(sample_obj_ids))
+    if len(unique) <= max_objects:
+        return unique
+    rng = random.Random(int(seed))
+    return sorted(rng.sample(unique, max_objects))
+
+
 def select_debug_vis_object_ids(
     sample_obj_ids: list[str],
     per_object_metrics: dict | None,

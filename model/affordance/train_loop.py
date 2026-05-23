@@ -73,9 +73,13 @@ def _forward_losses(
     seg_pred, fc_pred = forward_seg_fc(model, xyz, features)
     prob = affordance_probability(seg_pred)
 
+    use_balanced_binary = (
+        balanced_binary
+        and getattr(criterion, "loss_mode", "full") != "simple"
+    )
     neg_ratio = float(getattr(criterion, "binary_neg_ratio", 1.0))
 
-    if balanced_binary:
+    if use_balanced_binary:
 
         def binary_fn(sp, lb):
             return _balanced_binary_loss(sp, lb, criterion, neg_ratio=neg_ratio)

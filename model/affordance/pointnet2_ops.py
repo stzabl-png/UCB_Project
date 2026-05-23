@@ -21,11 +21,17 @@ def forward_seg_fc(
     return out, torch.zeros(xyz.shape[0], 3, device=xyz.device, dtype=xyz.dtype)
 
 
-def affordance_probability(seg_logits: torch.Tensor) -> torch.Tensor:
-    """Per-point affordance score in [0, 1]. seg_logits: (B, N, 2)."""
-    if seg_logits.shape[-1] == 1:
-        return torch.sigmoid(seg_logits.squeeze(-1))
-    return F.softmax(seg_logits, dim=-1)[..., 1]
+def affordance_probability(seg_out: torch.Tensor) -> torch.Tensor:
+    """
+    Per-point affordance score in [0, 1].
+    - mlp_sigmoid head: (B, N) already sigmoid
+    - conv_logits head: (B, N, C) → softmax class-1 or sigmoid if C==1
+    """
+    if seg_out.dim() == 2:
+        return seg_out.clamp(0.0, 1.0)
+    if seg_out.shape[-1] == 1:
+        return torch.sigmoid(seg_out.squeeze(-1))
+    return F.softmax(seg_out, dim=-1)[..., 1]
 
 
 def center_from_affordance(

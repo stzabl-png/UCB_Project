@@ -17,7 +17,12 @@ import matplotlib.pyplot as plt
 
 from model.metrics import _gt_colors, _heat_colors, _pred_colors
 from model.affordance.logging_utils import training_log
-from model.affordance.pointnet2_ops import center_from_affordance, fc_valid_mask, forward_seg_fc
+from model.affordance.pointnet2_ops import (
+    affordance_probability,
+    center_from_affordance,
+    fc_valid_mask,
+    forward_seg_fc,
+)
 
 
 def _numpy_binary_ap(y_true: np.ndarray, y_score: np.ndarray) -> float:
@@ -117,11 +122,16 @@ def compute_seg_logit_stats(
     seg_logits: torch.Tensor,
     binary_labels: torch.Tensor,
 ) -> dict[str, float]:
-    """Per-point class-1 vs class-0 logits on GT contact / non-contact."""
-    logits = seg_logits.reshape(-1, 2)
+    """Per-point contact logit stats (2-class logits or mlp pre-sigmoid logit)."""
     y = binary_labels.reshape(-1) > 0
-    contact_logit = logits[:, 1]
-    noncontact_logit = logits[:, 0]
+    if seg_logits.dim() == 2 or seg_logits.shape[-1] == 1:
+        p = affordance_probability(seg_logits).reshape(-1).clamp(1e-4, 1.0 - 1e-4)
+        contact_logit = torch.log(p / (1.0 - p))
+        noncontact_logit = -contact_logit
+    else:
+        logits = seg_logits.reshape(-1, 2)
+        contact_logit = logits[:, 1]
+        noncontact_logit = logits[:, 0]
     gap = contact_logit - noncontact_logit
 
     def _stats(values: torch.Tensor, mask: torch.Tensor) -> tuple[float, float, float]:
@@ -180,13 +190,13 @@ def compute_debug_overfit_metrics(
 
 
 def seg_head_grad_norm(model: torch.nn.Module) -> float:
-    """L2 norm of gradients on segmentation head (conv2) parameters."""
+    """L2 norm of gradients on segmentation head (seg_fc* or conv2)."""
     total_sq = 0.0
     n = 0
     for name, param in model.named_parameters():
         if param.grad is None:
             continue
-        if "conv2" not in name:
+        if not any(k in name for k in ("seg_fc1", "seg_fc2", "conv2")):
             continue
         g = param.grad.detach()
         total_sq += float(g.pow(2).sum())
@@ -203,11 +213,12 @@ def checkpoint_score(metrics: dict, *, f1_weight: float = 0.5) -> float:
 
 def compute_metrics(pred, target, threshold=0.5):
     """Classification metrics + predict-all-positive collapse flags."""
-    prob = (
-        F.softmax(pred, dim=-1)[:, :, 1]
-        if pred.dim() == 3
-        else F.softmax(pred, dim=-1)[:, 1]
-    )
+    if pred.dim() == 2 or (pred.dim() == 3 and pred.shape[-1] == 1):
+        prob = affordance_probability(pred)
+    elif pred.dim() == 3:
+        prob = F.softmax(pred, dim=-1)[:, :, 1]
+    else:
+        prob = F.softmax(pred, dim=-1)[:, 1]
     pred_cls = (prob > threshold).long()
     target_flat = target.reshape(-1)
     pred_flat = pred_cls.reshape(-1)
@@ -348,6 +359,7 @@ def save_val_objects_grid(
     prob_threshold: float = 0.5,
     point_size: float = 2.0,
     vis_object_ids: list[str] | None = None,
+    title_prefix: str = "Val",
 ):
     """
     验证集每个物体一列：Human prior / GT / Pred（全物体一张图）。
@@ -393,7 +405,7 @@ def save_val_objects_grid(
             pts_t.unsqueeze(0).to(device),
             feat_t.unsqueeze(0).to(device),
         )
-        prob = F.softmax(seg_pred, dim=-1)[0, :, 1].cpu().numpy()
+        prob = affordance_probability(seg_pred)[0].cpu().numpy()
         pred_mask = prob > prob_threshold
         gt_pos = int(lbl.sum())
         n_pos = int(pred_mask.sum())
@@ -461,7 +473,7 @@ def save_val_objects_grid(
             f"(only gray/green/orange, no purple FN)"
         )
     fig.suptitle(
-        f"Val — epoch {epoch}{collapse_note}",
+        f"{title_prefix} — epoch {epoch}{collapse_note}",
         color="#f88" if n_collapsed == ncol else "#ddd",
         fontsize=10,
         y=0.99,
@@ -483,4 +495,6 @@ def save_val_objects_grid(
     os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
     plt.savefig(save_path, dpi=110, bbox_inches="tight", facecolor="#1a1a2e")
     plt.close(fig)
-    training_log(f"        📊 Val grid vis: {os.path.basename(save_path)} ({ncol} objects)")
+    training_log(
+        f"        📊 {title_prefix} grid vis: {os.path.basename(save_path)} ({ncol} objects)",
+    )

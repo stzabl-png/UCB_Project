@@ -13,7 +13,25 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from model.affordance.pointnet2_ops import center_from_affordance, contact_valid_mask, fc_valid_mask
+from model.affordance.pointnet2_ops import (
+    affordance_probability,
+    center_from_affordance,
+    contact_valid_mask,
+    fc_valid_mask,
+)
+
+
+def _seg_logits_for_binary_loss(
+    seg_logits: torch.Tensor,
+    prob: torch.Tensor,
+) -> torch.Tensor:
+    """Build (B, N, 2) logits for legacy binary loss when head outputs (B, N) scores."""
+    if seg_logits.dim() == 3 and seg_logits.shape[-1] >= 2:
+        return seg_logits
+    p = prob.detach().clamp(1e-4, 1.0 - 1e-4)
+    logit = torch.log(p / (1.0 - p))
+    zeros = torch.zeros_like(logit)
+    return torch.stack([zeros, logit], dim=-1)
 
 
 def object_scale_batch(xyz: torch.Tensor) -> torch.Tensor:
@@ -222,10 +240,11 @@ class AffordanceTrainingLoss(nn.Module):
             background_weight=self.loss_hyper.soft_background_weight,
         )
 
-        logits_flat = seg_logits.reshape(-1, 2)
+        seg_for_bin = _seg_logits_for_binary_loss(seg_logits, prob)
+        logits_flat = seg_for_bin.reshape(-1, 2)
         labels_flat = binary_labels.reshape(-1)
         if binary_loss_fn is not None:
-            l_binary = binary_loss_fn(seg_logits, binary_labels)
+            l_binary = binary_loss_fn(seg_for_bin, binary_labels)
         else:
             l_binary = self.binary_loss(logits_flat, labels_flat)
 
@@ -298,12 +317,59 @@ def loss_weights_from_args(args) -> AffordanceLossWeights:
     )
 
 
-def build_affordance_criterion(args) -> AffordanceTrainingLoss:
+class SimpleSoftScoreLoss(nn.Module):
+    """
+    Minimal loss: L1 between per-point score map and soft GT.
+
+    score map: (B, N) in [0, 1] from mlp_sigmoid head or softmax(contact logit).
+    """
+
+    loss_mode = "simple"
+
+    def __init__(self, **_kwargs):
+        super().__init__()
+        self.binary_neg_ratio = 1.0  # unused; kept for train_loop compatibility
+
+    def forward(
+        self,
+        prob: torch.Tensor,
+        seg_logits: torch.Tensor,
+        binary_labels: torch.Tensor,
+        soft_gt: torch.Tensor,
+        xyz: torch.Tensor,
+        fc_head: torch.Tensor,
+        fc_gt: torch.Tensor,
+        *,
+        binary_loss_fn=None,
+    ) -> dict[str, torch.Tensor]:
+        del seg_logits, binary_labels, xyz, fc_head, fc_gt, binary_loss_fn
+        pred = prob.reshape(-1)
+        target = soft_gt.reshape(-1).float()
+        l_l1 = F.l1_loss(pred, target)
+        zero = prob.sum() * 0.0
+        return {
+            "total": l_l1,
+            "aff": l_l1,
+            "l1": l_l1,
+            "binary": zero,
+            "peak": zero,
+            "center_heatmap": zero,
+            "center_head": zero,
+            "consistency": zero,
+            "smooth": zero,
+        }
+
+
+def build_affordance_criterion(args) -> nn.Module:
+    mode = str(getattr(args, "loss_mode", "simple")).lower()
+    if mode == "simple":
+        return SimpleSoftScoreLoss()
     criterion = AffordanceTrainingLoss(
         loss_weights_from_args(args),
         loss_hyper=loss_hyperparams_from_args(args),
     )
     criterion.binary_neg_ratio = float(args.binary_neg_ratio)
+    criterion.loss_mode = "full"
     return criterion
 
 

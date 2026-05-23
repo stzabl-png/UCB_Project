@@ -45,6 +45,7 @@ from model.affordance.augment import AugmentConfig, augment_config_from_args
 from model.affordance.debug import (
     apply_debug_config,
     build_debug_datasets,
+    pick_random_vis_object_ids,
     select_debug_vis_object_ids,
     write_debug_manifest,
 )
@@ -146,7 +147,7 @@ def write_run_manifest(run_dir: str, args: argparse.Namespace) -> None:
         "predict_force_center": bool(getattr(args, "predict_force_center", False)),
         "in_channel": AFFORDANCE_IN_CHANNELS,
         "early_stop_metric": "val_score_0.5_f1_0.5_ap",
-        "loss": "soft_heatmap_v1",
+        "loss": getattr(args, "loss_mode", "simple"),
         "args": vars(args),
     }
     path = os.path.join(run_dir, "run_manifest.json")
@@ -166,13 +167,16 @@ def unwrap_model(model: torch.nn.Module) -> torch.nn.Module:
 
 
 def init_seg_head_bias(model: torch.nn.Module, pos_fraction: float) -> None:
-    """Initialize class-1 logit bias from contact prior (avoids constant ~0.5 prob)."""
+    """Initialize final seg bias from contact prior (avoids constant ~0.5 prob)."""
     raw = unwrap_model(model)
-    if getattr(raw, "conv2", None) is None or raw.conv2.bias is None:
-        return
     p = float(np.clip(pos_fraction, 1e-4, 1.0 - 1e-4))
     logit = float(np.log(p / (1.0 - p)))
     with torch.no_grad():
+        if getattr(raw, "seg_fc2", None) is not None and raw.seg_fc2.bias is not None:
+            raw.seg_fc2.bias.fill_(logit)
+            return
+        if getattr(raw, "conv2", None) is None or raw.conv2.bias is None:
+            return
         raw.conv2.bias.zero_()
         raw.conv2.bias[1] = logit
 
@@ -366,8 +370,21 @@ def parse_args():
     parser.add_argument("--warmup-start-factor", type=float, default=0.1)
     parser.add_argument("--heatmap-sigma-ratio", type=float, default=0.05,
                         help="σ = ratio × object bbox diagonal for Gaussian heatmap")
+    parser.add_argument(
+        "--loss-mode",
+        type=str,
+        default="simple",
+        choices=("simple", "full"),
+        help="simple: MSE(soft_gt, score)+L1(score); full: legacy multi-term loss",
+    )
+    parser.add_argument(
+        "--lambda-l1-reg",
+        type=float,
+        default=1e-4,
+        help="(unused) kept for CLI compatibility; simple mode uses L1(soft_gt, score) only",
+    )
     parser.add_argument("--lambda-aff", type=float, default=0.3,
-                        help="Weight on soft affordance heatmap loss L_aff")
+                        help="[full mode] Weight on soft affordance heatmap loss L_aff")
     parser.add_argument("--lambda-binary", type=float, default=1.0,
                         help="Weight on binary segmentation loss L_binary")
     parser.add_argument("--lambda-peak", type=float, default=0.0,
@@ -413,6 +430,18 @@ def parse_args():
         type=int,
         default=10,
         help="Max object columns in val_epoch_*.png (0 = all val objects)",
+    )
+    parser.add_argument(
+        "--train-vis-max-objects",
+        type=int,
+        default=10,
+        help="Random train objects for train_epoch_*.png (0 = disable)",
+    )
+    parser.add_argument(
+        "--train-vis-seed",
+        type=int,
+        default=None,
+        help="RNG seed for train vis object pick (default: split_seed + 7919)",
     )
     parser.add_argument(
         "--resume",
@@ -506,6 +535,14 @@ def _apply_disable_center_loss(args) -> None:
 
 
 def log_loss_weights(rank: int, args) -> None:
+    log_main(rank, f"  Loss mode:     {args.loss_mode}")
+    if args.loss_mode == "simple":
+        log_main(rank, "  Simple loss:   L1(soft_gt, score)")
+        log_main(
+            rank,
+            "  Score map:     1 dim/point — MLP head sigmoid output (B,N)",
+        )
+        return
     log_main(rank, "  Loss weights:")
     log_main(rank, f"    lambda_aff              {args.lambda_aff}")
     log_main(rank, f"    lambda_binary           {args.lambda_binary}")
@@ -567,13 +604,17 @@ def _train_debug_overfit(
 
     # fc_head BatchNorm needs batch>1; default --predict-force-center is off for debug.
     model = PointNet2Seg(
-        num_classes=2,
         in_channel=AFFORDANCE_IN_CHANNELS,
         predict_force_center=args.predict_force_center,
         head_norm=args.head_norm,
+        seg_head="mlp_sigmoid",
     ).to(device)
     init_seg_head_bias(model, (train_dataset.labels > 0.5).mean())
     log_main(rank, f"  Input:        xyz ({AFFORDANCE_IN_CHANNELS}ch, no normals)")
+    log_main(
+        rank,
+        "  Seg head:     LayerNorm(128) → Linear(128→128) → ReLU → Linear(128→1) → sigmoid",
+    )
     log_main(rank, f"  FC head:      {args.predict_force_center}")
     log_main(rank, f"  Head norm:     {args.head_norm}")
 
@@ -688,6 +729,7 @@ def train_worker(rank: int, world_size: int, args) -> None:
     assert not (train_obj_ids & val_obj_ids)
 
     train_aug = augment_config_from_args(args)
+    no_aug = AugmentConfig(False, False, False, False, False)
     train_dataset, val_dataset = build_train_val_datasets(
         args.dataset_dir,
         train_obj_ids,
@@ -695,6 +737,34 @@ def train_worker(rank: int, world_size: int, args) -> None:
         heatmap_sigma_ratio=args.heatmap_sigma_ratio,
         train_augment_config=train_aug,
     )
+    train_vis_dataset, _ = build_train_val_datasets(
+        args.dataset_dir,
+        train_obj_ids,
+        val_obj_ids,
+        heatmap_sigma_ratio=args.heatmap_sigma_ratio,
+        train_augment_config=no_aug,
+    )
+    train_vis_seed = int(
+        args.train_vis_seed if args.train_vis_seed is not None else args.split_seed + 7919,
+    )
+    train_vis_max = int(args.train_vis_max_objects)
+    if train_vis_max > 0:
+        train_vis_obj_ids = pick_random_vis_object_ids(
+            train_vis_dataset.sample_obj_ids,
+            max_objects=train_vis_max,
+            seed=train_vis_seed,
+        )
+    else:
+        train_vis_obj_ids = None
+    if train_vis_obj_ids:
+        log_main(
+            rank,
+            f"  Train vis:    {len(train_vis_obj_ids)} objects, seed={train_vis_seed} "
+            f"→ train_epoch_*.png",
+        )
+        log_main(rank, f"                 ids={train_vis_obj_ids}")
+    else:
+        log_main(rank, "  Train vis:    (disabled)")
     log_main(
         rank,
         f"  Train samples: {len(train_dataset)}  Val samples: {len(val_dataset)}",
@@ -743,13 +813,21 @@ def train_worker(rank: int, world_size: int, args) -> None:
     )
 
     model = PointNet2Seg(
-        num_classes=2,
         in_channel=AFFORDANCE_IN_CHANNELS,
         predict_force_center=args.predict_force_center,
         head_norm=args.head_norm,
+        seg_head="mlp_sigmoid",
     ).to(device)
     if not args.resume:
         init_seg_head_bias(model, (train_dataset.labels > 0.5).mean())
+    if is_main_process(rank) and train_vis_obj_ids:
+        os.makedirs(vis_dir, exist_ok=True)
+        with open(os.path.join(vis_dir, "train_vis_objects.json"), "w") as f:
+            json.dump(
+                {"seed": train_vis_seed, "object_ids": train_vis_obj_ids},
+                f,
+                indent=2,
+            )
     if distributed:
         model = DDP(model, device_ids=[rank], output_device=rank)
 
@@ -904,7 +982,21 @@ def train_worker(rank: int, world_size: int, args) -> None:
                     vis_path,
                     epoch,
                     vis_object_ids=vis_obj_ids,
+                    title_prefix="Val",
                 )
+
+                if train_vis_obj_ids:
+                    train_vis_path = os.path.join(vis_dir, f"train_epoch_{epoch:04d}.png")
+                    save_val_objects_grid(
+                        model,
+                        train_vis_dataset,
+                        train_vis_dataset.sample_obj_ids,
+                        device,
+                        train_vis_path,
+                        epoch,
+                        vis_object_ids=train_vis_obj_ids,
+                        title_prefix="Train",
+                    )
 
                 raw = unwrap_model(model)
                 ckpt_common = {
