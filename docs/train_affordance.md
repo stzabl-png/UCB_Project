@@ -1,13 +1,15 @@
 # Affordance 模型训练指南
 
-PointNet++ affordance 训练流水线，基于 **no_rot executed** 数据集：从 Isaac Sim 验证过的 executed grasp 生成 per-point 接触标签，用 Gaussian soft heatmap 作为主监督。
+PointNet++ affordance 训练，数据来自 **no_rot executed**（[`UCBProject/train_affordance`](https://huggingface.co/datasets/UCBProject/train_affordance/tree/main)）。
 
-**入口脚本：**
+**两条训练流水线：**
 
-- `python -m model.affordance.train`（推荐）
-- `python model/train_affordance.py`（薄封装，等价）
+| 流水线 | 入口 | 监督 GT | 模型 |
+|--------|------|---------|------|
+| **Robot 接触 / soft map**（主） | `python -m model.affordance.train` | `labels` → 在线 Gaussian **soft**；指标可用 binary | `PointNet2Seg`，`seg_head=mlp_sigmoid` → 每点标量 score |
+| **Human prior**（对照） | `python model/train_affordance_hp.py` | HDF5 `human_priors`（**L1**） | `PointNet2SegOnly`（无 FC 头） |
 
-**代码目录：** `model/affordance/`（`train.py`、`dataset.py`、`losses.py`、`debug.py` 等）
+**代码目录：** `model/affordance/`（`train.py`、`train_hp.py`、`dataset.py`、`dataset_hp.py` 等）
 
 ---
 
@@ -23,9 +25,10 @@ PointNet++ affordance 训练流水线，基于 **no_rot executed** 数据集：�
 8. [续训 `--resume`](#续训-resume)
 9. [Debug 过拟合模式](#debug-过拟合模式)
 10. [超参 Sweep](#超参-sweep)
-11. [命令行参数速查](#命令行参数速查)
-12. [常见问题](#常见问题)
-13. [相关文档](#相关文档)
+11. [Human prior 监督训练](#human-prior-监督训练)
+12. [命令行参数速查](#命令行参数速查)
+13. [常见问题](#常见问题)
+14. [相关文档](#相关文档)
 
 ---
 
@@ -83,7 +86,7 @@ output/affordance_no_rot_executed/
 
 | 来源 | 何时用 | σ 由谁定 |
 |------|--------|----------|
-| **在线**（`SoftAffordanceDataset.__getitem__`） | `L_aff` 监督、debug/val 图里的「GT soft」 | `--heatmap-sigma-ratio`（训练默认 **0.05**） |
+| **在线**（`SoftAffordanceDataset.__getitem__`） | **simple** 的 `L1(score, soft_gt)`、**full** 的 `L_aff`、vis 里的「GT soft」 | `--heatmap-sigma-ratio`（训练默认 **0.05**） |
 | **磁盘**（`*_soft.h5`） | HF 分发、QC、与 prepare 点云对齐的参考图 | 导出时 `--heatmap-sigma-ratio`（脚本默认 **0.03**，见 `soft_gt_export_meta.json`） |
 
 公式（`model/affordance/heatmap.py`）：对二值接触点做 Gaussian，`σ = ratio × 物体 bbox 对角线`，接触点处为 1.0。
@@ -190,17 +193,23 @@ python3 -c "import h5py; f=h5py.File('output/affordance_no_rot_executed/affordan
 conda activate bundlesdf
 cd ~/Project/Affordance2Grasp
 
-# 单卡正式训练（默认损失权重见下文）
+# 单卡：默认 simple = L1(score, soft_gt)，robot executed 接触
 python -m model.affordance.train --gpus 0
 
-# 显式指定数据目录与损失权重
-python -m model.affordance.train \
-  --dataset_dir output/affordance_no_rot_executed \
-  --gpus 0 \
-  --batch_size 64 \
-  --lambda-aff 0.3 \
-  --lambda-binary 1.0 \
-  --lambda-peak 0
+# 命名 run（示例：full_train/robot_gt_l1_full）
+python -m model.affordance.train --gpus 0 \
+  --run-group full_train \
+  --run-name robot_gt_l1_full \
+  --loss-mode simple
+
+# legacy 多 term loss（focal/Tversky/λ；mlp_sigmoid 下 binary 用伪 logits）
+python -m model.affordance.train --gpus 0 --loss-mode full \
+  --lambda-aff 0.3 --lambda-binary 1.0
+
+# Human prior 监督（L1 on human_priors）
+python model/train_affordance_hp.py --gpus 0
+# 或: bash model/affordance/run_train_hp.sh
+# （脚本默认 --run-name hp_mse_full 为历史命名；loss 已是 L1）
 ```
 
 需要 **CUDA**；debug 模式仅支持单卡。
@@ -209,13 +218,14 @@ python -m model.affordance.train \
 
 ## 正式训练
 
-### 网络与输入
+### 网络与输入（`train.py` / robot GT）
 
-- 模型：`PointNet2Seg`，`in_channel=3`（**仅 xyz**；`AFFORDANCE_IN_CHANNELS`）
-- 输出：per-point 接触 logits → softmax 概率
-- FC 分支：默认 **关闭**；加 `--predict-force-center` 才构建 FC 头（监督仍由 `--lambda-center-head` 控制）
-- GT binary：HDF5 `labels`
-- GT soft（`L_aff`）：**每个 batch 在线**由增广后 xyz + binary 接触点生成 Gaussian heatmap（`σ = --heatmap-sigma-ratio × bbox 对角线`，默认 ratio=**0.05**）；与 HF 上 `*_soft.h5` 的 `soft_labels`（canonical、无增广，常按 σ=0.03 导出）用途不同
+- 模型：`PointNet2Seg`，`in_channel=3`（**仅 xyz**）
+- 分割头：`seg_head=mlp_sigmoid` → 输出 **`(B, N)` score ∈ [0,1]**（非 2-class softmax logits）
+- FC 分支：默认 **关闭**；`--predict-force-center` 构建 FC 头（仅 `--loss-mode full` 时常用）
+- GT binary：HDF5 `labels`（robot executed 接触）
+- GT soft：**在线** Gaussian（`σ = --heatmap-sigma-ratio × bbox 对角线`，默认 **0.05**）；与 HF `*_soft.h5` 的 canonical `soft_labels`（常 σ=0.03）对照用
+- 可视化：`human_priors` 显示在 val/train 图第一行（不进 loss）
 
 ### 学习率与早停
 
@@ -237,10 +247,15 @@ python -m model.affordance.train \
 
 `--no-augment` 等价于关闭全部增广。
 
-### 验证可视化
+### 验证 / 训练可视化
 
-每个 epoch 在 `vis/val_epoch_XXXX.png` 保存验证物体网格（GT / pred / heatmap 等）。  
-列数由 `--val-vis-max-objects` 限制（默认 10；`0` = 全部 val 物体）。
+| 文件 | 说明 |
+|------|------|
+| `vis/val_epoch_XXXX.png` | 验证集物体（`--val-vis-max-objects`，默认 10） |
+| `vis/train_epoch_XXXX.png` | 随机抽训练物体（`--train-vis-max-objects`，默认 10；`0` 关闭） |
+| `vis/train_vis_objects.json` | 记录 train vis 抽到的 object id 与 seed |
+
+面板行（robot 流水线）：Human prior → GT bin → GT soft → Pred bin → Pred score。
 
 ---
 
@@ -260,7 +275,8 @@ training_runs/20260523_120000/
 # 命名实验
 training_runs/my_exp_A01/
 
-# Sweep 分组（见 run_affordance_sweep.sh）
+# 分组实验
+training_runs/full_train/robot_gt_l1_full/
 training_runs/overnight_affordance_sweep_20260523/A01_noFC_normNone_base/
 ├── ckpt/   best_ckpt.pth, last_ckpt.pth, training_history.json, split_info.json
 ├── vis/    val_epoch_*.png
@@ -281,69 +297,58 @@ python -m model.affordance.train --gpus 0 \
 
 ---
 
-## 损失函数与模型
+## 损失函数与模型（robot GT 流水线）
 
-总损失由 **各项 λ 权重直接组合**（无 preset `--loss-mode`）：
+由 **`--loss-mode`** 选择（`build_affordance_criterion`）：
+
+### `simple`（默认，推荐）
 
 ```text
-L_total = λ_aff·L_aff + λ_bin·L_binary + λ_peak·L_peak
-        + λ_ch·L_center_hm + λ_fc·L_center_head
-        + λ_cons·L_consistency + λ_smooth·L_smooth
+L = mean( |score − soft_gt| )     # PyTorch L1Loss，即 MAE on soft map
+```
+
+| 项 | 说明 |
+|----|------|
+| `score` | `(B, N)`，`mlp_sigmoid` 头 sigmoid 输出 ∈ [0,1] |
+| `soft_gt` | 增广后 xyz 上由 `labels` 在线生成的 Gaussian heatmap |
+| `--lambda-l1-reg` | **已废弃**（CLI 保留兼容，simple 模式不读） |
+| 验证指标 | 仍用 `labels` 二值算 F1/AP（与 loss 无关） |
+
+```bash
+python -m model.affordance.train --gpus 0
+
+python -m model.affordance.train --gpus 0 \
+  --run-group full_train \
+  --run-name robot_gt_l1_full
+```
+
+`simple` 模式下 **不**使用 balanced binary 采样（`train_loop` 会跳过）。
+
+### `full`（legacy 多 term）
+
+```text
+L_total = λ_aff·L_aff + λ_bin·L_binary + λ_peak·L_peak + …
 ```
 
 | 项 | 定义 |
 |----|------|
-| **L_aff** | `0.7·balanced_soft_focal + 0.3·soft_Dice`（对 Gaussian soft heatmap） |
-| **L_binary** | `0.6·Focal + 0.4·Tversky`（硬二值 `labels`） |
-| **L_peak** | 仅在 GT 接触点上做 BCE（target=1），强调峰值 |
-| **L_center_hm** | 预测概率 heatmap 质心 vs `force_centers` 的 L1（按 bbox 对角线归一化） |
-| **L_center_head** | FC 回归头 vs `force_centers`（需 `predict_force_center=True`） |
-| **L_consistency** | FC 头 vs heatmap 质心（detach） |
+| **L_aff** | `0.7·balanced_soft_focal + 0.3·soft_Dice` |
+| **L_binary** | `0.6·Focal + 0.4·Tversky`（`mlp_sigmoid` 时由 score 构造 2-class 伪 logits） |
+| **L_peak** | 接触点 BCE |
+| **L_center_*** | FC / heatmap 质心（需 `--predict-force-center` 与对应 λ） |
 
-### 默认 λ（CLI）
-
-| 参数 | 默认 | 含义 |
-|------|------|------|
-| `--lambda-aff` | `0.3` | soft heatmap |
-| `--lambda-binary` | `1.0` | 二值分割 |
-| `--lambda-peak` | `0.0` | 接触峰 BCE |
-| `--lambda-center-heatmap` | `0.0` | heatmap 质心 |
-| `--lambda-center-head` | `0.0` | FC 头 |
-| `--lambda-consistency` | `0.0` | 一致性 |
-| `--lambda-smooth` | `0.0` | （保留，当前为 0） |
-
-即默认 **`0.3·L_aff + 1.0·L_binary`**，center / peak 默认关闭。
-
-`--disable-center-loss` 会将 `lambda_center_heatmap`、`lambda_center_head`、`lambda_consistency` 置 0。
-
-### 常用配方示例
+默认 λ：`λ_aff=0.3`，`λ_binary=1.0`，其余多为 0。
 
 ```bash
-# 默认：binary + soft heatmap
-python -m model.affordance.train --gpus 0
-
-# 仅二值（debug 或 ablation）
-python -m model.affordance.train --gpus 0 \
-  --lambda-aff 0 --lambda-binary 1 --lambda-peak 0
-
-# 加强 soft + peak
-python -m model.affordance.train --gpus 0 \
-  --lambda-aff 0.5 --lambda-binary 1.0 --lambda-peak 0.3
-
-# FC 头 + 小权重监督（需同时打开结构与 loss）
-python -m model.affordance.train --gpus 0 \
-  --predict-force-center \
-  --lambda-center-head 0.01
-
-# heatmap 质心 vs force_center（可不建 FC 头）
-python -m model.affordance.train --gpus 0 \
-  --lambda-center-heatmap 0.05
-
-# 可选：5 epoch linear warmup 再 cosine
-python -m model.affordance.train --gpus 0 --warmup-epochs 5
+python -m model.affordance.train --gpus 0 --loss-mode full \
+  --lambda-aff 0.3 --lambda-binary 1.0
 ```
 
-正式训练与 **debug 使用同一套** `AffordanceTrainingLoss` 与相同 `--lambda-*` 参数。
+Sweep 脚本 [`run_affordance_sweep.sh`](../model/affordance/run_affordance_sweep.sh) 面向 **full**；若未传 `--loss-mode`，当前默认会变成 **simple**，请在 `COMMON_ARGS` 中加 `--loss-mode full`。
+
+`--disable-center-loss` 在 full 模式下将 center 相关 λ 置 0。
+
+Debug 与正式训练共用 `build_affordance_criterion`（建议 debug 用 `--loss-mode simple`）。
 
 ### Tversky / 采样（正式与 debug 共用）
 
@@ -551,7 +556,7 @@ training_runs/<timestamp>/
 
 ### Debug 通过标准（经验）
 
-在 **单物体、`λ_aff=0, λ_bin=1`、无增广** 下，通常期望数百步内：
+在 **单物体、`--loss-mode simple` 或 full 下 `λ_bin=1`、无增广** 下，通常期望数百步内：
 
 - `μ+` 明显高于 `μ-`，`span` 明显大于 0.1  
 - `F1` / `AP` 持续上升（小物体上可到很高）  
@@ -609,6 +614,43 @@ GPU=0 EPOCHS=80 AUG=weak GROUP=my_sweep_001 bash model/affordance/run_affordance
 结果目录：`output/affordance_no_rot_executed/training_runs/${GROUP}/<run-name>/`。  
 失败 run 会列在脚本末尾；`CONTINUE_ON_ERROR=1`（默认）时继续后续实验。
 
+> **注意：** 脚本写于 `full` 多 term loss 时期。若未传 `--loss-mode`，当前训练默认是 **`simple`**。跑 sweep 时请在 `COMMON_ARGS` 中加 `--loss-mode full`，或改 sweep 脚本。
+
+---
+
+## Human prior 监督训练
+
+用 HDF5 里的 **`human_priors`**（clip 到 [0,1]）作软标签，**仅 L1**，与 robot 接触流水线分开。
+
+| 项 | 说明 |
+|----|------|
+| 入口 | `python model/train_affordance_hp.py` |
+| 快捷脚本 | `bash model/affordance/run_train_hp.sh` |
+| 模型 | `PointNet2SegOnly`（无 FC 头） |
+| Loss | `L1(pred_score, human_prior)`（`L1HumanPriorLoss`） |
+| 默认 run 组 | `training_runs/hp_supervision/<run-name>/` |
+| 指标阈值 | `--hp-threshold`（默认 0.5，用于 F1/AP） |
+
+```bash
+python model/train_affordance_hp.py \
+  --run-group hp_supervision \
+  --run-name hp_l1_full \
+  --gpus 0 \
+  --epochs 200 \
+  --patience 30 \
+  --lr 3e-4 \
+  --augment-mode full \
+  --hp-threshold 0.5 \
+  --train-vis-max-objects 10 \
+  --val-vis-max-objects 10
+```
+
+可视化：`val_epoch_*.png` / `train_epoch_*.png`。  
+- 监督行用 **human_prior** 作为 GT soft/bin  
+- 额外一行 **robot_gt**（来自 `labels`）仅作对比，**不参与 loss**
+
+数据仍用同一 `affordance_{train,val}.h5`（需含 `human_priors` 字段；与 HF 包一致）。
+
 ---
 
 ## 命令行参数速查
@@ -631,20 +673,32 @@ GPU=0 EPOCHS=80 AUG=weak GROUP=my_sweep_001 bash model/affordance/run_affordance
 | `--run-group` | — | 可选分组目录（sweep） |
 | `--predict-force-center` | off | 是否构建 FC 头 |
 | `--val-vis-max-objects` | `10` | val 可视化列数；`0`=全部 |
+| `--train-vis-max-objects` | `10` | train 可视化；`0`=关闭 |
+| `--train-vis-seed` | `split_seed+7919` | train vis 抽样种子 |
 | `--resume` | — | checkpoint 路径 |
-| `--val_ratio` | `0.15` | 物体级 val 比例 |
-| `--split_seed` | `42` | 划分随机种子 |
-| `--patience` | `10` | early stop |
+| `--patience` | `10` | early stop（warmup 期间不计） |
 | `--disable-early-stop` | off | |
-| `--num_workers` | `4` | DataLoader workers |
+| `--num_workers` | `4` | DataLoader |
 | `--master_port` | `29500` | DDP 端口 |
 
-### 损失 / 热力图
+### Human prior 流水线（`train_hp.py`）
 
-| 参数 | 默认 |
-|------|------|
+| 参数 | 默认 | 说明 |
+|------|------|------|
+| `--run-group` | `hp_supervision` | |
+| `--hp-threshold` | `0.5` | F1/AP 二值化阈值 |
+| `--patience` | `30` | |
+| `--lr` | `3e-4` | |
+| `--master_port` | `29501` | 避免与主训练 29500 冲突 |
+
+### 损失 / 热力图（robot 流水线，`train.py`）
+
+| 参数 | 默认 | 说明 |
+|------|------|------|
+| `--loss-mode` | `simple` | `full` = legacy 多 term |
+| `--lambda-l1-reg` | `1e-4` | **simple 下无效**，仅兼容保留 |
 | `--heatmap-sigma-ratio` | `0.05` |
-| `--lambda-aff` | `0.3` |
+| `--lambda-aff` | `0.3`（仅 full） |
 | `--lambda-binary` | `1.0` |
 | `--lambda-peak` | `0.0` |
 | `--lambda-center-heatmap` | `0.0` |
@@ -693,7 +747,16 @@ GPU=0 EPOCHS=80 AUG=weak GROUP=my_sweep_001 bash model/affordance/run_affordance
 从 [UCBProject/train_affordance](https://huggingface.co/datasets/UCBProject/train_affordance/tree/main) 下载到 `output/affordance_no_rot_executed/`，或本地 `prepare` + 可选 `export_soft_affordance_gt.py`（见 [数据准备](#数据准备)）。
 
 **Q: 有 `*_soft.h5` 但训练还用在线 soft？**  
-当前实现：`L_aff` 必须跟 **增广后** 点云一致，故在 `Dataset` 里重算。磁盘 `soft_labels` 用于 HF 共享与 QC；改训练读磁盘 soft 需改 `dataset.py`（且增广时需对 soft 做同样几何变换）。
+`simple` / `full` 的 soft 监督均在 `Dataset` 里按增广后 xyz **在线**重算。磁盘 `soft_labels` 用于 HF/QC。
+
+**Q: `train.py` 和 `train_hp.py` 选哪个？**  
+学 **executed 接触** → `model.affordance.train`（默认 `simple` = L1 on 在线 soft）。学 **human prior** → `train_affordance_hp.py`（L1 on `human_priors`）。
+
+**Q: `--lambda-l1-reg` 还有用吗？**  
+**simple 模式不用**；loss 仅为 `L1(score, soft_gt)`。full 模式也不读该参数。
+
+**Q: Sweep 结果和默认训练不一致？**  
+默认已是 `simple`；sweep 需加 `--loss-mode full` 才与脚本内 λ/Tversky 设计一致。
 
 **Q: 正式训练与 `model/train.py` 的关系？**  
 `model/train.py` 是旧版多任务训练（`build_dataset.py` 数据）。**当前 no_rot executed 流水线请用 `model.affordance.train`**。
