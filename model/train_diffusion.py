@@ -121,7 +121,7 @@ def train(args):
 
     # ── 加载冻结 PointNet++ ─────────────────────────────────
     print('Loading frozen PointNet++ ...')
-    pn2 = PointNet2Seg(num_classes=2, in_channel=6, seg_head="conv_logits",
+    pn2 = PointNet2Seg(num_classes=2, in_channel=6,
                        predict_force_center=True).to(device)
     ckpt = torch.load(args.pn2_ckpt, map_location=device, weights_only=False)
     pn2.load_state_dict(ckpt['model_state_dict'])

@@ -157,25 +157,10 @@ class PointNet2Seg(nn.Module):
       - 回归头 2: 全局受力中心 (3,)  [可选]
     """
 
-    def __init__(
-        self,
-        num_classes=1,
-        in_channel=7,
-        predict_force_center=False,
-        head_norm: str = "none",
-        seg_head: str = "mlp_sigmoid",
-    ):
+    def __init__(self, num_classes=1, in_channel=7, predict_force_center=False):
         super().__init__()
         self.predict_force_center = predict_force_center
-        self.head_norm_kind = head_norm
-        self.seg_head_type = seg_head
-        if head_norm == "groupnorm":
-            self.head_norm = nn.GroupNorm(1, 128)
-        elif head_norm == "layernorm":
-            self.head_norm = nn.LayerNorm(128)
-        else:
-            self.head_norm = None
-
+        
         # v3: SA radii 0.05/0.1/0.2 (was 0.02/0.04/0.08)
         self.sa1 = PointNetSetAbstraction(256, 0.05, 32, in_channel + 3, [64, 64, 128])
         self.sa2 = PointNetSetAbstraction(128, 0.10, 64, 128 + 3, [128, 128, 256])
@@ -185,25 +170,11 @@ class PointNet2Seg(nn.Module):
         self.fp2 = PointNetFeaturePropagation(128 + 256, [256, 128])
         self.fp1 = PointNetFeaturePropagation(in_channel + 128, [128, 128, 128])
 
-        # 分割头：per-point 128-d → MLP → scalar in [0, 1]
-        if seg_head == "mlp_sigmoid":
-            self.seg_in_norm = nn.LayerNorm(128)
-            self.seg_fc1 = nn.Linear(128, 128)
-            self.seg_fc2 = nn.Linear(128, 1)
-            self.conv1 = None
-            self.bn1 = None
-            self.drop1 = None
-            self.conv2 = None
-        elif seg_head == "conv_logits":
-            self.seg_in_norm = None
-            self.seg_fc1 = None
-            self.seg_fc2 = None
-            self.conv1 = nn.Conv1d(128, 128, 1)
-            self.bn1 = nn.BatchNorm1d(128)
-            self.drop1 = nn.Dropout(0.3)  # v3: was 0.5
-            self.conv2 = nn.Conv1d(128, num_classes, 1)
-        else:
-            raise ValueError(f"Unknown seg_head: {seg_head!r} (use mlp_sigmoid or conv_logits)")
+        # 分割头
+        self.conv1 = nn.Conv1d(128, 128, 1)
+        self.bn1 = nn.BatchNorm1d(128)
+        self.drop1 = nn.Dropout(0.3)  # v3: was 0.5
+        self.conv2 = nn.Conv1d(128, num_classes, 1)
 
         # 回归头 (受力中心): SA3 全局特征 512-d → 3D
         if predict_force_center:
@@ -218,16 +189,6 @@ class PointNet2Seg(nn.Module):
                 nn.Linear(128, 3),
             )
 
-    def _apply_head_norm(self, x: torch.Tensor) -> torch.Tensor:
-        """Normalize per-point channels (B, C, N); LayerNorm does not mix N."""
-        if self.head_norm is None:
-            return x
-        if isinstance(self.head_norm, nn.LayerNorm):
-            x = x.permute(0, 2, 1)
-            x = self.head_norm(x)
-            return x.permute(0, 2, 1)
-        return self.head_norm(x)
-
     def forward(self, xyz, features):
         l1_xyz, l1_points = self.sa1(xyz, features)
         l2_xyz, l2_points = self.sa2(l1_xyz, l1_points)
@@ -238,27 +199,21 @@ class PointNet2Seg(nn.Module):
         l1_points = self.fp2(l1_xyz, l2_xyz, l1_points, l2_points)
         l0_points = self.fp1(xyz, l1_xyz, features, l1_points)
 
-        if self.seg_head_type == "mlp_sigmoid":
-            # (B, N, 128) per-point features from FP
-            x = self.seg_in_norm(l0_points)
-            x = self._apply_head_norm(x.permute(0, 2, 1)).permute(0, 2, 1)
-            h = F.relu(self.seg_fc1(x))
-            seg_out = torch.sigmoid(self.seg_fc2(h).squeeze(-1))  # (B, N) in [0, 1]
-        else:
-            x = l0_points.permute(0, 2, 1)
-            x = self._apply_head_norm(x)
-            x = self.drop1(F.relu(self.bn1(self.conv1(x))))
-            x = self.conv2(x)
-            seg_out = x.permute(0, 2, 1)  # (B, N, num_classes) raw logits
+        x = l0_points.permute(0, 2, 1)
+        x = self.drop1(F.relu(self.bn1(self.conv1(x))))
+        x = self.conv2(x)
+        # (B, num_classes, N) → (B, N, num_classes)
+        seg_logits = x.permute(0, 2, 1)  # raw logits, no activation
+
 
         if self.predict_force_center:
             # 全局特征: SA3 输出 max pool over 64 points → (B, 512)
             global_feat = l3_points.permute(0, 2, 1)  # (B, 512, 64)
             global_feat = torch.max(global_feat, dim=2)[0]  # (B, 512)
             fc_pred = self.fc_head(global_feat)  # (B, 3)
-            return seg_out, fc_pred
-
-        return seg_out
+            return seg_logits, fc_pred
+        
+        return seg_logits
 
     def extract_global_feat(self, xyz, features):
         """冻结推理专用：只走 SA1-3，返回 global_feat (B, 512)。
