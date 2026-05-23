@@ -233,7 +233,7 @@ This runs `round_0000` … `round_0009` (no `--max-rounds` needed unless you wan
 - **Within a round**, `--resume` skips objects that already have `*_grasp.hdf5` / `*_robot_gt.hdf5` in **that** round folder.
 - **Unsafe:** starting again **without** `--resume` resets to `round_0000` and sampler uses `--force`, which **overwrites** `candidates/round_0000/*.hdf5` (and re-sims can overwrite that round’s `robot_gt`).
 
-Example — already finished the default 10 rounds, add **5** more:
+Example — already finished the default 10 rounds (`state.json` has `"round": 10`), add **5** more:
 
 ```bash
 python3 scripts/batch_grasp_collect.py \
@@ -248,6 +248,24 @@ python3 scripts/batch_grasp_collect.py \
 ```
 
 → Runs `round_0010` … `round_0014` only; `round_0000` … `round_0009` stay on disk.
+
+Example — resume at round 10 for **10** more rounds, 16 CPU samplers, **2 GPUs × 5 sim each** (10 concurrent Isaac jobs):
+
+```bash
+python3 scripts/batch_grasp_collect.py \
+  --dataset oakink,ycb \
+  --resume \
+  --max-rounds 10 \
+  --sampler-workers 16 \
+  --sim-gpu-ids 0,1 \
+  --sim-per-gpu 5 \
+  --headless \
+  --no-convert
+```
+
+→ Writes `round_0010` … `round_0019`. Check `state.json` before starting; use the same `--outdir` as the first 10 rounds.
+
+**Optional Sim augmentation** (off by default): `--random-z-yaw` rotates each object on the table around the vertical axis once per `(round, object)` sim run; recorded poses stay in **object_mesh** frame. See [`docs/grasp_collect_pipeline.md`](docs/grasp_collect_pipeline.md) §4.5.
 
 **Separate experiment** (no sharing with prior output): use another outdir:
 

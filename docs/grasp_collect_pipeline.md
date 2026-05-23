@@ -300,7 +300,7 @@ cat output/benchmark_sim_parallel/gpu0_A01001/result_min_free_3.0gb.json | grep 
 | 路径 | 内容 |
 |------|------|
 | `candidates/round_XXXX/{OBJ}_grasp.hdf5` | 候选抓取（raycast） |
-| `robot_gt/round_XXXX/{OBJ}_robot_gt.hdf5` | Sim 结果（schema v2，含 `executed_*`） |
+| `robot_gt/round_XXXX/{OBJ}_robot_gt.hdf5` | Sim 结果（schema v2，含 `executed_*`；可选 `sim_z_yaw_*` attrs） |
 | `merged/{OBJ}_robot_gt_merged.hdf5` | 多轮 **successful_grasps** 合并（**默认不去重**；含 `executed_*`） |
 | `summary.csv` | 每物体每轮状态（追加，不删历史） |
 | `state.json` | 下次 `--resume` 从哪一轮开始 |
@@ -336,7 +336,22 @@ python3 scripts/batch_grasp_collect.py \
 
 ### 4.2 跑完预设轮数后继续加轮（不覆盖旧 round）
 
-例如已跑满默认 10 轮（`state.json` 里 `"round": 10`），再加 **5** 轮 → 只写 `round_0010`…`round_0014`：
+**轮次怎么算：** `state.json` 里的 `"round": N` 表示下一轮要写的目录是 `round_{N:04d}`。  
+`--resume` + `--max-rounds K` 会跑 `round_N` … `round_{N+K-1}`（共 **K** 轮）。
+
+| 已完成 | `state.json` | 命令 | 将写入的目录 |
+|--------|--------------|------|----------------|
+| `round_0000`…`0009` | `"round": 10` | `--resume --max-rounds 10` | `0010`…`0019` |
+| `round_0000`…`0019` | `"round": 20` | `--resume --max-rounds 5` | `0020`…`0024` |
+
+续跑前确认（`--outdir` 必须与历史一致）：
+
+```bash
+cat output/grasp_collect_no_rot/state.json
+# 期望例如: "round": 10  → 下一批从 round_0010 开始
+```
+
+**示例 A** — 已跑满默认 10 轮，再加 **5** 轮（双卡、每卡 1 sim）：
 
 ```bash
 python3 scripts/batch_grasp_collect.py \
@@ -349,6 +364,35 @@ python3 scripts/batch_grasp_collect.py \
   --headless \
   --no-convert
 ```
+
+**示例 B** — 从 **round 10** 起再跑 **10** 轮（`round_0010`…`0019`），16 路 CPU 采样、双卡各 5 路 Isaac（最多 **10** 个 sim 并行）：
+
+```bash
+conda activate bundlesdf
+export PROJ=/path/to/Affordance2Grasp
+export ISAAC_SIM_PATH=/path/to/your/isaac-sim
+cd "$PROJ"
+
+python3 scripts/batch_grasp_collect.py \
+  --dataset oakink,ycb \
+  --resume \
+  --max-rounds 10 \
+  --sampler-workers 16 \
+  --sim-gpu-ids 0,1 \
+  --sim-per-gpu 5 \
+  --target 20 \
+  --headless \
+  --no-convert
+```
+
+并行参数说明：
+
+| 参数 | 含义 |
+|------|------|
+| `--sampler-workers 16` | Phase 1：最多 16 个进程并行跑 `random_grasp_sampler`（CPU） |
+| `--sim-gpu-ids 0,1` | Phase 2：使用物理 GPU 0 与 1 |
+| `--sim-per-gpu 5` | 每张 GPU 上同时最多 5 个 `run_grasp_sim` |
+| 合计 | 最多 **2 × 5 = 10** 个 Isaac 进程；显存紧张时不要加大 `--sim-per-gpu` |
 
 `--resume` 作用：
 
@@ -396,7 +440,49 @@ python3 scripts/batch_grasp_collect.py \
   --no-convert
 ```
 
-### 4.5 监控进度
+### 4.5 Sim 内随机绕竖直轴（可选，`--random-z-yaw`）
+
+**默认关闭**（不加 flag = 与改动前完全一致）：物体按原 `OBJECT_ORIENTATION` / override / meta 放置，不额外绕竖直轴转。
+
+**开启后**（仅影响 Phase 2 Isaac，不改 Phase 1）：
+
+| 项目 | 行为 |
+|------|------|
+| Candidate HDF5 | **不改**；仍为 sampler 在 canonical mesh 系下的 `position` / `rotation` |
+| Sim 放置 | 在桌上对物体绕**竖直轴**加 yaw `θ`（世界 Z） |
+| 执行 | 候选仍在 mesh 系；`execute_grasp` 用含 θ 的 `T_world_obj` 映到世界系 |
+| 多 candidate | 每个 `(round, object)` **一次** `run_grasp_sim` 抽一个 θ，该物体本轮 ~20 个 candidate **共用** |
+| 落盘 GT | `executed_panda_hand_*`、`gripper_tips` 经 `world_pose_to_object_mesh` 写回 **object_mesh** 系（与未开 augment 时语义相同） |
+| 可复现 | batch 传 `--round-idx` + 可选 `--z-yaw-seed`；`θ = hash(seed, obj_id, round)` |
+
+`robot_gt` 根 attrs（便于排查）：
+
+- `sim_z_yaw_enabled`（bool）
+- `sim_z_yaw_deg`（float；关闭时为 `0`）
+- `sim_z_yaw_round_idx`、`sim_z_yaw_seed`（若提供）
+
+与 `--resume`：已有 `*_robot_gt.hdf5` 的物体会 **skip sim**，不会用新 θ 重跑；要重采需删该轮 gt 或换新 `--outdir`。
+
+```bash
+# 在 4.2 的续跑命令上追加即可，例如:
+python3 scripts/batch_grasp_collect.py \
+  --dataset oakink,ycb \
+  --resume --max-rounds 10 \
+  --random-z-yaw --z-yaw-seed 42 \
+  --sampler-workers 16 --sim-gpu-ids 0,1 --sim-per-gpu 5 \
+  --headless --no-convert
+```
+
+单物体调试：
+
+```bash
+$ISAAC_SIM_PATH/python.sh sim/run_grasp_sim.py \
+  --hdf5 output/grasp_collect_no_rot/candidates/round_0010/A01001_grasp.hdf5 \
+  --result-dir output/grasp_collect_no_rot/robot_gt/round_0010 \
+  --random-z-yaw --round-idx 10 --z-yaw-seed 42 --headless
+```
+
+### 4.6 监控进度
 
 ```bash
 tail -f output/grasp_collect_no_rot/summary.csv
