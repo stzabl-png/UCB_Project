@@ -20,8 +20,12 @@ Sim 使用 run_grasp_sim.py (headless)；录屏请单独 run_grasp_sim_rec.py。
     python3 scripts/batch_grasp_collect.py --dataset oakink,ycb \\
         --sampler-workers 8 --sim-per-gpu 1 --sim-gpu-ids 0,1 --headless --no-convert
 
-    # 默认 10 轮 (round_0000..0009)；续跑更多轮:
-    python3 scripts/batch_grasp_collect.py --dataset all --max-rounds 5 --resume ...
+    # 可选: Sim 内绕竖直轴随机朝向 (每 round×object 一个角度)
+    python3 scripts/batch_grasp_collect.py --dataset oakink --random-z-yaw --z-yaw-seed 42 ...
+
+    # 默认 10 轮 (round_0000..0009)；续跑: state.json 的 round=N → 从 round_N 起写 K 轮:
+    python3 scripts/batch_grasp_collect.py --dataset all --resume --max-rounds 10 \\
+        --sampler-workers 16 --sim-gpu-ids 0,1 --sim-per-gpu 5 --headless --no-convert
 
 输出目录（默认）: output/grasp_collect_no_rot/
   旧实验: output/grasp_collect_legacy/（原 grasp_collect，勿与新区混用 --resume）
@@ -67,6 +71,8 @@ class JobConfig:
     resume: bool
     sim_gpu_ids: tuple[int, ...]
     merge_deduplicate: bool
+    random_z_yaw: bool = False
+    z_yaw_seed: Optional[int] = None
 
 
 @dataclass
@@ -331,6 +337,11 @@ def run_sim_job(
             sim_cmd.append("--headless")
         if cfg.max_candidates is not None:
             sim_cmd.extend(["--max-candidates", str(cfg.max_candidates)])
+        if cfg.random_z_yaw:
+            sim_cmd.append("--random-z-yaw")
+            sim_cmd.extend(["--round-idx", str(round_idx)])
+            if cfg.z_yaw_seed is not None:
+                sim_cmd.extend(["--z-yaw-seed", str(cfg.z_yaw_seed)])
 
         sim_env = os.environ.copy()
         sim_env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
@@ -639,6 +650,17 @@ def main():
         "--merge-deduplicate", action="store_true",
         help="合并 merged/ 时去掉相近 pose（默认不去重）",
     )
+    parser.add_argument(
+        "--random-z-yaw",
+        action="store_true",
+        help="Sim 内每 (round, object) 随机绕竖直轴放置；候选 HDF5 不变",
+    )
+    parser.add_argument(
+        "--z-yaw-seed",
+        type=int,
+        default=None,
+        help="与 --random-z-yaw 配合，可复现 yaw (度)",
+    )
     parser.add_argument("--python-bin", default=sys.executable)
     parser.add_argument("--isaac-python", default=None)
     args = parser.parse_args()
@@ -710,6 +732,8 @@ def main():
         resume=args.resume,
         sim_gpu_ids=sim_gpu_ids,
         merge_deduplicate=args.merge_deduplicate,
+        random_z_yaw=args.random_z_yaw,
+        z_yaw_seed=args.z_yaw_seed,
     )
     cfg_dict = asdict(cfg)
 
@@ -722,6 +746,9 @@ def main():
     )
     print(f"Out: {args.outdir}")
     print(f"No rotation: {cfg.no_rotation}")
+    print(f"Sim random Z-yaw: {cfg.random_z_yaw}" + (
+        f"  (seed={cfg.z_yaw_seed})" if cfg.z_yaw_seed is not None else ""
+    ))
     total_sim = len(sim_gpu_ids) * sim_per_gpu
     print(
         f"sampler_workers={sampler_workers}  "

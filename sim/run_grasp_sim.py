@@ -30,6 +30,29 @@ parser.add_argument("--result-dir", type=str, default=None,
                     help="结果保存目录 (默认 sim/output/robot_gt/)")
 parser.add_argument("--max-candidates", type=int, default=None,
                     help="最多尝试的候选数 (默认全部)")
+parser.add_argument(
+    "--random-z-yaw",
+    action="store_true",
+    help="Sim 内绕竖直轴随机放置物体 (候选/executed 仍在 object_mesh 系记录)",
+)
+parser.add_argument(
+    "--z-yaw-seed",
+    type=int,
+    default=None,
+    help="与 --round-idx、obj_id 一起决定可复现 yaw (度)",
+)
+parser.add_argument(
+    "--round-idx",
+    type=int,
+    default=None,
+    help="batch 轮次索引，用于 per-round 可复现 yaw",
+)
+parser.add_argument(
+    "--z-yaw-deg",
+    type=float,
+    default=None,
+    help="调试用: 固定 yaw (度)，覆盖随机采样",
+)
 args, _ = parser.parse_known_args()
 
 simulation_app = SimulationApp({"headless": args.headless})
@@ -95,10 +118,83 @@ try:
 except Exception:
     OBJECT_ROTATION_OVERRIDES = {}
 
+
+def _find_obj_usd_path(obj_id: str) -> str | None:
+    """Search output/obj_usd then sim/assets for {obj_id}.usd."""
+    a2g_root = os.path.dirname(SIM_DIR)
+    obj_usd_root = os.path.join(a2g_root, "output", "obj_usd")
+    datasets_order = ["oakink", "ycb", "arctic", "dexycb", "egocentric", "ho3d_v3"]
+    usd_search_paths = (
+        [os.path.join(obj_usd_root, ds, f"{obj_id}.usd") for ds in datasets_order]
+        + [os.path.join(SIM_DIR, "assets", f"{obj_id}.usd")]
+    )
+    return next((p for p in usd_search_paths if os.path.exists(p)), None)
+
+
+def sample_sim_z_yaw_deg(obj_id: str, round_idx: int | None, seed: int | None) -> float:
+    """Uniform [0, 360) degrees; one draw per (seed, obj_id, round_idx)."""
+    import hashlib
+
+    key = f"{seed if seed is not None else 0}:{obj_id}:{round_idx if round_idx is not None else -1}"
+    digest = int(hashlib.sha256(key.encode()).hexdigest()[:8], 16)
+    rng = np.random.default_rng(digest)
+    return float(rng.uniform(0.0, 360.0))
+
+
+def resolve_sim_z_yaw_deg(obj_id: str) -> float:
+    """Resolve yaw for this sim invocation (0 if augmentation disabled)."""
+    if not args.random_z_yaw:
+        return 0.0
+    if args.z_yaw_deg is not None:
+        return float(args.z_yaw_deg)
+    return sample_sim_z_yaw_deg(obj_id, args.round_idx, args.z_yaw_seed)
+
+
+def resolve_object_placement(obj_id: str, object_scale: float, sim_z_yaw_deg: float = 0.0) -> dict:
+    """
+    Table placement: world position + euler XYZ (degrees) for RigidObject.
+    sim_z_yaw_deg adds to Z euler after overrides (world-vertical / in-plane yaw).
+    """
+    _override = OBJECT_ROTATION_OVERRIDES.get(obj_id, None)
+    obj_orientation = list(OBJECT_ORIENTATION)
+
+    usd_path = _find_obj_usd_path(obj_id)
+    if usd_path is None:
+        raise FileNotFoundError(f"USD not found for placement resolve: {obj_id}")
+
+    _meta_path = usd_path.replace(".usd", "_meta.json")
+    if os.path.exists(_meta_path):
+        with open(_meta_path) as _mf:
+            _meta = json.load(_mf)
+        obj_z_offset = float(_meta.get("z_offset_m", 0.075 * object_scale))
+    elif isinstance(_override, dict) and "z_offset" in _override:
+        obj_z_offset = float(_override["z_offset"])
+    else:
+        obj_z_offset = 0.075 * object_scale
+
+    if isinstance(_override, dict) and "rotation" in _override:
+        obj_orientation = list(_override["rotation"])
+
+    yaw = float(sim_z_yaw_deg)
+    if abs(yaw) > 1e-9:
+        obj_orientation[2] = float(obj_orientation[2]) + yaw
+
+    obj_pos = list(OBJECT_POSITION)
+    obj_pos[2] += obj_z_offset
+
+    return {
+        "pos": obj_pos,
+        "ori": obj_orientation,
+        "z_offset": obj_z_offset,
+        "sim_z_yaw_deg": yaw,
+        "usd_path": usd_path,
+    }
+
+
 # ============================================================
 # Scene Setup
 # ============================================================
-def setup_scene(obj_id, object_scale):
+def setup_scene(obj_id, object_scale, sim_z_yaw_deg: float = 0.0):
     """搭建仿真场景."""
     world = World(backend="numpy")
 
@@ -158,46 +254,36 @@ def setup_scene(obj_id, object_scale):
     for _ in range(10):
         world.step(render=RENDER_SIM)
 
-    # 加载物体 USD — 搜索顺序: output/obj_usd/{dataset}/ → sim/assets/
-    a2g_root = os.path.dirname(SIM_DIR)
-    obj_usd_root = os.path.join(a2g_root, 'output', 'obj_usd')
-    datasets_order = ['oakink', 'ycb', 'arctic', 'dexycb', 'egocentric', 'ho3d_v3']
-    usd_search_paths = (
-        [os.path.join(obj_usd_root, ds, f'{obj_id}.usd') for ds in datasets_order]
-        + [os.path.join(SIM_DIR, 'assets', f'{obj_id}.usd')]
-    )
-    usd_path = next((p for p in usd_search_paths if os.path.exists(p)), None)
-
+    usd_path = _find_obj_usd_path(obj_id)
     if usd_path is None:
         cprint(f"❌ USD not found: {obj_id}.usd", "red")
         cprint(f"   搜索路径: output/obj_usd/{{dataset}}/  sim/assets/", "yellow")
         cprint(f"   先运行: python3 tools/convert_obj_usd.py --obj {obj_id}", "yellow")
         return None
 
-    # 读取每物体覆盖
+    try:
+        placement = resolve_object_placement(obj_id, object_scale, sim_z_yaw_deg)
+    except FileNotFoundError:
+        cprint(f"❌ USD not found: {obj_id}.usd", "red")
+        return None
+
+    obj_pos = placement["pos"]
+    obj_orientation = placement["ori"]
+    obj_z_offset = placement["z_offset"]
+    _meta_path = usd_path.replace(".usd", "_meta.json")
     _override = OBJECT_ROTATION_OVERRIDES.get(obj_id, None)
-    obj_orientation = list(OBJECT_ORIENTATION)
-
-    # ── z_offset 优先级: meta JSON > override config > 启发式 ────────────────
-    # meta JSON 由 convert_obj_usd.py 生成（精确值：使物体底面落在 Z=0）
-    _meta_path = usd_path.replace('.usd', '_meta.json')
     if os.path.exists(_meta_path):
-        with open(_meta_path) as _mf:
-            _meta = json.load(_mf)
-        obj_z_offset = float(_meta.get('z_offset_m', 0.075 * object_scale))
         cprint(f"   z_offset (meta): {obj_id} → {obj_z_offset*100:.1f}cm", "cyan")
-    elif isinstance(_override, dict) and 'z_offset' in _override:
-        obj_z_offset = _override['z_offset']
+    elif isinstance(_override, dict) and "z_offset" in _override:
         cprint(f"   z_offset (override): {obj_id} → {obj_z_offset*100:.1f}cm", "cyan")
-    else:
-        obj_z_offset = 0.075 * object_scale   # 7.5cm 启发式
-
-    if isinstance(_override, dict) and 'rotation' in _override:
-        obj_orientation = _override['rotation']
+    if isinstance(_override, dict) and "rotation" in _override and abs(sim_z_yaw_deg) < 1e-9:
         cprint(f"   ⮻ 朝向覆盖: {obj_id} → {obj_orientation}°", "cyan")
-
-    obj_pos = list(OBJECT_POSITION)
-    obj_pos[2] += obj_z_offset
+    if abs(placement["sim_z_yaw_deg"]) > 1e-9:
+        cprint(
+            f"   🔄 sim Z-yaw augment: {placement['sim_z_yaw_deg']:.2f}° "
+            f"(placement euler ° = {obj_orientation})",
+            "cyan",
+        )
 
     for i in range(10):
         delete_prim(f"/World/Rigid/rigid_{i}")
@@ -268,7 +354,13 @@ def setup_scene(obj_id, object_scale):
         world.step(render=RENDER_SIM)
 
     # ── cuRobo 规划用物体 mesh（规划层碰撞，不影响 PhysX）────────────────────
-    scene_out = {"world": world, "franka": franka, "obj": obj}
+    scene_out = {
+        "world": world,
+        "franka": franka,
+        "obj": obj,
+        "object_placement": placement,
+        "sim_z_yaw_deg": placement["sim_z_yaw_deg"],
+    }
     mesh_info = prepare_curobo_mesh(stage, obj.rigid_prim_path)
     if mesh_info is not None:
         scene_out["curobo_mesh_vertices"] = mesh_info["vertices"]
@@ -1013,8 +1105,15 @@ def main():
 
 
     # ---- 搭建场景 ----
+    sim_z_yaw_deg = resolve_sim_z_yaw_deg(obj_id)
+    if args.random_z_yaw:
+        cprint(
+            f"  Sim Z-yaw augment: {sim_z_yaw_deg:.2f}°  "
+            f"(round_idx={args.round_idx}, seed={args.z_yaw_seed})",
+            "cyan",
+        )
     cprint(f"\n📦 Setting up scene...", "yellow")
-    scene = setup_scene(obj_id, args.object_scale)
+    scene = setup_scene(obj_id, args.object_scale, sim_z_yaw_deg=sim_z_yaw_deg)
     if scene is None:
         simulation_app.close()
         return
@@ -1090,18 +1189,18 @@ def main():
         # 每次尝试后都重置场景 (最后一个除外)
         if attempt < len(grasp_candidates) - 1:
             cprint(f"  → 重置场景, 尝试下一个候选...", "yellow")
-            # 读取每物体朝向+高度覆盖 (和 setup_scene 保持一致)
-            _ovr = OBJECT_ROTATION_OVERRIDES.get(obj_id, None)
-            if isinstance(_ovr, dict):
-                reset_z_offset = _ovr.get('z_offset', 0.075 * args.object_scale)
-                reset_ori = _ovr.get('rotation', list(OBJECT_ORIENTATION))
+            # 与 setup_scene 相同放置 (含 sim Z-yaw)
+            _place = scene.get("object_placement")
+            if _place is not None:
+                reset_pos = np.array(_place["pos"], dtype=np.float64)
+                reset_ori = np.array(_place["ori"], dtype=np.float64)
             else:
-                reset_z_offset = 0.075 * args.object_scale
-                reset_ori = list(OBJECT_ORIENTATION)
-            reset_pos = list(OBJECT_POSITION)
-            reset_pos[2] += reset_z_offset
-            # 设定位姿并清零速度
-            scene["obj"].set_obj_pose(np.array(reset_pos), ori=np.array(reset_ori))
+                _fallback = resolve_object_placement(
+                    obj_id, args.object_scale, scene.get("sim_z_yaw_deg", 0.0),
+                )
+                reset_pos = np.array(_fallback["pos"], dtype=np.float64)
+                reset_ori = np.array(_fallback["ori"], dtype=np.float64)
+            scene["obj"].set_obj_pose(reset_pos, ori=reset_ori)
             try:
                 scene["obj"].rigid.set_linear_velocity(np.zeros(3))
                 scene["obj"].rigid.set_angular_velocity(np.zeros(3))
@@ -1141,6 +1240,12 @@ def main():
             rf.attrs['robot_gt_schema_version'] = 2
             rf.attrs['executed_pose_frame'] = 'object_mesh'
             rf.attrs['executed_ee_frame'] = 'panda_hand'
+            rf.attrs['sim_z_yaw_enabled'] = bool(args.random_z_yaw)
+            rf.attrs['sim_z_yaw_deg'] = float(sim_z_yaw_deg) if args.random_z_yaw else 0.0
+            if args.round_idx is not None:
+                rf.attrs['sim_z_yaw_round_idx'] = int(args.round_idx)
+            if args.z_yaw_seed is not None:
+                rf.attrs['sim_z_yaw_seed'] = int(args.z_yaw_seed)
 
             # 兼容: 保留 winning_candidate (第一个成功的)
             if winning_candidate is not None:
