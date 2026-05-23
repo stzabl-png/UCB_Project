@@ -18,6 +18,7 @@ Human prior（默认开启）:
 
 用法:
     python3 tools/prepare_affordance_executed.py --qc-vis
+    python3 tools/prepare_affordance_executed.py --workers 8   # 多进程（按物体并行）
     python3 tools/prepare_affordance_executed.py --obj A01001 --qc-vis
     python3 tools/prepare_affordance_executed.py --no-hp   # 关闭 HP
 """
@@ -31,6 +32,7 @@ import os
 import re
 import sys
 import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
 
 import h5py
@@ -208,6 +210,107 @@ def load_executed_grasps(merged_path: str) -> list[ExecutedGrasp]:
                 )
             )
     return rows
+
+
+def count_trusted_grasps(merged_path: str) -> int:
+    """Fast count for discovery (no full grasp struct load)."""
+    with h5py.File(merged_path, "r") as f:
+        if "successful_grasps" not in f:
+            return 0
+        grp = f["successful_grasps"]
+        return sum(1 for key in grp.keys() if is_trusted_grasp(grp[key]))
+
+
+def _prepare_worker(payload: dict) -> tuple[str, ObjectSample | None, str | None]:
+    """ProcessPool worker: one object → sample or skip reason."""
+    obj_id = payload["obj_id"]
+    merged_path = payload["merged_path"]
+    try:
+        sample = prepare_object(
+            obj_id,
+            merged_path,
+            num_points=int(payload["num_points"]),
+            contact_radius=float(payload["contact_radius"]),
+            with_hp=bool(payload["with_hp"]),
+        )
+    except Exception as e:
+        return obj_id, None, str(e)
+    if sample is None:
+        return obj_id, None, "no trusted grasps or all dropped"
+    return obj_id, sample, None
+
+
+def _run_prepare_jobs(
+    jobs: list[tuple[str, str, int]],
+    merged_dir: str,
+    *,
+    num_points: int,
+    contact_radius: float,
+    with_hp: bool,
+    workers: int,
+) -> tuple[list[ObjectSample], list[str]]:
+    """Sequential (workers=1) or per-object multiprocessing."""
+    n_jobs = len(jobs)
+    samples: list[ObjectSample] = []
+    skipped: list[str] = []
+
+    if workers <= 1:
+        for i, (obj_id, _ds, _) in enumerate(jobs):
+            merged_path = os.path.join(merged_dir, f"{obj_id}_robot_gt_merged.hdf5")
+            if not os.path.isfile(merged_path):
+                skipped.append(f"{obj_id}: no merged file")
+                continue
+            obj_id_out, sample, err = _prepare_worker({
+                "obj_id": obj_id,
+                "merged_path": merged_path,
+                "num_points": num_points,
+                "contact_radius": contact_radius,
+                "with_hp": with_hp,
+            })
+            if err:
+                skipped.append(f"{obj_id_out}: {err}")
+                continue
+            samples.append(sample)
+            print(
+                f"  [{i+1}/{n_jobs}] {sample.obj_id} ({sample.dataset}): "
+                f"used={sample.n_grasps_used}/{sample.n_grasps_trusted} "
+                f"C/B/A={sample.n_method_c}/{sample.n_method_b}/{sample.n_method_a} "
+                f"pos={sample.positive_ratio*100:.2f}%",
+            )
+        return samples, skipped
+
+    payloads = []
+    for obj_id, _ds, _ in jobs:
+        merged_path = os.path.join(merged_dir, f"{obj_id}_robot_gt_merged.hdf5")
+        if not os.path.isfile(merged_path):
+            skipped.append(f"{obj_id}: no merged file")
+            continue
+        payloads.append({
+            "obj_id": obj_id,
+            "merged_path": merged_path,
+            "num_points": num_points,
+            "contact_radius": contact_radius,
+            "with_hp": with_hp,
+        })
+
+    print(f"  Parallel prepare: {len(payloads)} objects, workers={workers}")
+    done = 0
+    with ProcessPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(_prepare_worker, p) for p in payloads]
+        for fut in as_completed(futures):
+            obj_id_out, sample, err = fut.result()
+            done += 1
+            if err:
+                skipped.append(f"{obj_id_out}: {err}")
+                continue
+            samples.append(sample)
+            print(
+                f"  [{done}/{len(payloads)}] {sample.obj_id} ({sample.dataset}): "
+                f"used={sample.n_grasps_used}/{sample.n_grasps_trusted} "
+                f"C/B/A={sample.n_method_c}/{sample.n_method_b}/{sample.n_method_a} "
+                f"pos={sample.positive_ratio*100:.2f}%",
+            )
+    return samples, skipped
 
 
 def _plane_scan_axis(g: ExecutedGrasp) -> np.ndarray:
@@ -599,7 +702,7 @@ def discover_trainable(merged_dir: str) -> list[tuple[str, str, int]]:
     jobs: list[tuple[str, str, int]] = []
     for path in sorted(glob.glob(os.path.join(merged_dir, "*_merged.hdf5"))):
         obj_id = os.path.basename(path).replace("_robot_gt_merged.hdf5", "")
-        n = len(load_executed_grasps(path))
+        n = count_trusted_grasps(path)
         if n > 0:
             jobs.append((obj_id, infer_dataset(obj_id), n))
     return jobs
@@ -834,6 +937,12 @@ def main() -> None:
     parser.add_argument("--qc-vis-oakink", type=int, default=6)
     parser.add_argument("--qc-vis-dexycb", type=int, default=6)
     parser.add_argument("--qc-vis-max", type=int, default=16)
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Per-object parallel workers (1=sequential). Try 4–8 on multi-core CPU.",
+    )
     args = parser.parse_args()
 
     merged_dir = os.path.abspath(args.merged_dir)
@@ -852,40 +961,22 @@ def main() -> None:
     with open(os.path.join(outdir, "objects_trainable.txt"), "w") as f:
         for obj_id, ds, n in jobs:
             if n < 0:
-                n = len(load_executed_grasps(
+                n = count_trusted_grasps(
                     os.path.join(merged_dir, f"{obj_id}_robot_gt_merged.hdf5"),
-                ))
+                )
             f.write(f"{obj_id},{ds},{n}\n")
 
-    samples: list[ObjectSample] = []
-    skipped: list[str] = []
-
-    for i, (obj_id, _ds, _) in enumerate(jobs):
-        merged_path = os.path.join(merged_dir, f"{obj_id}_robot_gt_merged.hdf5")
-        if not os.path.isfile(merged_path):
-            skipped.append(f"{obj_id}: no merged file")
-            continue
-        try:
-            sample = prepare_object(
-                obj_id,
-                merged_path,
-                num_points=args.num_points,
-                contact_radius=args.contact_radius,
-                with_hp=args.with_hp,
-            )
-        except Exception as e:
-            skipped.append(f"{obj_id}: {e}")
-            continue
-        if sample is None:
-            skipped.append(f"{obj_id}: no trusted grasps or all dropped")
-            continue
-        samples.append(sample)
-        print(
-            f"  [{i+1}/{len(jobs)}] {obj_id} ({sample.dataset}): "
-            f"used={sample.n_grasps_used}/{sample.n_grasps_trusted} "
-            f"C/B/A={sample.n_method_c}/{sample.n_method_b}/{sample.n_method_a} "
-            f"pos={sample.positive_ratio*100:.2f}%",
-        )
+    workers = max(1, int(args.workers))
+    if args.obj:
+        workers = 1
+    samples, skipped = _run_prepare_jobs(
+        jobs,
+        merged_dir,
+        num_points=args.num_points,
+        contact_radius=args.contact_radius,
+        with_hp=args.with_hp,
+        workers=workers,
+    )
 
     if not samples:
         print("❌ No samples produced.")

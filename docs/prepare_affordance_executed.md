@@ -50,6 +50,7 @@ conda activate bundlesdf
 cd ~/Project/Affordance2Grasp
 
 python3 tools/prepare_affordance_executed.py
+python3 tools/prepare_affordance_executed.py --workers 8   # 按物体多进程（默认 --workers 1）
 python3 tools/prepare_affordance_executed.py --obj A01001 --qc-vis
 python3 tools/prepare_affordance_executed.py --no-hp   # 关闭 HP
 bash scripts/run_prepare_affordance_executed.sh

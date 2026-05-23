@@ -7,7 +7,9 @@ conda activate bundlesdf
 LOG_DIR=output/affordance_no_rot_executed/logs
 mkdir -p "$LOG_DIR"
 echo "=== prepare_affordance_executed $(date -Iseconds) ===" | tee "$LOG_DIR/prepare.log"
+WORKERS="${WORKERS:-8}"
 python3 tools/prepare_affordance_executed.py \
+  --workers "$WORKERS" \
   --qc-vis \
   --qc-vis-oakink 6 \
   --qc-vis-dexycb 6 \
