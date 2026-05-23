@@ -368,7 +368,12 @@ def main():
     # ============================================================
     # Model (Multi-Task)
     # ============================================================
-    model = PointNet2Seg(num_classes=2, in_channel=6, predict_force_center=True).to(device)
+    model = PointNet2Seg(
+        num_classes=2,
+        in_channel=6,
+        predict_force_center=True,
+        seg_head="conv_logits",
+    ).to(device)
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"\n  Model params:  {n_params:,}")
 

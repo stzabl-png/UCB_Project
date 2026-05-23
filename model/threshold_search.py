@@ -14,7 +14,9 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 ckpt_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                          'output', 'checkpoints_v5', 'best_model.pth')
 ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
-model = PointNet2Seg(num_classes=2, in_channel=6, predict_force_center=True).to(device)
+model = PointNet2Seg(
+    num_classes=2, in_channel=6, predict_force_center=True, seg_head="conv_logits",
+).to(device)
 model.load_state_dict(ckpt['model_state_dict'])
 model.eval()
 print(f"Loaded: epoch {ckpt['epoch']}, val_f1={ckpt['val_f1']:.1%}")
