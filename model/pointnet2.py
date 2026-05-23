@@ -157,10 +157,23 @@ class PointNet2Seg(nn.Module):
       - 回归头 2: 全局受力中心 (3,)  [可选]
     """
 
-    def __init__(self, num_classes=1, in_channel=7, predict_force_center=False):
+    def __init__(
+        self,
+        num_classes=1,
+        in_channel=7,
+        predict_force_center=False,
+        head_norm: str = "none",
+    ):
         super().__init__()
         self.predict_force_center = predict_force_center
-        
+        self.head_norm_kind = head_norm
+        if head_norm == "groupnorm":
+            self.head_norm = nn.GroupNorm(1, 128)
+        elif head_norm == "layernorm":
+            self.head_norm = nn.LayerNorm(128)
+        else:
+            self.head_norm = None
+
         # v3: SA radii 0.05/0.1/0.2 (was 0.02/0.04/0.08)
         self.sa1 = PointNetSetAbstraction(256, 0.05, 32, in_channel + 3, [64, 64, 128])
         self.sa2 = PointNetSetAbstraction(128, 0.10, 64, 128 + 3, [128, 128, 256])
@@ -189,6 +202,16 @@ class PointNet2Seg(nn.Module):
                 nn.Linear(128, 3),
             )
 
+    def _apply_head_norm(self, x: torch.Tensor) -> torch.Tensor:
+        """Normalize per-point channels (B, C, N); LayerNorm does not mix N."""
+        if self.head_norm is None:
+            return x
+        if isinstance(self.head_norm, nn.LayerNorm):
+            x = x.permute(0, 2, 1)
+            x = self.head_norm(x)
+            return x.permute(0, 2, 1)
+        return self.head_norm(x)
+
     def forward(self, xyz, features):
         l1_xyz, l1_points = self.sa1(xyz, features)
         l2_xyz, l2_points = self.sa2(l1_xyz, l1_points)
@@ -200,6 +223,7 @@ class PointNet2Seg(nn.Module):
         l0_points = self.fp1(xyz, l1_xyz, features, l1_points)
 
         x = l0_points.permute(0, 2, 1)
+        x = self._apply_head_norm(x)
         x = self.drop1(F.relu(self.bn1(self.conv1(x))))
         x = self.conv2(x)
         # (B, num_classes, N) → (B, N, num_classes)
