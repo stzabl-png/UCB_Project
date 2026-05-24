@@ -1316,6 +1316,33 @@ def worker_main():
     results_path = chunk_path.replace(".json", "_results.json")
     if results_path == chunk_path:
         results_path = chunk_path + "_results.json"
+    progress_path = chunk_path.replace(".json", "_progress.json")
+    if progress_path == chunk_path:
+        progress_path = chunk_path + "_progress.json"
+    chunk_id = chunk.get("chunk_id", os.path.basename(chunk_path))
+
+    def _flush_chunk_state(last_task: dict, last_res: dict) -> None:
+        """Incremental results + progress for batch-side polling."""
+        payload = {"chunk": chunk_id, "results": results}
+        with open(results_path, "w") as f:
+            json.dump(payload, f, indent=2)
+        prog = {
+            "chunk_id": chunk_id,
+            "completed": len(results),
+            "total": len(tasks),
+            "last_task_id": last_task.get("task_id", ""),
+            "last_obj_id": last_task.get("obj_id", ""),
+            "last_success": bool(last_res.get("success")),
+            "successes_in_chunk": sum(1 for r in results if r.get("success")),
+        }
+        with open(progress_path, "w") as f:
+            json.dump(prog, f, indent=2)
+        ok = "Y" if last_res.get("success") else "N"
+        print(
+            f"[pool-sim-progress] chunk={chunk_id} {len(results)}/{len(tasks)} "
+            f"task={last_task.get('task_id')} obj={last_task.get('obj_id')} ok={ok}",
+            flush=True,
+        )
 
     try:
         for task in tasks:
@@ -1336,6 +1363,7 @@ def worker_main():
                         "attempted": False,
                         "error": "setup_scene failed",
                     })
+                    _flush_chunk_state(task, results[-1])
                     continue
                 _WORKER_OBJ = obj_id
             elif _WORKER_OBJ != obj_id:
@@ -1360,6 +1388,7 @@ def worker_main():
                         "attempted": False,
                         "error": swap_err,
                     })
+                    _flush_chunk_state(task, results[-1])
                     continue
                 _WORKER_OBJ = obj_id
             elif abs(float(_WORKER_SCENE.get("sim_z_yaw_deg", 0.0)) - z_yaw) > 1e-6:
@@ -1369,6 +1398,7 @@ def worker_main():
 
             res = _run_single_task(task, outdir, int(round_idx), object_scale)
             results.append(res)
+            _flush_chunk_state(task, res)
 
             if _WORKER_SCENE is not None:
                 _reset_scene_pose(_WORKER_SCENE, obj_id, object_scale, z_yaw)

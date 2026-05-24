@@ -145,6 +145,17 @@ def save_registry(path: str, registry: dict) -> None:
         json.dump(registry, f, indent=2)
 
 
+def clear_registry_for_objects(registry: dict, obj_ids: list[str]) -> int:
+    """Remove sim history for objects whose pool HDF5 was regenerated. Returns count cleared."""
+    cand = registry.setdefault("candidates", {})
+    n = 0
+    for obj_id in obj_ids:
+        if obj_id in cand:
+            del cand[obj_id]
+            n += 1
+    return n
+
+
 def _obj_registry(registry: dict, obj_id: str) -> dict:
     return registry.setdefault("candidates", {}).setdefault(obj_id, {})
 
@@ -395,6 +406,70 @@ def mark_task_done(queue: dict, task_id: str) -> None:
     done = queue.setdefault("completed_task_ids", [])
     if task_id not in done:
         done.append(task_id)
+
+
+def chunk_results_dir(outdir: str, round_idx: int) -> str:
+    return os.path.join(os.path.abspath(outdir), "sim_logs", round_tag(round_idx), "chunks")
+
+
+def load_disk_sim_results(outdir: str, round_idx: int) -> list[dict]:
+    """Merge chunk_*_results.json; newest file mtime wins on duplicate task_id."""
+    chunk_dir = chunk_results_dir(outdir, round_idx)
+    by_task: dict[str, tuple[float, dict]] = {}
+    for path in sorted(glob.glob(os.path.join(chunk_dir, "chunk_*_results.json"))):
+        try:
+            mtime = os.path.getmtime(path)
+            with open(path, "r") as f:
+                data = json.load(f)
+            for row in data.get("results", []):
+                tid = row.get("task_id")
+                if not tid:
+                    continue
+                prev = by_task.get(tid)
+                if prev is None or mtime >= prev[0]:
+                    by_task[tid] = (mtime, row)
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            continue
+    return [pair[1] for pair in by_task.values()]
+
+
+def apply_sim_results(
+    registry: dict,
+    queue: dict,
+    results: list[dict],
+    round_idx: int,
+) -> int:
+    """Mark finished tasks and update registry. Returns count of newly completed tasks."""
+    valid_ids = {t["task_id"] for t in queue.get("tasks", [])}
+    done = set(queue.get("completed_task_ids", []))
+    new_results = [
+        r for r in results
+        if r.get("task_id") in valid_ids and r["task_id"] not in done
+    ]
+    if not new_results:
+        return 0
+    update_registry_from_results(registry, new_results, round_idx)
+    for row in new_results:
+        mark_task_done(queue, row["task_id"])
+    return len(new_results)
+
+
+def ingest_and_persist_sim_progress(
+    outdir: str,
+    round_idx: int,
+    registry: dict,
+    queue: dict,
+    *,
+    registry_path: str,
+    task_queue_path: str,
+) -> int:
+    """Load worker chunk results from disk, update queue/registry, save if changed."""
+    results = load_disk_sim_results(outdir, round_idx)
+    n = apply_sim_results(registry, queue, results, round_idx)
+    if n:
+        save_registry(registry_path, registry)
+        save_task_queue(task_queue_path, queue)
+    return n
 
 
 def _copy_candidate_group(src_ci: h5py.Group, dst_cg: h5py.Group, dst_index: int) -> None:
