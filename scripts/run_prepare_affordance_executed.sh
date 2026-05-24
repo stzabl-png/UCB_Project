@@ -10,6 +10,7 @@ echo "=== prepare_affordance_executed $(date -Iseconds) ===" | tee "$LOG_DIR/pre
 WORKERS="${WORKERS:-8}"
 python3 tools/prepare_affordance_executed.py \
   --workers "$WORKERS" \
+  --write-split \
   --qc-vis \
   --qc-vis-oakink 6 \
   --qc-vis-dexycb 6 \

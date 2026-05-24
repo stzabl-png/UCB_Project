@@ -17,10 +17,15 @@ Human prior（默认开启）:
 每物体 1 样本；不修改 build_dataset.py / gen_m5_training_data.py。
 
 用法:
-    python3 tools/prepare_affordance_executed.py --qc-vis
-    python3 tools/prepare_affordance_executed.py --workers 8   # 多进程（按物体并行）
+    python3 tools/prepare_affordance_executed.py --workers 8
+    # 默认: affordance_all.h5 + affordance_all_soft.h5 + objects_train_val_split.json
+    python3 tools/prepare_affordance_executed.py --write-split   # 额外 4 个 train/val h5
     python3 tools/prepare_affordance_executed.py --obj A01001 --qc-vis
-    python3 tools/prepare_affordance_executed.py --no-hp   # 关闭 HP
+    python3 tools/prepare_affordance_executed.py --no-hp --no-soft
+    # 仅从已有 binary h5 重算 soft（不跑 merged）:
+    python3 tools/prepare_affordance_executed.py --export-soft-only --dataset-dir output/affordance_no_rot_executed --overwrite
+    # 已有 train/val 合并为 all（不改动原文件）:
+    python3 tools/merge_affordance_h5_splits.py --dataset-dir output/affordance_no_rot_executed
 """
 from __future__ import annotations
 
@@ -46,6 +51,7 @@ sys.path.insert(0, os.path.join(PROJ, "tools"))
 
 from mesh_utils import infer_dataset  # noqa: E402
 import random_grasp_sampler as rgs  # noqa: E402
+from tools.soft_affordance_gt import export_soft_dataset_dir, write_soft_h5  # noqa: E402
 
 DEFAULT_MERGED_DIR = os.path.join(PROJ, "output", "grasp_collect_no_rot", "merged")
 DEFAULT_OUT_DIR = os.path.join(PROJ, "output", "affordance_no_rot_executed")
@@ -807,6 +813,52 @@ def write_affordance_h5(
         grp.create_dataset("intents", data=intents)
 
 
+def _samples_to_stacked(samples: list[ObjectSample]) -> dict[str, np.ndarray]:
+    return {
+        "points": np.stack([s.points for s in samples], axis=0),
+        "normals": np.stack([s.normals for s in samples], axis=0),
+        "labels": np.stack([s.labels for s in samples], axis=0),
+        "human_priors": np.stack([s.human_priors for s in samples], axis=0),
+        "force_centers": np.stack([s.force_center for s in samples], axis=0),
+        "obj_ids": np.array([s.obj_id for s in samples], dtype="S32"),
+        "categories": np.array([s.dataset for s in samples], dtype="S20"),
+        "intents": np.array(["grasp"] * len(samples), dtype="S20"),
+    }
+
+
+def write_soft_h5_from_samples(
+    path: str,
+    samples: list[ObjectSample],
+    *,
+    heatmap_sigma_ratio: float,
+    label_threshold: float,
+    extra_meta: dict,
+    source_h5: str | None = None,
+) -> dict:
+    if not samples:
+        raise ValueError(f"no samples to write: {path}")
+    stacked = _samples_to_stacked(samples)
+    extra = {
+        "normals": stacked["normals"],
+        "human_priors": stacked["human_priors"],
+        "force_centers": stacked["force_centers"],
+        "categories": stacked["categories"],
+        "intents": stacked["intents"],
+    }
+    return write_soft_h5(
+        path,
+        stacked["points"],
+        stacked["labels"],
+        stacked["obj_ids"],
+        extra,
+        heatmap_sigma_ratio=heatmap_sigma_ratio,
+        label_threshold=label_threshold,
+        source_h5=source_h5,
+        src_meta=extra_meta,
+        overwrite=True,
+    )
+
+
 def write_qc_summary(path: str, samples: list[ObjectSample]) -> None:
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     fields = [
@@ -922,6 +974,32 @@ def main() -> None:
     parser.add_argument("--train-ratio", type=float, default=0.8)
     parser.add_argument("--split-seed", type=int, default=42)
     parser.add_argument(
+        "--write-split",
+        action="store_true",
+        help="Also write affordance_train/val.h5 (+ soft); default is affordance_all*.h5 only",
+    )
+    parser.add_argument(
+        "--heatmap-sigma-ratio",
+        type=float,
+        default=0.03,
+        help="Gaussian σ ratio for soft labels (when soft export enabled)",
+    )
+    parser.add_argument(
+        "--no-soft",
+        action="store_true",
+        help="Skip soft heatmap HDF5 (binary only)",
+    )
+    parser.add_argument(
+        "--export-soft-only",
+        action="store_true",
+        help="Only export *_soft.h5 from existing affordance_*.h5 (no merged prepare)",
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Replace existing HDF5 when writing (export-soft-only or prepare)",
+    )
+    parser.add_argument(
         "--with-hp",
         action="store_true",
         default=True,
@@ -945,8 +1023,17 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    merged_dir = os.path.abspath(args.merged_dir)
     outdir = os.path.abspath(args.outdir)
+    if args.export_soft_only:
+        export_soft_dataset_dir(
+            outdir,
+            heatmap_sigma_ratio=args.heatmap_sigma_ratio,
+            label_threshold=0.5,
+            overwrite=args.overwrite,
+        )
+        return
+
+    merged_dir = os.path.abspath(args.merged_dir)
     qc_dir = os.path.join(outdir, "qc")
     vis_dir = os.path.join(qc_dir, "vis")
     os.makedirs(outdir, exist_ok=True)
@@ -1008,6 +1095,7 @@ def main() -> None:
         json.dump({"train": train_ids, "val": val_ids, "seed": args.split_seed}, f, indent=2)
 
     by_id = {s.obj_id: s for s in samples}
+    all_samples = sorted(samples, key=lambda s: s.obj_id)
     train_samples = [by_id[o] for o in train_ids if o in by_id]
     val_samples = [by_id[o] for o in val_ids if o in by_id]
 
@@ -1027,28 +1115,96 @@ def main() -> None:
         "total_method_a": int(sum(s.n_method_a for s in samples)),
     }
 
+    all_bin = os.path.join(outdir, "affordance_all.h5")
+    all_soft = os.path.join(outdir, "affordance_all_soft.h5")
     write_affordance_h5(
-        os.path.join(outdir, "affordance_train.h5"),
-        train_samples,
+        all_bin,
+        all_samples,
         num_points=args.num_points,
         contact_radius=args.contact_radius,
         extra_meta=meta,
     )
-    write_affordance_h5(
-        os.path.join(outdir, "affordance_val.h5"),
-        val_samples,
-        num_points=args.num_points,
-        contact_radius=args.contact_radius,
-        extra_meta=meta,
-    )
+    print(f"   {all_bin}  ({len(all_samples)} objects)")
+
+    soft_exports: list[dict] = []
+    if not args.no_soft:
+        soft_exports.append(
+            write_soft_h5_from_samples(
+                all_soft,
+                all_samples,
+                heatmap_sigma_ratio=args.heatmap_sigma_ratio,
+                label_threshold=0.5,
+                extra_meta=meta,
+                source_h5=all_bin,
+            )
+        )
+        print(f"   {all_soft}")
+
+    if args.write_split:
+        train_bin = os.path.join(outdir, "affordance_train.h5")
+        val_bin = os.path.join(outdir, "affordance_val.h5")
+        write_affordance_h5(
+            train_bin,
+            train_samples,
+            num_points=args.num_points,
+            contact_radius=args.contact_radius,
+            extra_meta=meta,
+        )
+        write_affordance_h5(
+            val_bin,
+            val_samples,
+            num_points=args.num_points,
+            contact_radius=args.contact_radius,
+            extra_meta=meta,
+        )
+        print(f"   {train_bin}  ({len(train_samples)} objects)")
+        print(f"   {val_bin}  ({len(val_samples)} objects)")
+        if not args.no_soft:
+            soft_exports.append(
+                write_soft_h5_from_samples(
+                    os.path.join(outdir, "affordance_train_soft.h5"),
+                    train_samples,
+                    heatmap_sigma_ratio=args.heatmap_sigma_ratio,
+                    label_threshold=0.5,
+                    extra_meta=meta,
+                    source_h5=train_bin,
+                )
+            )
+            soft_exports.append(
+                write_soft_h5_from_samples(
+                    os.path.join(outdir, "affordance_val_soft.h5"),
+                    val_samples,
+                    heatmap_sigma_ratio=args.heatmap_sigma_ratio,
+                    label_threshold=0.5,
+                    extra_meta=meta,
+                    source_h5=val_bin,
+                )
+            )
+            print(f"   {outdir}/affordance_train_soft.h5")
+            print(f"   {outdir}/affordance_val_soft.h5")
 
     info = {
         **meta,
         "train_objects": len(train_samples),
         "val_objects": len(val_samples),
+        "all_objects": len(all_samples),
         "num_points": args.num_points,
         "contact_radius": args.contact_radius,
         "train_ratio": args.train_ratio,
+        "write_split": bool(args.write_split),
+        "heatmap_sigma_ratio": args.heatmap_sigma_ratio,
+        "with_soft": not args.no_soft,
+        "outputs": {
+            "affordance_all_h5": all_bin,
+            "affordance_all_soft_h5": all_soft if not args.no_soft else None,
+            "affordance_train_h5": os.path.join(outdir, "affordance_train.h5")
+            if args.write_split
+            else None,
+            "affordance_val_h5": os.path.join(outdir, "affordance_val.h5")
+            if args.write_split
+            else None,
+        },
+        "soft_exports": soft_exports,
         "avg_positive_ratio": float(np.mean([s.positive_ratio for s in samples])),
         "generation_time_seconds": round(time.time() - t0, 1),
         "skipped_count": len(skipped),
@@ -1060,7 +1216,8 @@ def main() -> None:
     print(f"\n✅ Done in {info['generation_time_seconds']}s")
     print(f"   objects: {len(samples)}  train={len(train_samples)}  val={len(val_samples)}")
     print(f"   methods C/B/A totals: {meta['total_method_c']}/{meta['total_method_b']}/{meta['total_method_a']}")
-    print(f"   {outdir}/affordance_train.h5")
+    if not args.write_split:
+        print("   (train/val HDF5 skipped; use --write-split for 4 extra split files)")
     if skipped:
         print(f"   skipped: {len(skipped)}")
 
