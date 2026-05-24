@@ -574,7 +574,7 @@ def process_one_object(
         return path, None
 
     open(skip_path, "w").write(
-        f"SKIP: {rgs.MAX_BATCHES} sampler batches exhausted, 0 candidates >= {score_threshold}\n"
+        f"SKIP: {rgs.max_sampler_batches(target_n)} sampler batches exhausted, 0 candidates >= {score_threshold}\n"
     )
     print(f"  ⬛ → {obj_id}.skip (难抓物体，已标记)")
     return None, "no_candidates"

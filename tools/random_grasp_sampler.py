@@ -64,7 +64,11 @@ N_POINTS_PER_BATCH  = 20     # 每批采样点数
 N_APPROACH_PER_PT   = 6      # 每个内部点随机采样的 approach 方向数
 TARGET_HIGH_QUALITY = 50     # 目标高质量候选数
 SCORE_THRESHOLD     = 70.0   # 高质量门槛 (R3 提高到 70)
-MAX_BATCHES         = 40     # 最大迭代批次（无「N 批无高质量即放弃」早停）
+
+
+def max_sampler_batches(target_n: int) -> int:
+    """迭代采样 batch 上限 = 2× target（至少 1 batch）。"""
+    return max(int(target_n) * 2, 1)
 REQUIRE_HP_CONTACT_DEFAULT = True   # 至少一个接触点在 human_prior 区域
 HP_CONTACT_LABEL_THRESH = 0.3        # 与 sample_points 高 prior 阈值一致
 HP_CONTACT_MAX_DIST_M = 0.015        # 接触点到 prior 点云最近邻 ≤ 15mm
@@ -923,7 +927,8 @@ def generate_candidates_iterative(
     
     m_contains = mesh_rc if mesh_rc is not None else mesh
     name_prefix = 'hp_pair' if structured else 'raycast'
-    for batch in range(MAX_BATCHES):
+    max_batches = max_sampler_batches(target_n)
+    for batch in range(max_batches):
         if structured:
             new_cands = generate_structured_one_batch(
                 mesh, N_POINTS_PER_BATCH, z_min, z_max, mesh_rc=mesh_rc,
@@ -1243,7 +1248,7 @@ def process_one_object(
         return path, None
 
     open(skip_path, 'w').write(
-        f'SKIP: {MAX_BATCHES} sampler batches exhausted, 0 candidates >= {score_threshold}\n'
+        f'SKIP: {max_sampler_batches(target_n)} sampler batches exhausted, 0 candidates >= {score_threshold}\n'
     )
     print(f'  ⬛ → {obj_id}.skip (难抓物体，已标记)')
     return None, 'no_candidates'
