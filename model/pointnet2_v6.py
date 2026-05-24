@@ -28,6 +28,16 @@ def square_distance(src, dst):
     return torch.sum((src.unsqueeze(2) - dst.unsqueeze(1)) ** 2, dim=-1)
 
 
+def _dynamo_disable(fn):
+    """Skip torch.compile for ops with Python loops / randint (FPS)."""
+    try:
+        import torch._dynamo as dynamo
+        return dynamo.disable(fn)
+    except Exception:
+        return fn
+
+
+@_dynamo_disable
 def farthest_point_sample(xyz, npoint):
     """Farthest point sampling. xyz: (B,N,3) → indices: (B,npoint)"""
     B, N, _ = xyz.shape

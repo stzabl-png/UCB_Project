@@ -18,7 +18,26 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
-from torch.amp import autocast, GradScaler
+try:
+    from torch.amp import autocast, GradScaler  # PyTorch >= 2.4
+    _AMP_DEVICE = "cuda"
+except ImportError:
+    from torch.cuda.amp import autocast, GradScaler  # PyTorch 2.1–2.3
+    _AMP_DEVICE = None
+
+
+def _autocast_cuda():
+    if _AMP_DEVICE is not None:
+        return autocast(_AMP_DEVICE, dtype=torch.float16)
+    return autocast(dtype=torch.float16)
+
+
+def _grad_scaler():
+    if _AMP_DEVICE is not None:
+        return GradScaler(_AMP_DEVICE)
+    return GradScaler()
+
+
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -166,7 +185,7 @@ def train_epoch(model, loader, optimizer, criterion, scaler, device):
 
         optimizer.zero_grad(set_to_none=True)
 
-        with autocast('cuda', dtype=torch.float16):
+        with _autocast_cuda():
             pred = model(xyz, features)
             loss = criterion(pred, target)
 
@@ -198,7 +217,7 @@ def eval_epoch(model, loader, criterion, device):
         features = features.to(device, non_blocking=True)
         target = target.to(device, non_blocking=True)
 
-        with autocast('cuda', dtype=torch.float16):
+        with _autocast_cuda():
             pred = model(xyz, features)
             loss = criterion(pred, target)
 
@@ -228,7 +247,7 @@ def save_vis(model, dataset, device, path, epoch, history=None):
         pts = pts_t.numpy()
         gt = lbl_t.numpy()
 
-        with torch.no_grad(), autocast('cuda', dtype=torch.float16):
+        with torch.no_grad(), _autocast_cuda():
             pred = model(
                 pts_t.unsqueeze(0).to(device),
                 feat_t.unsqueeze(0).to(device),
@@ -285,7 +304,17 @@ def main():
                     help="Loss weight for foreground (soft_label >= 0.05) regions")
     p.add_argument("--save_dir", type=str, default=None)
     p.add_argument("--dataset_dir", type=str, default=None)
-    p.add_argument("--no_compile", action="store_true", help="Disable torch.compile")
+    p.add_argument(
+        "--compile",
+        action="store_true",
+        help="Enable torch.compile (experimental; PyTorch 2.1 + FPS often fails)",
+    )
+    p.add_argument(
+        "--num_workers",
+        type=int,
+        default=0,
+        help="DataLoader workers (0 avoids CUDA+fork deadlock; 4+ faster IO)",
+    )
     args = p.parse_args()
 
     # Paths
@@ -316,7 +345,8 @@ def main():
     print(f"  Batch size:  {args.batch_size}")
     print(f"  LR:          {args.lr} + {args.warmup_epochs}ep warmup")
     print(f"  AMP:         ✅ float16")
-    print(f"  Compile:     {'❌ disabled' if args.no_compile else '✅ torch.compile'}")
+    print(f"  Compile:     {'✅ torch.compile' if args.compile else '❌ off (default)'}")
+    print(f"  DataLoader:  num_workers={args.num_workers}")
     print(f"  Dataset:     {args.dataset_dir}")
     print(f"  Checkpoints: {args.save_dir}")
     sys.stdout.flush()
@@ -391,15 +421,19 @@ def main():
     print(f"    Val:   {len(val_ds)} samples, {len(val_obj_ids)} objects")
     sys.stdout.flush()
 
+    loader_kw = dict(
+        batch_size=args.batch_size,
+        pin_memory=torch.cuda.is_available(),
+    )
+    if args.num_workers > 0:
+        loader_kw["num_workers"] = args.num_workers
+        loader_kw["persistent_workers"] = True
+
     train_loader = DataLoader(
-        train_ds, batch_size=args.batch_size, shuffle=True,
-        num_workers=8, pin_memory=True, drop_last=True,
-        persistent_workers=True,
+        train_ds, shuffle=True, drop_last=True, **loader_kw,
     )
     val_loader = DataLoader(
-        val_ds, batch_size=args.batch_size, shuffle=False,
-        num_workers=8, pin_memory=True,
-        persistent_workers=True,
+        val_ds, shuffle=False, **loader_kw,
     )
 
     # ============================================================
@@ -409,12 +443,14 @@ def main():
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"\n  Model params: {n_params:,}")
 
-    if not args.no_compile and hasattr(torch, 'compile'):
+    if args.compile and hasattr(torch, "compile"):
         try:
             model = torch.compile(model)
             print(f"  ✅ torch.compile enabled")
         except Exception as e:
             print(f"  ⚠️ torch.compile failed: {e}")
+    elif args.compile:
+        print(f"  ⚠️ torch.compile not available in this PyTorch build")
 
     criterion = WeightedL1HeatmapLoss(bg_weight=1.0, fg_weight=args.fg_weight, threshold=0.05)
     print(f"  Loss: WeightedL1 (bg=1.0, fg={args.fg_weight}, thresh=0.05)")
@@ -436,7 +472,7 @@ def main():
         milestones=[args.warmup_epochs],
     )
 
-    scaler = GradScaler('cuda')
+    scaler = _grad_scaler()
 
     print(f"\n{'='*90}")
     print(f"{'Ep':>4} | {'Loss':>8} | {'V.Loss':>8} | "
