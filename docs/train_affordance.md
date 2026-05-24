@@ -13,6 +13,19 @@ Legacy `model/affordance/*` training has been removed; use v6 only.
 
 Soft labels are written during prepare; refresh only with `prepare_affordance_executed.py --export-soft-only`.
 
+### Filter train/val by trusted pose count
+
+From `affordance_all.h5` / `affordance_all_soft.h5` (unchanged), rewrite split files by merged trusted-grasp count:
+
+```bash
+python3 tools/filter_affordance_split_by_pose_count.py \
+  --dataset-dir output/affordance_no_rot_executed \
+  --min-trusted 10 \
+  --backup
+```
+
+Default `--split-mode fixed-val` keeps original val membership (only drops objects below threshold). Use `--output-dir` to write into a separate experiment folder without touching `affordance_all*`.
+
 ## Train v6
 
 ```bash
