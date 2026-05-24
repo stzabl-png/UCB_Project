@@ -15,6 +15,14 @@ merged/, state.json, summary.csv。
         --resume --max-rounds 5 \\
         --sim-gpu-ids 0,1 --sim-per-gpu 5 --headless
 
+    # 每轮 slot 按 pool 内物体等概率抽取（默认按 success 加权）:
+    python3 scripts/batch_sim_candidates_pool.py \\
+        --equal-object-prob --max-rounds 1
+
+    # round≥3 累计成功 ≥ 80 的物体不再被抽中:
+    python3 scripts/batch_sim_candidates_pool.py \\
+        --max-success-per-object 80 --max-rounds 1
+
     # 小规模 smoke:
     python3 scripts/batch_sim_candidates_pool.py \\
         --slots-per-round 2 --sim-gpu-ids 0 --sim-per-gpu 1 --max-rounds 1
@@ -89,6 +97,8 @@ class PoolSimConfig:
     merge_deduplicate: bool
     slots_per_round: int
     plan_seed: Optional[int]
+    equal_object_prob: bool
+    max_success_per_object: Optional[int]
     pool_target: int
     auto_refill: bool
     score_threshold: float
@@ -813,6 +823,8 @@ def run_one_round(
             round_idx=round_idx,
             slots_per_round=cfg.slots_per_round,
             dataset_by_obj=dataset_by_obj,
+            equal_object_prob=cfg.equal_object_prob,
+            max_success_per_object=cfg.max_success_per_object,
             rng=rng,
         )
         save_task_queue(paths["task_queue"], queue)
@@ -825,7 +837,8 @@ def run_one_round(
             copy_slots_to_round_hdf5(cfg.pool_dir, paths["cand_round_dir"], slots)
         print(
             f"  Planned {queue['slots_planned']}/{cfg.slots_per_round} slots  "
-            f"({len(queue['tasks'])} sim tasks)  exhausted={queue['pool_exhausted']}",
+            f"({len(queue['tasks'])} sim tasks)  exhausted={queue['pool_exhausted']}  "
+            f"sampling={queue.get('object_sampling', 'weighted')}",
         )
     else:
         sync_queue_and_registry_from_chunks(
@@ -966,6 +979,18 @@ def main():
     parser.add_argument("--headless", action="store_true", default=True)
     parser.add_argument("--object-scale", type=float, default=1.0)
     parser.add_argument("--plan-seed", type=int, default=None)
+    parser.add_argument(
+        "--equal-object-prob",
+        action="store_true",
+        help="每轮抽 slot 时 pool 内每个 eligible 物体等概率（默认按 1/(success+1) 加权）",
+    )
+    parser.add_argument(
+        "--max-success-per-object",
+        type=int,
+        default=None,
+        metavar="N",
+        help="round≥3 累计成功数 ≥ N 的物体本轮规划 prob=0（默认不限制；与 weighted/equal 均兼容）",
+    )
     parser.add_argument("--pool-target", type=int, default=50, help="auto-refill 时每物体 target")
     parser.add_argument("--score-threshold", type=float, default=70.0)
     parser.add_argument("--no-auto-refill", action="store_true")
@@ -1008,6 +1033,10 @@ def main():
         print(f"❌ merged dir not found: {merged_dir}")
         sys.exit(1)
 
+    if args.max_success_per_object is not None and args.max_success_per_object < 0:
+        print("❌ --max-success-per-object 须 >= 0")
+        sys.exit(1)
+
     cfg = PoolSimConfig(
         outdir=outdir,
         pool_dir=pool_dir,
@@ -1022,6 +1051,8 @@ def main():
         merge_deduplicate=args.merge_deduplicate,
         slots_per_round=args.slots_per_round,
         plan_seed=args.plan_seed,
+        equal_object_prob=args.equal_object_prob,
+        max_success_per_object=args.max_success_per_object,
         pool_target=args.pool_target,
         auto_refill=not args.no_auto_refill,
         score_threshold=args.score_threshold,
@@ -1036,6 +1067,14 @@ def main():
     print(f"Pool: {pool_dir}")
     print(f"Merged: {merged_dir}")
     print(f"Max rounds (sync_ok gate): {args.max_rounds}  state.round: {state.get('round', 0)}")
+    print(
+        f"Object sampling: {'equal' if args.equal_object_prob else 'weighted (1/(success+1))'}"
+        + (
+            f"  max_success_per_object={args.max_success_per_object}"
+            if args.max_success_per_object is not None
+            else ""
+        ),
+    )
     print(
         f"Sim: {len(sim_gpu_ids)} GPU × {args.sim_per_gpu}/GPU = "
         f"{len(sim_gpu_ids) * args.sim_per_gpu} workers",

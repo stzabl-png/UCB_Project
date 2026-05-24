@@ -309,6 +309,34 @@ def normalize_weights(obj_ids: list[str], success: dict[str, int]) -> dict[str, 
     return {oid: w / total for oid, w in weights.items()}
 
 
+def normalize_equal_weights(obj_ids: list[str]) -> dict[str, float]:
+    if not obj_ids:
+        return {}
+    p = 1.0 / len(obj_ids)
+    return {oid: p for oid in obj_ids}
+
+
+def object_selection_probs(
+    obj_ids: list[str],
+    success: dict[str, int],
+    *,
+    equal_object_prob: bool = False,
+    max_success_per_object: Optional[int] = None,
+) -> dict[str, float]:
+    if equal_object_prob:
+        probs = normalize_equal_weights(obj_ids)
+    else:
+        probs = normalize_weights(obj_ids, success)
+    if max_success_per_object is not None:
+        for oid in obj_ids:
+            if success.get(oid, 0) >= max_success_per_object:
+                probs[oid] = 0.0
+        total = sum(probs.values())
+        if total > 0:
+            probs = {oid: w / total for oid, w in probs.items()}
+    return probs
+
+
 def sample_object(
     rng: np.random.Generator,
     obj_ids: list[str],
@@ -316,8 +344,11 @@ def sample_object(
 ) -> Optional[str]:
     if not obj_ids:
         return None
-    p = np.array([probs[oid] for oid in obj_ids], dtype=np.float64)
-    p /= p.sum()
+    p = np.array([probs.get(oid, 0.0) for oid in obj_ids], dtype=np.float64)
+    total = float(p.sum())
+    if total <= 0:
+        return None
+    p /= total
     idx = int(rng.choice(len(obj_ids), p=p))
     return obj_ids[idx]
 
@@ -331,12 +362,19 @@ def plan_round_slots(
     round_idx: int,
     slots_per_round: int,
     min_success_round: int = 3,
+    equal_object_prob: bool = False,
+    max_success_per_object: Optional[int] = None,
     rng: Optional[np.random.Generator] = None,
 ) -> tuple[list[dict], bool]:
     """
     Plan up to slots_per_round unique (obj, candidate) assignments.
     Returns (slot_list, exhausted) where exhausted=True if stopped early
     because no eligible candidate remained.
+
+    Object sampling: by default weight ~ 1/(success+1); with equal_object_prob
+    each eligible pool object has the same draw probability. With
+    max_success_per_object, objects at/above that success count get prob 0
+    (success from scan_success_round_ge3).
     """
     rng = rng or np.random.default_rng()
     success = scan_success_round_ge3(outdir, min_round=min_success_round)
@@ -344,7 +382,12 @@ def plan_round_slots(
     if not eligible:
         return [], True
 
-    probs = normalize_weights(eligible, success)
+    probs = object_selection_probs(
+        eligible,
+        success,
+        equal_object_prob=equal_object_prob,
+        max_success_per_object=max_success_per_object,
+    )
     used_this_plan: set[tuple[str, str]] = set()
     slots: list[dict] = []
     exhausted = False
@@ -419,6 +462,8 @@ def build_task_queue(
     round_idx: int,
     slots_per_round: int,
     dataset_by_obj: dict[str, str],
+    equal_object_prob: bool = False,
+    max_success_per_object: Optional[int] = None,
     rng: Optional[np.random.Generator] = None,
 ) -> dict:
     slots, exhausted = plan_round_slots(
@@ -428,18 +473,24 @@ def build_task_queue(
         registry=registry,
         round_idx=round_idx,
         slots_per_round=slots_per_round,
+        equal_object_prob=equal_object_prob,
+        max_success_per_object=max_success_per_object,
         rng=rng,
     )
     tasks = expand_slots_to_tasks(slots, round_idx, dataset_by_obj)
-    return {
+    queue: dict = {
         "version": 1,
         "round_idx": round_idx,
         "slots_planned": len(slots),
         "slots_target": slots_per_round,
         "pool_exhausted": exhausted,
+        "object_sampling": "equal" if equal_object_prob else "weighted",
         "tasks": tasks,
         "completed_task_ids": [],
     }
+    if max_success_per_object is not None:
+        queue["max_success_per_object"] = max_success_per_object
+    return queue
 
 
 def load_task_queue(path: str) -> Optional[dict]:
