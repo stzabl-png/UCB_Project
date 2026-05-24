@@ -647,7 +647,9 @@ python3 scripts/batch_sim_candidates_pool.py \
 
 **轮次：** `state.json` 里 `"round": N` → 下一批写 `round_{N:04d}`；`--resume --max-rounds 10` 跑 `round_N` … `round_{N+9}`。某轮 **未跑完**（worker crash 等）时 `state.round` **保持** 在该轮，需 **`--resume`** 补 pending task（不会自动进下一轮补同一 chunk）。
 
-**Crash 与 registry：** worker **0 results**（进程崩溃）的 task **不会**写入 `completed_task_ids`，candidate **不会**标 `simulated`；`--resume` 可补跑。若 4 yaw 都 attempted 但全失败，仍会标 `simulated`（不再抽该 candidate）。
+**Crash 与 registry：** worker **0 results**（进程崩溃、未写出 `chunk_*_results.json`）的 task **不会**写入 `completed_task_ids`，candidate **不会**标 `simulated`；`--resume` 可补跑。若 4 yaw 都 attempted 但全失败，仍会标 `simulated`（不再抽该 candidate）。
+
+**Mid-round 中断：** sim 启动前、**运行中每 ~5s**、每个 worker 结束、以及 Ctrl+C 时，batch 会 ingest `sim_logs/round_R/chunks/chunk_*_results.json` 到 `completed_task_ids` 与 `sim_pool_registry.json`（worker 端每 task 也会增量写 results）。
 
 ### 5.5 Smoke test（隔离 outdir）
 
