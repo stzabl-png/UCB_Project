@@ -6,7 +6,7 @@
 
 | 路线 | 脚本 | 说明 |
 |------|------|------|
-| **Pool（当前推荐）** | `batch_gen_candidates_pool.py` + `batch_sim_candidates_pool.py` | 先建 candidate 池，再按 merged 成功数加权 sim；长驻 Isaac worker、同进程换物体 |
+| **Pool（当前推荐）** | `batch_gen_candidates_pool.py` + `batch_sim_candidates_pool.py` | 先建 candidate 池，再 sim（默认 weighted 抽样；可选 equal / 成功上限）；长驻 Isaac worker、chunk 续跑 |
 | **Legacy** | `batch_grasp_collect.py` | 每轮对所有物体重新 sampler + 每物体一个 `run_grasp_sim` |
 
 Pool 路线详见 **第 5 节**；Legacy 见 **第 4 节**。
@@ -557,8 +557,10 @@ batch_gen_candidates_pool.py（候选池生成）
 
 batch_sim_candidates_pool.py（候选池 sim batch）
     → 读 pool + merged + sim_pool_registry.json
-    → 每轮加权抽 slots（默认 500 个 candidate × 4 yaw = 2000 sim task）
-    → 长驻 Isaac worker（sim/run_grasp_sim_pool.py），同进程内换物体
+    → 每轮规划 slots（默认 weighted；可选 equal / max-success cap）
+    → 展开为 candidate × 4 yaw task；early-stop 可减少实际 sim 次数
+    → 长驻 Isaac worker（sim/run_grasp_sim_pool.py），chunk 增量写 results
+    → sync_queue_and_registry_from_chunks：chunk 为唯一真相
     → candidates/round_R/、robot_gt/round_R/、自动 merge
     → pool 耗尽时自动再调 batch_gen_candidates_pool.py 补货（auto-refill）
 ```
@@ -566,14 +568,16 @@ batch_sim_candidates_pool.py（候选池 sim batch）
 | 脚本 | 作用 | Sim |
 |------|------|-----|
 | **`batch_gen_candidates_pool.py`** | 为 merged 成功数 `< threshold` 的物体批量跑 `random_grasp_sampler` | 无 |
-| **`batch_sim_candidates_pool.py`** | 从 pool 加权抽 candidate，固定 4 个 Z-yaw（0°/90°/180°/270°）sim | `run_grasp_sim_pool.py` |
+| **`batch_sim_candidates_pool.py`** | 从 pool 抽 candidate 并 sim（默认 weighted；4 固定 Z-yaw） | `run_grasp_sim_pool.py` |
 
 **与 Legacy 的主要区别：**
 
-- 不是每轮给**全部**物体重新 gen 20 个 candidate，而是从 **pool** 里按物体 merged 成功数 **加权**抽 slot。
-- 每个 `(obj, candidate)` 在 registry 里 **4 个 yaw 都 attempted** 后才标 `simulated`，不再重复抽。
-- Sim 侧 **8 个（示例）长驻 worker**，chunk 内顺序处理多物体，**换物体不重建 World/Franka**。
+- 不是每轮给**全部**物体重新 gen 20 个 candidate，而是从 **pool** 里按策略抽 slot（默认 merged 成功 **加权** `1/(success+1)`；`--equal-object-prob` 等概率；`--max-success-per-object` 封顶）。
+- Registry **resolved**：任一 yaw **成功**（early-stop），或 4 yaw 都 attempted 且全失败（标 `simulated`，不再重抽）。
+- **Early-stop（默认）：** 同一 candidate 任一 yaw 成功后，其余 yaw 写 synthetic `skipped` chunk 行，不进 Isaac。禁用：`--no-early-stop-yaw-on-success`。
+- Sim 侧 **长驻 worker**，chunk 内顺序多物体；**换物体不重建 World/Franka**；chunk 异常退出 **最多自动重试 2 次**。
 - 同一张 GPU 上多个 worker **错开 10s** 启动（减轻 Isaac kvdb/CUDA 竞态）。
+- **续跑：** `sim_logs/round_R/chunks/chunk_*_results.json` 为真相；`state.round` 仅 **sync_ok** 后 +1。
 
 ### 5.2 输出路径（在 Legacy 基础上新增）
 
@@ -581,9 +585,10 @@ batch_sim_candidates_pool.py（候选池 sim batch）
 |------|------|
 | `candidates/pool/{OBJ}_grasp.hdf5` | `batch_gen_candidates_pool.py` 生成的 candidate 池 |
 | `candidates/pool/gen_pool_manifest.json` | 候选池生成进度 manifest |
-| `sim_pool_registry.json` | 哪些 `(obj, candidate_key)` 已 sim、哪些 yaw 完成 |
-| `round_{R}_task_queue.json` | 该轮 task 队列与 `completed_task_ids` |
-| `sim_logs/round_{R}/chunks/chunk_*` | 候选池 sim batch worker chunk 与 `*_results.json` |
+| `sim_pool_registry.json` | `(obj, candidate_key)` 的 yaw 进度 / `success_yaws` / resolved |
+| `round_{R}_task_queue.json` | task 队列、`completed_task_ids`、`object_sampling` |
+| `sim_logs/round_{R}/chunks/chunk_*` | worker chunk、`chunk_*_results.json`、`chunk_*_progress.json` |
+| `sim_logs/round_{R}/chunks/synthesized_skipped_results.json` | early-stop 合成的 skipped 行（sync 时合并） |
 | `sim_logs/round_{R}/chunk_*_gpu*.log` | 各 worker Isaac 日志 |
 
 `candidates/round_R/`、`robot_gt/round_R/`、`merged/`、`state.json`、`summary.csv` 与 Legacy **同一约定**。
@@ -634,22 +639,54 @@ python3 scripts/batch_sim_candidates_pool.py \
   --headless
 ```
 
+**物体抽样（与 hard 文档一致）：**
+
+```bash
+# 默认：低成功物体更常被抽到
+python3 scripts/batch_sim_candidates_pool.py --resume --max-rounds 10 ...
+
+# 物体等概率
+python3 scripts/batch_sim_candidates_pool.py --equal-object-prob --max-rounds 1
+
+# round≥3 累计成功 ≥80 的物体本轮不再参与规划
+python3 scripts/batch_sim_candidates_pool.py --max-success-per-object 80 --max-rounds 1
+```
+
 | 参数 | 默认 | 含义 |
 |------|------|------|
-| `--slots-per-round` | 500 | 每轮 candidate **槽位**数（×4 yaw = sim task 数） |
+| `--outdir` | `output/grasp_collect_no_rot` | 实验根目录 |
+| `--pool-dir` | `{outdir}/candidates/pool` | candidate 池 |
+| `--merged-dir` | `{outdir}/merged` | 加权 / cap 用 merged |
+| `--slots-per-round` | 500 | 每轮 candidate **槽位**数（×4 yaw = 规划 task 上限） |
+| `--max-rounds` | 1 | 本次最多跑几轮 |
 | `--pool-target` | 50 | auto-refill 时 `batch_gen_candidates_pool.py` 的 `--target` |
+| `--score-threshold` | 70 | auto-refill sampler 分数门槛 |
 | `--sim-gpu-ids` | `0` | 物理 GPU 列表 |
 | `--sim-per-gpu` | 1 | 每张 GPU 并行 Isaac worker 数 |
-| `--resume` | 关 | 读 `state.json` 的 `round`；续跑未完成 `task_queue` |
+| `--sim-timeout` | 7200 | 单 worker chunk 超时（秒） |
+| `--resume` | 关 | 读 `state.json`；从 chunk 重建 queue 并补 pending |
 | `--no-auto-refill` | 关 | 关闭 pool 空时自动候选池生成 |
+| `--equal-object-prob` | 关 | slot 规划时物体等概率 |
+| `--max-success-per-object` | 无 | round≥3 成功 ≥ N 的物体 prob=0 |
+| `--no-early-stop-yaw-on-success` | 关 | 禁用 early-stop |
+| `--plan-seed` | 无 | slot 规划可复现 |
 
-上例：**2 × 4 = 8** 个 Isaac 进程；每轮 **500×4 = 2000** sim task，约 **250 task/worker**（chunk 内多物体、会 **swap 物体**）。
+上例：**2 × 4 = 8** 个 Isaac 进程；每轮规划 **500×4 = 2000** task（early-stop 下实际 sim 可能更少）。
 
-**轮次：** `state.json` 里 `"round": N` → 下一批写 `round_{N:04d}`；`--resume --max-rounds 10` 跑 `round_N` … `round_{N+9}`。某轮 **未跑完**（worker crash 等）时 `state.round` **保持** 在该轮，需 **`--resume`** 补 pending task（不会自动进下一轮补同一 chunk）。
+**轮次：** `state.json` 里 `"round": N` → 下一批写 `round_{N:04d}`；`--resume --max-rounds 10` 跑 `round_N` … `round_{N+9}`。`state.round` 仅在轮末 **`sync_queue_and_registry_from_chunks` 返回 sync_ok** 后 +1；不要求 2000/2000 全跑满。
 
-**Crash 与 registry：** worker **0 results**（进程崩溃、未写出 `chunk_*_results.json`）的 task **不会**写入 `completed_task_ids`，candidate **不会**标 `simulated`；`--resume` 可补跑。若 4 yaw 都 attempted 但全失败，仍会标 `simulated`（不再抽该 candidate）。
+**Crash / 续跑 / registry：**
 
-**Mid-round 中断：** sim 启动前、**运行中每 ~5s**、每个 worker 结束、以及 Ctrl+C 时，batch 会 ingest `sim_logs/round_R/chunks/chunk_*_results.json` 到 `completed_task_ids` 与 `sim_pool_registry.json`（worker 端每 task 也会增量写 results）。
+| 情况 | 行为 |
+|------|------|
+| worker **0 results**（未写出 chunk results） | task 不在 `completed_task_ids`；`--resume` 补跑 |
+| worker chunk 崩溃 | batch **自动重试 ≤2 次**（间隔 15s），重试前 sync chunk |
+| mid-round 中断 | 启动前 / ~5s / worker 结束 / Ctrl+C / 轮末：从 **chunk 扫盘** sync queue+registry |
+| 有 chunk 行的 task | **不会**重复 sim |
+| 4 yaw 全失败 | 标 `simulated`，下轮不再抽 |
+| 任一 yaw 成功 | early-stop + `success_yaws`；candidate **resolved** |
+
+Worker 每 task 增量写 `chunk_*_results.json` 与 `chunk_*_progress.json`。
 
 ### 5.5 Smoke test（隔离 outdir）
 

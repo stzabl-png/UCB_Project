@@ -6,12 +6,12 @@
 
 | 组件 | 脚本 | 作用 |
 |------|------|------|
-| **候选池 sim batch** | `batch_sim_candidates_pool.py` | 从 pool 按 merged 成功数 **加权**抽 candidate，固定 4 个 Z-yaw sim，写 `robot_gt/round_R/` 并 merge |
+| **候选池 sim batch** | `batch_sim_candidates_pool.py` | 从 pool 抽 candidate（默认按 merged 成功 **加权**；可选等概率 / 成功上限），4 固定 Z-yaw sim，写 `robot_gt/round_R/` 并 merge |
 | **候选池生成** | `batch_gen_candidates_pool.py` | CPU 上跑 `random_grasp_sampler`，维护 `candidates/pool/`；pool 空时 sim batch **自动 refill**（可关） |
 
 典型工作目录：`output/grasp_collect_no_rot/`（`state.json`、`merged/`、`candidates/pool/`、`robot_gt/round_*`）。
 
-HDF5 schema、crash/resume、registry 语义见 [`grasp_collect_pipeline.md`](grasp_collect_pipeline.md) 第 5 节。
+HDF5 schema、目录约定见 [`grasp_collect_pipeline.md`](grasp_collect_pipeline.md) 第 5 节；本文侧重低成功补采与 HF 部署。
 
 ---
 
@@ -291,20 +291,49 @@ python3 scripts/batch_sim_candidates_pool.py \
 
 > 默认 `--pool-dir` 为 `{outdir}/candidates/pool`。从 HF 拉下 **§2.3 新 pool** 后直接用即可，**无需**改 pool 路径。
 
-每轮默认 **500 candidate 槽位 × 4 yaw = 2000** sim task；低成功物体因加权会被更频繁抽到。
+每轮默认 **500 candidate 槽位 × 4 yaw = 2000** sim task（early-stop 开启时实际 Isaac 次数可能更少）。
 
-**Early-stop（默认开启）：** 同一 `(obj, candidate)` **任一 yaw 抓取成功** 后，其余未试 yaw **不再进 Isaac sim**，在 chunk 中写 `skipped: true` 行；registry 将该 candidate 标为 resolved，下轮规划不再抽取。禁用：`--no-early-stop-yaw-on-success`。
+**物体抽样（slot 规划，默认 weighted）：**
+
+| 模式 | 行为 |
+|------|------|
+| **weighted**（默认） | 每个 pool 内 eligible 物体按 `1/(success+1)` 加权（success 来自 round≥3 的 merged 累计） |
+| **`--equal-object-prob`** | eligible 物体 **等概率** 被抽到 |
+| **`--max-success-per-object N`** | round≥3 累计成功 ≥ N 的物体本轮 prob=0（与 weighted/equal 可叠加） |
+
+`round_{R}_task_queue.json` 会记录 `object_sampling: weighted|equal` 及可选 `max_success_per_object`。
+
+示例：
+
+```bash
+# 物体等概率（不再偏向低成功物体）
+python3 scripts/batch_sim_candidates_pool.py --equal-object-prob --max-rounds 1
+
+# round≥3 累计成功 ≥80 的物体本轮不再被抽
+python3 scripts/batch_sim_candidates_pool.py --max-success-per-object 80 --max-rounds 1
+```
+
+**Early-stop（默认开启）：** 同一 `(obj, candidate)` **任一 yaw 抓取成功** 后，其余未试 yaw **不再进 Isaac sim**，在 chunk 中写 `skipped: true` 行；registry 记 `success_yaws` 并视为 **resolved**，下轮规划不再抽取。禁用：`--no-early-stop-yaw-on-success`。
+
+**Registry resolved 条件：** 任一 yaw **成功**，或 4 yaw **都 attempted** 且全失败（仍标 `simulated`，不再重抽）。
 
 | 参数 | 默认 | 含义 |
 |------|------|------|
 | `--outdir` | `output/grasp_collect_no_rot` | 实验根目录 |
 | `--pool-dir` | `{outdir}/candidates/pool` | candidate 池 HDF5（HF 标准路径；见 §2.3 上传替换） |
+| `--merged-dir` | `{outdir}/merged` | 加权 / cap 用的 merged robot_gt |
 | `--slots-per-round` | 500 | 每轮 candidate 槽位数 |
+| `--max-rounds` | 1 | 本次最多跑几轮（每轮需 sync_ok 才 `state.round +1`） |
 | `--pool-target` | 50 | auto-refill 时每个物体的 pool `--target` |
 | `--score-threshold` | 70 | refill sampler 分数门槛 |
 | `--no-auto-refill` | 关 | pool 空时不调候选池生成 |
 | `--resume` | 关 | 读 `state.json`；续跑未完成 `task_queue` |
+| `--equal-object-prob` | 关 | slot 规划时物体等概率（默认 weighted） |
+| `--max-success-per-object` | 无 | round≥3 成功 ≥ N 的物体 prob=0 |
+| `--no-early-stop-yaw-on-success` | 关 | 禁用 early-stop（成功仍 sim 其余 yaw） |
+| `--plan-seed` | 无 | slot 规划 RNG 种子（可复现） |
 | `--sim-timeout` | 7200 | 单 worker chunk 超时（秒） |
+| `--sim-gpu-ids` / `--sim-per-gpu` | `0` / `1` | GPU 与每卡 worker 数 |
 
 建议用 `tmux` / `screen` 挂后台。
 
@@ -374,7 +403,7 @@ auto-refill 时 sim batch 用 **merged 成功数中位数（round≥3）** 作 `
 | 某轮 worker crash / Ctrl+C | `--resume` 从 **chunk results** 重建 `completed_task_ids`；只 sim **chunk 无记录** 的 task |
 | mid-round 中断 | worker 结束 / 每 ~5s / Ctrl+C / 轮末：从 **chunk 扫盘** 同步 queue+registry（chunk 为唯一真相） |
 | 进下一轮 | `state.round` 仅在 **chunk↔queue sync_ok** 后 +1；**不要求** 2000/2000 sim 跑满（pending=无 chunk 记录可保留） |
-| 新 outdir、round 从 0 | 新 `--outdir` 或 `state.json` → `{"round": 0}`；仍需 `merged/` 做加权 |
+| 新 outdir、round 从 0 | 新 `--outdir` 或 `state.json` → `{"round": 0}`；仍需 `merged/`（weighted / equal / cap 均读 merged 成功数） |
 | 换 pool / 上传新 pool 后 | **手动**清 `sim_pool_registry.json` 或删被覆盖物体的 registry 条目（§2.3）；auto-refill 仅自动清被 refill 物体（§7） |
 | pool 已 sim 过 | 保留 `sim_pool_registry.json`，否则同一 candidate 可能被重抽 |
 
@@ -389,6 +418,7 @@ auto-refill 时 sim batch 用 **merged 成功数中位数（round≥3）** 作 `
 | `cuRobo` import 失败 | 安装 cuRobo 或改 `run_grasp_sim_pool.py` 的 `sys.path` |
 | pool 空 + refill 失败 | 检查 `data_hub` 或 `--no-auto-refill` |
 | 同 GPU 多 worker OOM / crash | 降低 `--sim-per-gpu` |
+| worker chunk 异常退出 | batch 自动 **重试最多 2 次**（间隔 15s），重试前 sync chunk；仍失败则 `--resume` 补无 chunk 记录的 task |
 | worker 0 results | 该 task 不在 `chunk_*_results.json` 中 → `--resume` 会补跑；不会标 `simulated` |
 | 换 pool 后 registry 与 pose 对不上 | 删 `sim_pool_registry.json` 或按物体清 registry（§2.3） |
 | mid-round Ctrl+C 后重跑 | `completed_task_ids` 由 chunk 重建；有 chunk 行的 task **不会**重 sim |
