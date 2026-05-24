@@ -2,6 +2,15 @@
 
 从 **USD 转换** → **候选生成** → **Isaac Sim 验证** → **可视化 / 全量 batch**。
 
+**两条 batch 路线：**
+
+| 路线 | 脚本 | 说明 |
+|------|------|------|
+| **Pool（当前推荐）** | `batch_gen_candidates_pool.py` + `batch_sim_candidates_pool.py` | 先建 candidate 池，再按 merged 成功数加权 sim；长驻 Isaac worker、同进程换物体 |
+| **Legacy** | `batch_grasp_collect.py` | 每轮对所有物体重新 sampler + 每物体一个 `run_grasp_sim` |
+
+Pool 路线详见 **第 5 节**；Legacy 见 **第 4 节**。
+
 ## 输出目录约定
 
 | 目录 | 用途 |
@@ -277,7 +286,7 @@ cat output/benchmark_sim_parallel/gpu0_A01001/result_min_free_3.0gb.json | grep 
 
 ---
 
-## 4. 正式全量 batch（推荐）
+## 4. Legacy 全量 batch（`batch_grasp_collect.py`）
 
 脚本：`scripts/batch_grasp_collect.py`
 
@@ -536,7 +545,149 @@ done
 
 ---
 
-## 5. 参数速查
+## 5. Pool-based 流水线（候选池生成 + 候选池 sim batch，当前推荐）
+
+将 **候选生成** 与 **Isaac sim** 拆成两个脚本，共用 `output/grasp_collect_no_rot/` 目录结构（`candidates/round_R`、`robot_gt/round_R`、`merged/`、`state.json`、`summary.csv`），与 Legacy batch 兼容。
+
+### 5.1 流程概览
+
+```text
+batch_gen_candidates_pool.py（候选池生成）
+    → candidates/pool/{obj}_grasp.hdf5   （每物体 candidate 池，CPU sampler）
+
+batch_sim_candidates_pool.py（候选池 sim batch）
+    → 读 pool + merged + sim_pool_registry.json
+    → 每轮加权抽 slots（默认 500 个 candidate × 4 yaw = 2000 sim task）
+    → 长驻 Isaac worker（sim/run_grasp_sim_pool.py），同进程内换物体
+    → candidates/round_R/、robot_gt/round_R/、自动 merge
+    → pool 耗尽时自动再调 batch_gen_candidates_pool.py 补货（auto-refill）
+```
+
+| 脚本 | 作用 | Sim |
+|------|------|-----|
+| **`batch_gen_candidates_pool.py`** | 为 merged 成功数 `< threshold` 的物体批量跑 `random_grasp_sampler` | 无 |
+| **`batch_sim_candidates_pool.py`** | 从 pool 加权抽 candidate，固定 4 个 Z-yaw（0°/90°/180°/270°）sim | `run_grasp_sim_pool.py` |
+
+**与 Legacy 的主要区别：**
+
+- 不是每轮给**全部**物体重新 gen 20 个 candidate，而是从 **pool** 里按物体 merged 成功数 **加权**抽 slot。
+- 每个 `(obj, candidate)` 在 registry 里 **4 个 yaw 都 attempted** 后才标 `simulated`，不再重复抽。
+- Sim 侧 **8 个（示例）长驻 worker**，chunk 内顺序处理多物体，**换物体不重建 World/Franka**。
+- 同一张 GPU 上多个 worker **错开 10s** 启动（减轻 Isaac kvdb/CUDA 竞态）。
+
+### 5.2 输出路径（在 Legacy 基础上新增）
+
+| 路径 | 内容 |
+|------|------|
+| `candidates/pool/{OBJ}_grasp.hdf5` | `batch_gen_candidates_pool.py` 生成的 candidate 池 |
+| `candidates/pool/gen_pool_manifest.json` | 候选池生成进度 manifest |
+| `sim_pool_registry.json` | 哪些 `(obj, candidate_key)` 已 sim、哪些 yaw 完成 |
+| `round_{R}_task_queue.json` | 该轮 task 队列与 `completed_task_ids` |
+| `sim_logs/round_{R}/chunks/chunk_*` | 候选池 sim batch worker chunk 与 `*_results.json` |
+| `sim_logs/round_{R}/chunk_*_gpu*.log` | 各 worker Isaac 日志 |
+
+`candidates/round_R/`、`robot_gt/round_R/`、`merged/`、`state.json`、`summary.csv` 与 Legacy **同一约定**。
+
+### 5.3 候选池生成（`batch_gen_candidates_pool.py`）
+
+只对 **merged 目录里已有** `{obj}_robot_gt_merged.hdf5` 且 successful 条数 **低于** `--success-threshold` 的物体生成（无 merged 文件的物体跳过）。
+
+```bash
+conda activate bundlesdf
+export PROJ=/path/to/Affordance2Grasp
+cd "$PROJ"
+
+python3 scripts/batch_gen_candidates_pool.py \
+  --merged-dir output/grasp_collect_no_rot/merged \
+  --output-dir output/grasp_collect_no_rot/candidates/pool \
+  --success-threshold 20 \
+  --target 50 \
+  --sampler-workers 16 \
+  --force
+```
+
+- `--target 50`：每个待补物体在 pool 里目标 candidate 数（传给 `random_grasp_sampler --target`）。
+- `batch_sim_candidates_pool.py` 在 `pool_exhausted` 时会 **自动** 以 median(merged success) 为 threshold 再调 `batch_gen_candidates_pool.py`（可用 `--no-auto-refill` 关闭）。
+
+### 5.4 候选池 sim batch 正式生产（双卡 × 每卡 4 worker）
+
+**从 Legacy 切到 Pool 时：** 若旧 `batch_grasp_collect` 在 round 14 中途停下，请先把 `state.json` 设为 **15**，避免 `batch_sim_candidates_pool.py` 写入未完成的 `round_0014`：
+
+```bash
+# 一次性（按需）
+echo '{"round": 15, "objects": {}}' > output/grasp_collect_no_rot/state.json
+```
+
+**生产命令（bundlesdf 内跑 batch 即可；Isaac 由 `python.sh` 子进程启动）：**
+
+```bash
+conda activate bundlesdf
+export ISAAC_SIM_PATH=/path/to/isaac-sim   # 例: /home/vision/isaacsim
+cd "$PROJ"
+
+python3 scripts/batch_sim_candidates_pool.py \
+  --outdir output/grasp_collect_no_rot \
+  --resume \
+  --max-rounds 10 \
+  --sim-gpu-ids 0,1 \
+  --sim-per-gpu 4 \
+  --headless
+```
+
+| 参数 | 默认 | 含义 |
+|------|------|------|
+| `--slots-per-round` | 500 | 每轮 candidate **槽位**数（×4 yaw = sim task 数） |
+| `--pool-target` | 50 | auto-refill 时 `batch_gen_candidates_pool.py` 的 `--target` |
+| `--sim-gpu-ids` | `0` | 物理 GPU 列表 |
+| `--sim-per-gpu` | 1 | 每张 GPU 并行 Isaac worker 数 |
+| `--resume` | 关 | 读 `state.json` 的 `round`；续跑未完成 `task_queue` |
+| `--no-auto-refill` | 关 | 关闭 pool 空时自动候选池生成 |
+
+上例：**2 × 4 = 8** 个 Isaac 进程；每轮 **500×4 = 2000** sim task，约 **250 task/worker**（chunk 内多物体、会 **swap 物体**）。
+
+**轮次：** `state.json` 里 `"round": N` → 下一批写 `round_{N:04d}`；`--resume --max-rounds 10` 跑 `round_N` … `round_{N+9}`。某轮 **未跑完**（worker crash 等）时 `state.round` **保持** 在该轮，需 **`--resume`** 补 pending task（不会自动进下一轮补同一 chunk）。
+
+**Crash 与 registry：** worker **0 results**（进程崩溃）的 task **不会**写入 `completed_task_ids`，candidate **不会**标 `simulated`；`--resume` 可补跑。若 4 yaw 都 attempted 但全失败，仍会标 `simulated`（不再抽该 candidate）。
+
+### 5.5 Smoke test（隔离 outdir）
+
+**单卡 + 同进程换物体（2 物体 × 4 yaw）：**
+
+```bash
+python3 scripts/batch_sim_candidates_pool.py \
+  --outdir output/grasp_collect_smoke \
+  --pool-dir output/grasp_collect_no_rot/candidates/pool \
+  --merged-dir output/grasp_collect_no_rot/merged \
+  --max-rounds 1 --slots-per-round 2 \
+  --sim-gpu-ids 0 --sim-per-gpu 1 \
+  --headless --no-auto-refill
+```
+
+**双卡 4 进程 + 每 chunk 2 物体（测 swap + stagger）：**
+
+```bash
+python3 scripts/batch_sim_candidates_pool.py \
+  --outdir output/grasp_collect_smoke_4p_swap \
+  --pool-dir output/grasp_collect_no_rot/candidates/pool \
+  --merged-dir output/grasp_collect_no_rot/merged \
+  --max-rounds 1 --slots-per-round 8 \
+  --sim-gpu-ids 0,1 --sim-per-gpu 2 \
+  --headless --no-auto-refill
+```
+
+> `slots-per-round 4` + `sim-per-gpu 2` 时每 chunk 仅 1 物体，**测不到**同进程换物体；要 swap 需每 chunk ≥2 物体（见上 `slots=8` 或 `slots=4, sim-per-gpu=1`）。
+
+### 5.6 监控
+
+```bash
+tail -f output/grasp_collect_no_rot/summary.csv
+cat output/grasp_collect_no_rot/state.json
+cat output/grasp_collect_no_rot/round_0015_task_queue.json | python3 -m json.tool | head
+```
+
+---
+
+## 6. 参数速查（Legacy `batch_grasp_collect.py`）
 
 | 参数 | 默认 | 含义 |
 |------|------|------|
@@ -570,7 +721,7 @@ done
 
 ---
 
-## 6. 常见问题
+## 7. 常见问题
 
 ### `No module named 'pxr'`
 
@@ -594,7 +745,7 @@ done
 
 ---
 
-## 7. 最小命令清单（复制即用）
+## 8. 最小命令清单（复制即用）
 
 ```bash
 # 0. 环境（路径改成你的）
@@ -609,7 +760,14 @@ python3 tools/convert_obj_usd.py --dataset oakink --no-rotation --force
 # 2. 显存压测（可选；若无 A01001_grasp.hdf5 先做第 3.0 节 sampler）
 python3 scripts/benchmark_sim_parallel.py --gpu 0 --start-n 6 --min-free-gb 3
 
-# 3. 正式 batch（双卡，默认 10 轮 round_0000..0009）
+# 3. Pool batch（当前推荐；需先有 pool，见第 5.3 节）
+python3 scripts/batch_sim_candidates_pool.py \
+  --outdir output/grasp_collect_no_rot \
+  --resume --max-rounds 10 \
+  --sim-gpu-ids 0,1 --sim-per-gpu 4 \
+  --headless
+
+# 3-legacy. Legacy batch（双卡，默认 10 轮 round_0000..0009）
 python3 scripts/batch_grasp_collect.py \
   --dataset oakink \
   --sampler-workers 8 \
@@ -630,14 +788,18 @@ python3 tools/vis_grasp_candidates.py \
 
 ---
 
-## 8. 相关文件
+## 9. 相关文件
 
 | 脚本 | 作用 |
 |------|------|
 | `tools/convert_obj_usd.py` | PLY → USD |
 | `tools/random_grasp_sampler.py` | 候选抓取 |
-| `sim/run_grasp_sim.py` | Isaac 验证 |
-| `scripts/batch_grasp_collect.py` | 全量两阶段 batch |
+| `sim/run_grasp_sim.py` | Isaac 验证（单物体 / Legacy batch） |
+| `sim/run_grasp_sim_pool.py` | Isaac 验证（Pool batch 长驻 worker） |
+| `scripts/batch_gen_candidates_pool.py` | **候选池生成**：批量生成 candidate pool |
+| `scripts/batch_sim_candidates_pool.py` | **候选池 sim batch**：加权 sim + merge |
+| `tools/grasp_pool_common.py` | Pool 规划、registry、task queue |
+| `scripts/batch_grasp_collect.py` | Legacy 全量两阶段 batch |
 | `scripts/benchmark_sim_parallel.py` | 显存 / 并行数压测 |
 | `tools/vis_grasp_candidates.py` | 候选 + 成功 PNG |
 | `tools/merge_robot_gt.py` | 多轮 GT 合并（batch 内自动调用） |
