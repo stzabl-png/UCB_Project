@@ -1281,6 +1281,67 @@ def _run_single_task(task: dict, outdir: str, round_idx: int, object_scale: floa
     return result
 
 
+def _make_skipped_result(task: dict, success_yaw_deg: float) -> dict:
+    return {
+        "task_id": task["task_id"],
+        "obj_id": task["obj_id"],
+        "candidate_key": task.get("candidate_key", task.get("candidate_name", "")),
+        "candidate_name": task.get("candidate_name", ""),
+        "z_yaw_deg": float(task["z_yaw_deg"]),
+        "success": False,
+        "attempted": False,
+        "skipped": True,
+        "skip_reason": "candidate_success_at_yaw",
+        "success_yaw_deg": float(success_yaw_deg),
+        "error": "",
+    }
+
+
+def _candidate_pair(task: dict) -> tuple[str, str]:
+    return (
+        task["obj_id"],
+        task.get("candidate_key") or task.get("candidate_name", ""),
+    )
+
+
+def _load_candidate_success_map(results_path: str) -> dict[tuple[str, str], float]:
+    success_by_cand: dict[tuple[str, str], float] = {}
+    if not os.path.isfile(results_path):
+        return success_by_cand
+    try:
+        with open(results_path, "r") as f:
+            data = json.load(f)
+        for row in data.get("results", []):
+            if row.get("success"):
+                pair = (row["obj_id"], row.get("candidate_key") or row.get("candidate_name", ""))
+                success_by_cand[pair] = float(row.get("z_yaw_deg", 0.0))
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        pass
+    return success_by_cand
+
+
+def _load_existing_chunk_results(
+    results_path: str,
+    chunk_task_ids: set[str],
+) -> list[dict]:
+    """Resume partial chunk runs: keep only rows for tasks still in this chunk."""
+    if not chunk_task_ids or not os.path.isfile(results_path):
+        return []
+    try:
+        with open(results_path, "r") as f:
+            data = json.load(f)
+        seen: set[str] = set()
+        kept: list[dict] = []
+        for row in data.get("results", []):
+            tid = row.get("task_id")
+            if tid in chunk_task_ids and tid not in seen:
+                kept.append(row)
+                seen.add(tid)
+        return kept
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return []
+
+
 _WORKER_SCENE = None
 _WORKER_OBJ: str | None = None
 
@@ -1320,6 +1381,16 @@ def worker_main():
     if progress_path == chunk_path:
         progress_path = chunk_path + "_progress.json"
     chunk_id = chunk.get("chunk_id", os.path.basename(chunk_path))
+    early_stop = bool(chunk.get("early_stop_on_candidate_success", True))
+    chunk_task_ids = {t["task_id"] for t in tasks if t.get("task_id")}
+    results = _load_existing_chunk_results(results_path, chunk_task_ids)
+    done_task_ids = {r["task_id"] for r in results}
+    candidate_success_yaw = _load_candidate_success_map(results_path)
+    if results:
+        cprint(
+            f"  Resume: {len(results)}/{len(tasks)} task result(s) already on disk",
+            "cyan",
+        )
 
     def _flush_chunk_state(last_task: dict, last_res: dict) -> None:
         """Incremental results + progress for batch-side polling."""
@@ -1346,8 +1417,23 @@ def worker_main():
 
     try:
         for task in tasks:
+            if task.get("task_id") in done_task_ids:
+                continue
+
             obj_id = task["obj_id"]
             z_yaw = float(task["z_yaw_deg"])
+            cand_pair = _candidate_pair(task)
+
+            if early_stop and cand_pair in candidate_success_yaw:
+                res = _make_skipped_result(task, candidate_success_yaw[cand_pair])
+                cprint(
+                    f"  ⏭ skip {task['task_id']}: candidate success at "
+                    f"yaw={candidate_success_yaw[cand_pair]:.0f}°",
+                    "cyan",
+                )
+                results.append(res)
+                _flush_chunk_state(task, res)
+                continue
 
             if _WORKER_SCENE is None:
                 cprint(f"\n📦 Setting up scene for {obj_id}...", "yellow")
@@ -1399,6 +1485,8 @@ def worker_main():
             res = _run_single_task(task, outdir, int(round_idx), object_scale)
             results.append(res)
             _flush_chunk_state(task, res)
+            if early_stop and res.get("success"):
+                candidate_success_yaw[cand_pair] = z_yaw
 
             if _WORKER_SCENE is not None:
                 _reset_scene_pose(_WORKER_SCENE, obj_id, object_scale, z_yaw)

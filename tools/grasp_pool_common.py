@@ -17,6 +17,8 @@ FIXED_Z_YAWS = (0.0, 90.0, 180.0, 270.0)
 DEFAULT_SLOTS_PER_ROUND = 500
 REGISTRY_NAME = "sim_pool_registry.json"
 TASK_QUEUE_TEMPLATE = "round_{round:04d}_task_queue.json"
+SYNTH_SKIPPED_RESULTS_NAME = "synthesized_skipped_results.json"
+SKIP_REASON_CANDIDATE_SUCCESS = "candidate_success_at_yaw"
 
 
 def round_tag(round_idx: int) -> str:
@@ -171,10 +173,70 @@ def parse_candidate_key(key: str) -> tuple[str, int]:
     return key, -1
 
 
+def candidate_pair_from_row(row: dict) -> tuple[str, str]:
+    return (
+        row["obj_id"],
+        row.get("candidate_key") or row.get("candidate_name", ""),
+    )
+
+
+def candidate_pair_from_task(task: dict) -> tuple[str, str]:
+    return (task["obj_id"], task.get("candidate_key", task.get("candidate_name", "")))
+
+
+def make_skipped_result(task: dict, success_yaw_deg: float) -> dict:
+    """Synthetic chunk row: sibling yaw succeeded, this yaw was not simmed."""
+    return {
+        "task_id": task["task_id"],
+        "obj_id": task["obj_id"],
+        "candidate_key": task.get("candidate_key", task.get("candidate_name", "")),
+        "candidate_name": task.get("candidate_name", ""),
+        "z_yaw_deg": float(task["z_yaw_deg"]),
+        "success": False,
+        "attempted": False,
+        "skipped": True,
+        "skip_reason": SKIP_REASON_CANDIDATE_SUCCESS,
+        "success_yaw_deg": float(success_yaw_deg),
+        "error": "",
+    }
+
+
+def find_candidate_success_yaw(rows: list[dict]) -> Optional[float]:
+    for row in rows:
+        if row.get("success"):
+            return float(row.get("z_yaw_deg", 0.0))
+    return None
+
+
+def synthesize_skipped_results_for_queue(
+    queue: dict,
+    round_results: list[dict],
+) -> list[dict]:
+    """Skipped rows for queue tasks whose candidate already has a success in round_results."""
+    by_tid = {r["task_id"]: r for r in round_results if r.get("task_id")}
+    by_cand: dict[tuple[str, str], list[dict]] = {}
+    for row in round_results:
+        by_cand.setdefault(candidate_pair_from_row(row), []).append(row)
+
+    synth: list[dict] = []
+    for task in queue.get("tasks", []):
+        tid = task["task_id"]
+        if tid in by_tid:
+            continue
+        pair = candidate_pair_from_task(task)
+        success_yaw = find_candidate_success_yaw(by_cand.get(pair, []))
+        if success_yaw is not None:
+            synth.append(make_skipped_result(task, success_yaw))
+    return synth
+
+
 def is_fully_simulated(registry: dict, obj_id: str, key: str) -> bool:
+    """Candidate resolved: any yaw success, or all 4 yaws tried without success."""
     rec = _obj_registry(registry, obj_id).get(key)
     if not rec:
         return False
+    if rec.get("success_yaws"):
+        return True
     if rec.get("simulated"):
         return True
     done = set(float(y) for y in rec.get("yaws_done", []))
@@ -393,13 +455,56 @@ def save_task_queue(path: str, queue: dict) -> None:
         json.dump(queue, f, indent=2)
 
 
-def pending_tasks(queue: dict) -> list[dict]:
+def pending_tasks(
+    queue: dict,
+    outdir: str | None = None,
+    round_idx: int | None = None,
+    *,
+    registry: dict | None = None,
+    registry_path: str | None = None,
+    task_queue_path: str | None = None,
+    persist: bool = False,
+) -> list[dict]:
+    """Pending = in queue plan but no chunk result. Optionally sync from chunk first."""
+    if outdir is not None and round_idx is not None and registry is not None:
+        sync_queue_and_registry_from_chunks(
+            outdir,
+            round_idx,
+            registry,
+            queue,
+            registry_path=registry_path,
+            task_queue_path=task_queue_path,
+            persist=persist,
+        )
     done = set(queue.get("completed_task_ids", []))
     return [t for t in queue.get("tasks", []) if t["task_id"] not in done]
 
 
-def is_queue_complete(queue: dict) -> bool:
-    return len(pending_tasks(queue)) == 0
+def is_queue_complete(
+    queue: dict,
+    outdir: str | None = None,
+    round_idx: int | None = None,
+    *,
+    registry: dict | None = None,
+    registry_path: str | None = None,
+    task_queue_path: str | None = None,
+    persist: bool = False,
+) -> bool:
+    """True when every planned task has a chunk result (sim fully attempted on disk)."""
+    return (
+        len(
+            pending_tasks(
+                queue,
+                outdir,
+                round_idx,
+                registry=registry,
+                registry_path=registry_path,
+                task_queue_path=task_queue_path,
+                persist=persist,
+            ),
+        )
+        == 0
+    )
 
 
 def mark_task_done(queue: dict, task_id: str) -> None:
@@ -412,25 +517,119 @@ def chunk_results_dir(outdir: str, round_idx: int) -> str:
     return os.path.join(os.path.abspath(outdir), "sim_logs", round_tag(round_idx), "chunks")
 
 
-def load_disk_sim_results(outdir: str, round_idx: int) -> list[dict]:
+def synthesized_skipped_results_path(outdir: str, round_idx: int) -> str:
+    return os.path.join(chunk_results_dir(outdir, round_idx), SYNTH_SKIPPED_RESULTS_NAME)
+
+
+def _merge_result_rows_into_by_task(
+    by_task: dict[str, tuple[float, dict]],
+    rows: list[dict],
+    mtime: float,
+) -> None:
+    for row in rows:
+        tid = row.get("task_id")
+        if not tid:
+            continue
+        prev = by_task.get(tid)
+        if prev is None or mtime >= prev[0]:
+            by_task[tid] = (mtime, row)
+
+
+def persist_synthesized_skipped_results(
+    outdir: str,
+    round_idx: int,
+    synth_rows: list[dict],
+) -> None:
+    """Append synthesized skipped rows (sync/resume) to round synth sidecar."""
+    if not synth_rows:
+        return
+    path = synthesized_skipped_results_path(outdir, round_idx)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    existing: dict[str, dict] = {}
+    if os.path.isfile(path):
+        try:
+            with open(path, "r") as f:
+                data = json.load(f)
+            for row in data.get("results", []):
+                tid = row.get("task_id")
+                if tid:
+                    existing[tid] = row
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            existing = {}
+    for row in synth_rows:
+        tid = row.get("task_id")
+        if tid:
+            existing[tid] = row
+    with open(path, "w") as f:
+        json.dump({"results": list(existing.values())}, f, indent=2)
+
+
+def load_disk_sim_results(
+    outdir: str,
+    round_idx: int,
+    *,
+    failed_paths: list[str] | None = None,
+) -> list[dict]:
     """Merge chunk_*_results.json; newest file mtime wins on duplicate task_id."""
+    results, _ = load_disk_sim_results_ex(outdir, round_idx, failed_paths=failed_paths)
+    return results
+
+
+def load_disk_sim_results_ex(
+    outdir: str,
+    round_idx: int,
+    *,
+    failed_paths: list[str] | None = None,
+) -> tuple[list[dict], list[str]]:
+    """Like load_disk_sim_results; also returns chunk result paths that failed to parse."""
     chunk_dir = chunk_results_dir(outdir, round_idx)
     by_task: dict[str, tuple[float, dict]] = {}
+    failed: list[str] = []
     for path in sorted(glob.glob(os.path.join(chunk_dir, "chunk_*_results.json"))):
         try:
             mtime = os.path.getmtime(path)
             with open(path, "r") as f:
                 data = json.load(f)
-            for row in data.get("results", []):
-                tid = row.get("task_id")
-                if not tid:
-                    continue
-                prev = by_task.get(tid)
-                if prev is None or mtime >= prev[0]:
-                    by_task[tid] = (mtime, row)
+            _merge_result_rows_into_by_task(by_task, data.get("results", []), mtime)
         except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            failed.append(path)
             continue
-    return [pair[1] for pair in by_task.values()]
+    synth_path = synthesized_skipped_results_path(outdir, round_idx)
+    if os.path.isfile(synth_path):
+        try:
+            mtime = os.path.getmtime(synth_path)
+            with open(synth_path, "r") as f:
+                data = json.load(f)
+            _merge_result_rows_into_by_task(by_task, data.get("results", []), mtime)
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            failed.append(synth_path)
+    if failed_paths is not None:
+        failed_paths.extend(failed)
+    return [pair[1] for pair in by_task.values()], failed
+
+
+def derive_completed_task_ids_from_chunks(
+    outdir: str,
+    round_idx: int,
+    queue: dict,
+    *,
+    failed_paths: list[str] | None = None,
+) -> set[str]:
+    """Task IDs in this round's chunk results that belong to queue.tasks."""
+    valid_ids = {t["task_id"] for t in queue.get("tasks", [])}
+    results = load_disk_sim_results(
+        outdir, round_idx, failed_paths=failed_paths,
+    )
+    return {r["task_id"] for r in results if r.get("task_id") in valid_ids}
+
+
+def rebuild_completed_task_ids_from_chunks(queue: dict, done_ids: set[str]) -> bool:
+    """Rewrite completed_task_ids cache from chunk truth (plan task order)."""
+    new_done = [t["task_id"] for t in queue.get("tasks", []) if t["task_id"] in done_ids]
+    old = queue.get("completed_task_ids", [])
+    changed = old != new_done
+    queue["completed_task_ids"] = new_done
+    return changed
 
 
 def apply_sim_results(
@@ -439,7 +638,7 @@ def apply_sim_results(
     results: list[dict],
     round_idx: int,
 ) -> int:
-    """Mark finished tasks and update registry. Returns count of newly completed tasks."""
+    """Legacy incremental path: registry update + append completed ids."""
     valid_ids = {t["task_id"] for t in queue.get("tasks", [])}
     done = set(queue.get("completed_task_ids", []))
     new_results = [
@@ -454,6 +653,67 @@ def apply_sim_results(
     return len(new_results)
 
 
+def sync_queue_and_registry_from_chunks(
+    outdir: str,
+    round_idx: int,
+    registry: dict,
+    queue: dict,
+    *,
+    registry_path: str | None = None,
+    task_queue_path: str | None = None,
+    persist: bool = True,
+) -> dict:
+    """
+    Chunk results are the source of truth: rebuild completed_task_ids and update registry.
+
+    Returns status with sync_ok (no unread chunk files; queue matches chunk) and sim_complete.
+    """
+    valid_ids = {t["task_id"] for t in queue.get("tasks", [])}
+    failed_paths: list[str] = []
+    results = load_disk_sim_results(outdir, round_idx, failed_paths=failed_paths)
+    round_results = [r for r in results if r.get("task_id") in valid_ids]
+    synth_rows = synthesize_skipped_results_for_queue(queue, round_results)
+    existing_tids = {r["task_id"] for r in round_results}
+    new_synth = [r for r in synth_rows if r["task_id"] not in existing_tids]
+    if new_synth and persist:
+        persist_synthesized_skipped_results(outdir, round_idx, new_synth)
+    round_results.extend(new_synth)
+    chunk_ids = {r["task_id"] for r in round_results}
+
+    old_done = set(queue.get("completed_task_ids", []))
+    registry_changed = update_registry_from_results(registry, round_results, round_idx)
+    queue_changed = rebuild_completed_task_ids_from_chunks(queue, chunk_ids)
+    n_newly_completed = len(chunk_ids - old_done)
+
+    done_set = set(queue["completed_task_ids"])
+    ingest_gap = chunk_ids - done_set
+    sim_missing = valid_ids - chunk_ids
+    sync_ok = len(ingest_gap) == 0 and len(failed_paths) == 0
+
+    if persist and (queue_changed or registry_changed or new_synth):
+        if registry_path:
+            save_registry(registry_path, registry)
+        if task_queue_path:
+            save_task_queue(task_queue_path, queue)
+
+    n_pending = len([t for t in queue.get("tasks", []) if t["task_id"] not in done_set])
+    return {
+        "n_chunk_tasks": len(chunk_ids),
+        "n_completed": len(done_set),
+        "n_pending": n_pending,
+        "n_ingest_gap": len(ingest_gap),
+        "n_sim_missing": len(sim_missing),
+        "n_newly_completed": n_newly_completed,
+        "n_failed_chunk_files": len(failed_paths),
+        "failed_chunk_files": failed_paths,
+        "sync_ok": sync_ok,
+        "sim_complete": n_pending == 0,
+        "queue_changed": queue_changed,
+        "registry_changed": registry_changed,
+        "n_synthesized_skipped": len(new_synth),
+    }
+
+
 def ingest_and_persist_sim_progress(
     outdir: str,
     round_idx: int,
@@ -463,13 +723,17 @@ def ingest_and_persist_sim_progress(
     registry_path: str,
     task_queue_path: str,
 ) -> int:
-    """Load worker chunk results from disk, update queue/registry, save if changed."""
-    results = load_disk_sim_results(outdir, round_idx)
-    n = apply_sim_results(registry, queue, results, round_idx)
-    if n:
-        save_registry(registry_path, registry)
-        save_task_queue(task_queue_path, queue)
-    return n
+    """Sync queue/registry from chunk results; return count of newly completed tasks."""
+    status = sync_queue_and_registry_from_chunks(
+        outdir,
+        round_idx,
+        registry,
+        queue,
+        registry_path=registry_path,
+        task_queue_path=task_queue_path,
+        persist=True,
+    )
+    return int(status.get("n_newly_completed", 0))
 
 
 def _copy_candidate_group(src_ci: h5py.Group, dst_cg: h5py.Group, dst_index: int) -> None:
@@ -581,29 +845,40 @@ def update_registry_from_results(
     registry: dict,
     results: list[dict],
     round_idx: int,
-) -> None:
-    """Group by (obj, candidate_key); mark simulated when all 4 yaws attempted."""
+) -> bool:
+    """Apply chunk rows to registry (idempotent). Returns True if any record changed."""
     by_cand: dict[tuple[str, str], list[dict]] = {}
     for r in results:
         pair = (r["obj_id"], r["candidate_key"])
         by_cand.setdefault(pair, []).append(r)
 
+    changed = False
     for (obj_id, key), rows in by_cand.items():
         rec = _obj_registry(registry, obj_id).setdefault(
             key,
             {"yaws_done": [], "simulated": False},
         )
+        before = (list(rec.get("yaws_done", [])), rec.get("simulated"), rec.get("last_round"))
         for row in rows:
             yaw = float(row.get("z_yaw_deg", 0.0))
             done = set(float(y) for y in rec.get("yaws_done", []))
             done.add(yaw)
             rec["yaws_done"] = sorted(done)
             if row.get("success"):
-                rec.setdefault("success_yaws", []).append(yaw)
+                success_yaws = rec.setdefault("success_yaws", [])
+                if yaw not in {float(y) for y in success_yaws}:
+                    success_yaws.append(yaw)
         rec["last_round"] = round_idx
-        attempted = {float(r["z_yaw_deg"]) for r in rows if r.get("attempted", True)}
-        if attempted >= set(FIXED_Z_YAWS):
+        if rec.get("success_yaws"):
             rec["simulated"] = True
+        else:
+            yaws_done_set = {float(y) for y in rec.get("yaws_done", [])}
+            if yaws_done_set >= set(FIXED_Z_YAWS):
+                rec["simulated"] = True
+        after = (list(rec.get("yaws_done", [])), rec.get("simulated"), rec.get("last_round"))
+        if before != after:
+            changed = True
+    return changed
 
 
 def sort_tasks_for_workers(tasks: list[dict]) -> list[dict]:
@@ -613,12 +888,40 @@ def sort_tasks_for_workers(tasks: list[dict]) -> list[dict]:
     )
 
 
+def _task_groups_by_candidate(tasks: list[dict]) -> list[list[dict]]:
+    """Keep all yaws for one (obj, candidate) in the same group."""
+    tasks = sort_tasks_for_workers(tasks)
+    if not tasks:
+        return []
+    groups: list[list[dict]] = []
+    current: list[dict] = []
+    last_pair: tuple[str, str] | None = None
+    for task in tasks:
+        pair = candidate_pair_from_task(task)
+        if last_pair is not None and pair != last_pair and current:
+            groups.append(current)
+            current = []
+        current.append(task)
+        last_pair = pair
+    if current:
+        groups.append(current)
+    return groups
+
+
 def split_tasks_into_chunks(tasks: list[dict], n_chunks: int) -> list[list[dict]]:
+    """Split pending tasks into worker chunks without splitting a candidate yaw group."""
     if n_chunks < 1:
         n_chunks = 1
-    tasks = sort_tasks_for_workers(tasks)
-    n = len(tasks)
-    if n == 0:
+    groups = _task_groups_by_candidate(tasks)
+    if not groups:
         return []
-    chunk_size = (n + n_chunks - 1) // n_chunks
-    return [tasks[i : i + chunk_size] for i in range(0, n, chunk_size)]
+    n_chunks = min(n_chunks, len(groups))
+    chunks: list[list[dict]] = [[] for _ in range(n_chunks)]
+    loads = [0] * n_chunks
+    # assign largest groups first to the lightest chunk
+    indexed = sorted(enumerate(groups), key=lambda item: -len(item[1]))
+    for _idx, group in indexed:
+        ci = min(range(n_chunks), key=lambda i: loads[i])
+        chunks[ci].extend(group)
+        loads[ci] += len(group)
+    return [sort_tasks_for_workers(c) for c in chunks if c]

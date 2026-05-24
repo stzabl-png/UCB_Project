@@ -31,7 +31,7 @@ import subprocess
 import sys
 import threading
 import time
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import Optional
@@ -48,7 +48,6 @@ from grasp_pool_common import (  # noqa: E402
     clear_registry_for_objects,
     compute_median_success_threshold,
     copy_slots_to_round_hdf5,
-    ingest_and_persist_sim_progress,
     is_queue_complete,
     load_registry,
     load_task_queue,
@@ -59,6 +58,7 @@ from grasp_pool_common import (  # noqa: E402
     save_task_queue,
     scan_merged_objects,
     split_tasks_into_chunks,
+    sync_queue_and_registry_from_chunks,
     unique_slots_from_tasks,
 )
 from batch_gen_candidates_pool import resolve_dataset, select_target_objects  # noqa: E402
@@ -70,6 +70,8 @@ SIM_POOL_SCRIPT = os.path.join(PROJ, "sim", "run_grasp_sim_pool.py")
 SAME_GPU_STAGGER_S = 10.0
 SIM_PROGRESS_POLL_S = 20.0
 SIM_INGEST_POLL_S = 5.0
+WORKER_CRASH_RETRY_S = 15.0
+WORKER_MAX_RETRIES = 2
 
 
 @dataclass
@@ -91,6 +93,7 @@ class PoolSimConfig:
     auto_refill: bool
     score_threshold: float
     no_rotation: bool
+    early_stop_on_candidate_success: bool
 
 
 def _run_cmd(
@@ -225,46 +228,75 @@ def _chunk_sidecar_paths(chunk_path: str) -> tuple[str, str]:
     return f"{base}_results.json", f"{base}_progress.json"
 
 
-def _read_chunk_task_total(chunk_path: str) -> int:
+def _read_chunk_task_ids(chunk_path: str) -> set[str]:
     try:
         with open(chunk_path, "r") as f:
-            return len(json.load(f).get("tasks", []))
+            tasks = json.load(f).get("tasks", [])
+            return {t["task_id"] for t in tasks if t.get("task_id")}
     except (OSError, json.JSONDecodeError, TypeError):
-        return 0
+        return set()
 
 
-def _read_chunk_progress(chunk_path: str) -> tuple[int, int, int]:
-    """Return (completed, total, successes_in_chunk)."""
-    total = _read_chunk_task_total(chunk_path)
-    _, progress_path = _chunk_sidecar_paths(chunk_path)
+def _load_chunk_results(chunk_path: str) -> list[dict]:
+    """Results for tasks listed in the chunk file (ignores stale sidecar rows)."""
+    task_ids = _read_chunk_task_ids(chunk_path)
+    if not task_ids:
+        return []
     results_path, _ = _chunk_sidecar_paths(chunk_path)
     try:
-        if os.path.isfile(progress_path):
-            with open(progress_path, "r") as f:
-                p = json.load(f)
-            return (
-                int(p.get("completed", 0)),
-                int(p.get("total", total)),
-                int(p.get("successes_in_chunk", 0)),
-            )
         if os.path.isfile(results_path):
             with open(results_path, "r") as f:
                 data = json.load(f)
-            results = data.get("results", [])
-            return len(results), total, sum(1 for r in results if r.get("success"))
+            return [
+                r for r in data.get("results", [])
+                if r.get("task_id") in task_ids
+            ]
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        pass
+    return []
+
+
+def _chunk_run_complete(chunk_path: str) -> bool:
+    done, total, _ = _read_chunk_progress(chunk_path)
+    return total > 0 and done >= total
+
+
+def _read_chunk_progress(chunk_path: str) -> tuple[int, int, int]:
+    """Return (completed, total, successes_in_chunk) for tasks in this chunk file."""
+    task_ids = _read_chunk_task_ids(chunk_path)
+    total = len(task_ids)
+    if total == 0:
+        return 0, 0, 0
+    results_path, _ = _chunk_sidecar_paths(chunk_path)
+    try:
+        if os.path.isfile(results_path):
+            with open(results_path, "r") as f:
+                data = json.load(f)
+            results = [
+                r for r in data.get("results", [])
+                if r.get("task_id") in task_ids
+            ]
+            return (
+                len(results),
+                total,
+                sum(1 for r in results if r.get("success")),
+            )
     except (OSError, json.JSONDecodeError, TypeError, ValueError):
         pass
     return 0, total, 0
 
 
-def _format_sim_progress(chunk_paths: list[str], gpu_for_chunk: list[int]) -> str:
-    total_tasks = 0
+def _format_sim_progress(
+    chunk_paths: list[str],
+    gpu_for_chunk: list[int],
+    *,
+    batch_total: int,
+) -> str:
     done_tasks = 0
     ok_tasks = 0
     parts: list[str] = []
     for i, cp in enumerate(chunk_paths):
         done, tot, ok = _read_chunk_progress(cp)
-        total_tasks += tot
         done_tasks += done
         ok_tasks += ok
         gpu = gpu_for_chunk[i] if i < len(gpu_for_chunk) else "?"
@@ -273,13 +305,13 @@ def _format_sim_progress(chunk_paths: list[str], gpu_for_chunk: list[int]) -> st
     if len(parts) > 8:
         chunk_summary += f" ...+{len(parts) - 8}"
     return (
-        f"  [sim progress] {done_tasks}/{total_tasks} tasks "
+        f"  [sim progress] {done_tasks}/{batch_total} tasks "
         f"({ok_tasks} ok in partial results) | {chunk_summary}"
     )
 
 
 class _SimProgressReporter(threading.Thread):
-    """Poll worker progress; periodically ingest chunk results into task_queue/registry."""
+    """Poll worker progress; periodically sync chunk results into task_queue/registry."""
 
     def __init__(
         self,
@@ -287,6 +319,7 @@ class _SimProgressReporter(threading.Thread):
         gpu_for_chunk: list[int],
         log_hint: str,
         *,
+        batch_total: int,
         ingest_fn=None,
         persist_lock: threading.Lock | None = None,
         ingest_interval_s: float = SIM_INGEST_POLL_S,
@@ -295,6 +328,7 @@ class _SimProgressReporter(threading.Thread):
         super().__init__(daemon=True)
         self._chunk_paths = chunk_paths
         self._gpu_for_chunk = gpu_for_chunk
+        self._batch_total = batch_total
         self._log_hint = log_hint
         self._ingest_fn = ingest_fn
         self._persist_lock = persist_lock
@@ -306,7 +340,7 @@ class _SimProgressReporter(threading.Thread):
     def run(self) -> None:
         print(
             f"  Live progress every {self._print_interval:.0f}s; "
-            f"task_queue ingest every {self._ingest_interval:.0f}s "
+            f"chunk→queue sync every {self._ingest_interval:.0f}s "
             f"(worker logs: {self._log_hint})",
             flush=True,
         )
@@ -316,14 +350,17 @@ class _SimProgressReporter(threading.Thread):
                     n_new = self._ingest_fn()
                 if n_new:
                     print(
-                        f"  [sim persist] +{n_new} task(s) → "
-                        f"completed_task_ids / registry updated",
+                        f"  [chunk sync] +{n_new} newly completed (from disk)",
                         flush=True,
                     )
             now = time.monotonic()
             if now - self._last_print_mono >= self._print_interval:
                 print(
-                    _format_sim_progress(self._chunk_paths, self._gpu_for_chunk),
+                    _format_sim_progress(
+                        self._chunk_paths,
+                        self._gpu_for_chunk,
+                        batch_total=self._batch_total,
+                    ),
                     flush=True,
                 )
                 self._last_print_mono = now
@@ -432,24 +469,30 @@ def run_sim_phase(
     *,
     registry: dict | None = None,
 ) -> tuple[list[dict], list[dict]]:
+    sim_paths = paths_for_outdir(cfg.outdir, round_idx)
+
     if registry is not None:
-        paths = paths_for_outdir(cfg.outdir, round_idx)
-        n_ingested = ingest_and_persist_sim_progress(
+        status = sync_queue_and_registry_from_chunks(
             cfg.outdir,
             round_idx,
             registry,
             queue,
-            registry_path=paths["registry"],
-            task_queue_path=paths["task_queue"],
+            registry_path=sim_paths["registry"],
+            task_queue_path=sim_paths["task_queue"],
+            persist=True,
         )
-        if n_ingested:
+        n_on_disk = status.get("n_chunk_tasks", 0)
+        if n_on_disk:
             print(
-                f"  Resumed from disk: {n_ingested} tasks already completed "
-                f"({len(pending_tasks(queue))} pending)",
+                f"  Chunk sync: {n_on_disk} task(s) on disk, "
+                f"{status['n_pending']} pending sim",
                 flush=True,
             )
 
-    tasks = pending_tasks(queue)
+    if registry is not None:
+        tasks = pending_tasks(queue, cfg.outdir, round_idx, registry=registry)
+    else:
+        tasks = pending_tasks(queue)
     if not tasks:
         return [], []
 
@@ -458,6 +501,7 @@ def run_sim_phase(
     chunk_dir = os.path.join(cfg.outdir, "sim_logs", round_tag(round_idx), "chunks")
     os.makedirs(chunk_dir, exist_ok=True)
 
+    batch_total = len(tasks)
     chunk_paths: list[str] = []
     for i, chunk_tasks in enumerate(chunks):
         cpath = os.path.join(chunk_dir, f"chunk_{i:03d}.json")
@@ -466,10 +510,15 @@ def run_sim_phase(
             "round_idx": round_idx,
             "outdir": cfg.outdir,
             "object_scale": cfg.object_scale,
+            "early_stop_on_candidate_success": cfg.early_stop_on_candidate_success,
             "tasks": chunk_tasks,
         }
         with open(cpath, "w") as f:
             json.dump(payload, f)
+        results_path, progress_path = _chunk_sidecar_paths(cpath)
+        for sidecar in (results_path, progress_path):
+            if os.path.isfile(sidecar):
+                os.remove(sidecar)
         chunk_paths.append(cpath)
 
     gpu_for_chunk = _assign_chunks_to_gpus(len(chunk_paths), cfg.sim_gpu_ids)
@@ -477,8 +526,13 @@ def run_sim_phase(
     cfg_dict = asdict(cfg)
 
     print(
-        f"  Sim: {len(tasks)} tasks → {len(chunk_paths)} chunks "
-        f"({len(cfg.sim_gpu_ids)} GPU × {cfg.sim_per_gpu} workers)",
+        f"  Sim: {batch_total} tasks → {len(chunk_paths)} chunks "
+        f"({len(cfg.sim_gpu_ids)} GPU × {cfg.sim_per_gpu} workers)"
+        + (
+            "; early-stop on candidate success"
+            if cfg.early_stop_on_candidate_success
+            else ""
+        ),
     )
     if any(d > 0 for d in startup_delays):
         print(f"  Same-GPU stagger: {SAME_GPU_STAGGER_S:.0f}s between workers on one GPU")
@@ -490,31 +544,35 @@ def run_sim_phase(
         cfg.outdir, "sim_logs", round_tag(round_idx), "chunk_*_gpu*.log",
     )
     persist_lock = threading.Lock()
-    sim_paths = paths_for_outdir(cfg.outdir, round_idx)
 
-    def _ingest_from_disk() -> int:
-        return ingest_and_persist_sim_progress(
+    def _sync_from_chunks() -> int:
+        st = sync_queue_and_registry_from_chunks(
             cfg.outdir,
             round_idx,
             registry,
             queue,
             registry_path=sim_paths["registry"],
             task_queue_path=sim_paths["task_queue"],
+            persist=True,
         )
+        return int(st.get("n_newly_completed", 0))
 
     reporter = _SimProgressReporter(
         chunk_paths,
         gpu_for_chunk,
         log_hint,
-        ingest_fn=_ingest_from_disk if registry is not None else None,
+        batch_total=batch_total,
+        ingest_fn=_sync_from_chunks if registry is not None else None,
         persist_lock=persist_lock if registry is not None else None,
     )
     reporter.start()
     interrupted = False
     try:
         with ProcessPoolExecutor(max_workers=n_workers) as ex:
-            futures = {}
+            futures: dict = {}
+            chunk_attempts = [0] * len(chunk_paths)
             for i in range(len(chunk_paths)):
+                chunk_attempts[i] = 1
                 if startup_delays[i] > 0:
                     print(
                         f"    chunk {i} GPU {gpu_for_chunk[i]}: "
@@ -528,29 +586,101 @@ def run_sim_phase(
                     startup_delays[i],
                 )
                 futures[fut] = i
-            for fut in as_completed(futures):
-                ci = futures[fut]
-                out = fut.result()
-                worker_outcomes.append(out)
-                all_results.extend(out.get("results", []))
-                print(
-                    f"    chunk {ci} GPU {out.get('gpu_id', '?')}: {out['status']}  "
-                    f"{len(out.get('results', []))}/{out.get('expected_tasks', '?')} results  "
-                    f"{out.get('elapsed_s', 0)}s",
-                    flush=True,
-                )
-                if out.get("error"):
-                    print(f"      {out['error'][:200]}", flush=True)
-                if registry is not None:
-                    with persist_lock:
-                        n_saved = _ingest_from_disk()
-                    if n_saved:
+
+            while futures:
+                done_set, _ = wait(futures.keys(), return_when=FIRST_COMPLETED)
+                for fut in done_set:
+                    ci = futures.pop(fut)
+                    try:
+                        out = fut.result()
+                    except Exception as exc:
+                        out = {
+                            "chunk_path": chunk_paths[ci],
+                            "status": "worker_crashed",
+                            "results": [],
+                            "error": str(exc)[:500],
+                            "expected_tasks": len(
+                                _read_chunk_task_ids(chunk_paths[ci]),
+                            ),
+                            "elapsed_s": 0.0,
+                            "gpu_id": gpu_for_chunk[ci],
+                        }
+
+                    done_n, total_n, _ = _read_chunk_progress(chunk_paths[ci])
+                    if _chunk_run_complete(chunk_paths[ci]):
+                        out["status"] = "ok"
+                        out["results"] = _load_chunk_results(chunk_paths[ci])
+                        worker_outcomes.append(out)
+                        all_results.extend(out["results"])
                         print(
-                            f"      persisted {n_saved} completed task(s) "
-                            f"({len(pending_tasks(queue))} pending)",
+                            f"    chunk {ci} GPU {out.get('gpu_id', '?')}: ok  "
+                            f"{done_n}/{total_n} results  "
+                            f"{out.get('elapsed_s', 0)}s",
                             flush=True,
                         )
-                print(_format_sim_progress(chunk_paths, gpu_for_chunk), flush=True)
+                    else:
+                        retries_used = chunk_attempts[ci] - 1
+                        can_retry = retries_used < WORKER_MAX_RETRIES
+                        print(
+                            f"    chunk {ci} GPU {out.get('gpu_id', '?')}: "
+                            f"{out.get('status', '?')}  {done_n}/{total_n} results  "
+                            f"{out.get('elapsed_s', 0)}s"
+                            + (
+                                f" — retry in {WORKER_CRASH_RETRY_S:.0f}s "
+                                f"({retries_used + 1}/{WORKER_MAX_RETRIES})"
+                                if can_retry
+                                else f" — max retries ({WORKER_MAX_RETRIES}) exhausted"
+                            ),
+                            flush=True,
+                        )
+                        if out.get("error"):
+                            print(f"      {out['error'][:200]}", flush=True)
+                        if can_retry:
+                            time.sleep(WORKER_CRASH_RETRY_S)
+                            if registry is not None:
+                                with persist_lock:
+                                    _sync_from_chunks()
+                            chunk_attempts[ci] += 1
+                            print(
+                                f"    chunk {ci} GPU {gpu_for_chunk[ci]}: "
+                                f"restart (attempt {chunk_attempts[ci]})",
+                                flush=True,
+                            )
+                            nf = ex.submit(
+                                run_sim_worker,
+                                chunk_paths[ci],
+                                gpu_for_chunk[ci],
+                                cfg_dict,
+                                0.0,
+                            )
+                            futures[nf] = ci
+                        else:
+                            out["results"] = _load_chunk_results(chunk_paths[ci])
+                            worker_outcomes.append(out)
+                            all_results.extend(out["results"])
+
+                    if registry is not None:
+                        with persist_lock:
+                            n_saved = _sync_from_chunks()
+                        n_pending = len(
+                            pending_tasks(
+                                queue, cfg.outdir, round_idx, registry=registry,
+                            ),
+                        )
+                        if n_saved:
+                            print(
+                                f"      chunk sync: +{n_saved} completed "
+                                f"({n_pending} pending sim)",
+                                flush=True,
+                            )
+                    print(
+                        _format_sim_progress(
+                            chunk_paths,
+                            gpu_for_chunk,
+                            batch_total=batch_total,
+                        ),
+                        flush=True,
+                    )
     except KeyboardInterrupt:
         interrupted = True
         print("\n  ⚠️  Sim interrupted; saving progress from disk...", flush=True)
@@ -560,11 +690,21 @@ def run_sim_phase(
         reporter.join(timeout=1.0)
         if registry is not None:
             with persist_lock:
-                n_saved = _ingest_from_disk()
-            if n_saved and interrupted:
+                sync_queue_and_registry_from_chunks(
+                    cfg.outdir,
+                    round_idx,
+                    registry,
+                    queue,
+                    registry_path=sim_paths["registry"],
+                    task_queue_path=sim_paths["task_queue"],
+                    persist=True,
+                )
+            n_pending = len(
+                pending_tasks(queue, cfg.outdir, round_idx, registry=registry),
+            )
+            if interrupted:
                 print(
-                    f"  Saved {n_saved} task(s) from disk "
-                    f"({len(pending_tasks(queue))} pending)",
+                    f"  Chunk sync saved ({n_pending} pending sim)",
                     flush=True,
                 )
 
@@ -597,7 +737,7 @@ def auto_refill_pool(
     cfg: PoolSimConfig,
     round_idx: int,
     *,
-    queue_complete: bool,
+    sim_complete: bool,
 ) -> bool:
     threshold = compute_median_success_threshold(cfg.outdir, cfg.merged_dir)
     refill_targets = [
@@ -633,12 +773,12 @@ def auto_refill_pool(
         f"refilled object(s)",
     )
 
-    if not queue_complete:
+    if not sim_complete:
         task_queue_path = paths["task_queue"]
         if os.path.isfile(task_queue_path):
             os.remove(task_queue_path)
             print(
-                f"   removed {task_queue_path} (incomplete round; --resume will replan "
+                f"   removed {task_queue_path} (sim incomplete; --resume will replan "
                 f"round {round_idx} from new pool)",
             )
 
@@ -688,14 +828,68 @@ def run_one_round(
             f"({len(queue['tasks'])} sim tasks)  exhausted={queue['pool_exhausted']}",
         )
     else:
-        print(f"  Resume task queue: {len(pending_tasks(queue))} pending tasks")
+        sync_queue_and_registry_from_chunks(
+            cfg.outdir,
+            round_idx,
+            registry,
+            queue,
+            registry_path=paths["registry"],
+            task_queue_path=paths["task_queue"],
+            persist=True,
+        )
+        n_pending = len(
+            pending_tasks(
+                queue,
+                cfg.outdir,
+                round_idx,
+                registry=registry,
+            ),
+        )
+        print(f"  Resume task queue: {n_pending} pending sim (chunk has no record)")
 
     pool_exhausted = bool(queue.get("pool_exhausted"))
 
-    if not is_queue_complete(queue):
+    sim_complete_before = is_queue_complete(
+        queue,
+        cfg.outdir,
+        round_idx,
+        registry=registry,
+    )
+    if not sim_complete_before:
         sim_results, _ = run_sim_phase(queue, cfg, round_idx, registry=registry)
     else:
         sim_results = []
+
+    sync_status = sync_queue_and_registry_from_chunks(
+        cfg.outdir,
+        round_idx,
+        registry,
+        queue,
+        registry_path=paths["registry"],
+        task_queue_path=paths["task_queue"],
+        persist=True,
+    )
+    if not sync_status.get("sync_ok", False):
+        print(
+            f"  ⚠️  Chunk↔queue sync not clean: ingest_gap={sync_status.get('n_ingest_gap')} "
+            f"unreadable_chunk_files={sync_status.get('n_failed_chunk_files')}",
+            flush=True,
+        )
+        if sync_status.get("failed_chunk_files"):
+            for fp in sync_status["failed_chunk_files"][:5]:
+                print(f"      {fp}", flush=True)
+    else:
+        print(
+            f"  Chunk sync OK: {sync_status['n_chunk_tasks']} on disk, "
+            f"{sync_status['n_pending']} pending sim, "
+            f"{sync_status['n_sim_missing']} never written to chunk"
+            + (
+                f", {sync_status.get('n_synthesized_skipped', 0)} synthesized skipped"
+                if sync_status.get("n_synthesized_skipped")
+                else ""
+            ),
+            flush=True,
+        )
 
     objs = sorted({t["obj_id"] for t in queue.get("tasks", [])})
     dataset_by_obj = _dataset_by_obj(objs)
@@ -726,8 +920,8 @@ def run_one_round(
         summary_rows.append(row)
 
     n_success_tasks = sum(1 for r in sim_results if r.get("success"))
-    queue_complete = is_queue_complete(queue)
-    n_pending = len(pending_tasks(queue))
+    sim_complete = bool(sync_status.get("sim_complete", False))
+    n_pending = int(sync_status.get("n_pending", 0))
     return {
         "round_idx": round_idx,
         "pool_exhausted": pool_exhausted,
@@ -735,7 +929,10 @@ def run_one_round(
         "n_tasks": len(queue.get("tasks", [])),
         "n_sim_success": n_success_tasks,
         "n_pending_tasks": n_pending,
-        "queue_complete": queue_complete,
+        "n_chunk_tasks": sync_status.get("n_chunk_tasks", 0),
+        "sync_ok": bool(sync_status.get("sync_ok", False)),
+        "sim_complete": sim_complete,
+        "queue_complete": sim_complete,
         "replanned": replanned,
     }
 
@@ -773,6 +970,11 @@ def main():
     parser.add_argument("--score-threshold", type=float, default=70.0)
     parser.add_argument("--no-auto-refill", action="store_true")
     parser.add_argument("--rotation", action="store_true")
+    parser.add_argument(
+        "--no-early-stop-yaw-on-success",
+        action="store_true",
+        help="禁用：candidate 任一 yaw 成功后仍 sim 其余 yaw（默认开启 early-stop）",
+    )
     parser.add_argument(
         "--merge-deduplicate", action="store_true",
         help="合并 merged 时去重 (默认不去重)",
@@ -824,43 +1026,53 @@ def main():
         auto_refill=not args.no_auto_refill,
         score_threshold=args.score_threshold,
         no_rotation=not args.rotation,
+        early_stop_on_candidate_success=not args.no_early_stop_yaw_on_success,
     )
 
     state_path = os.path.join(outdir, "state.json")
     state = _load_state(state_path) if args.resume else {"round": 0, "objects": {}}
-    start_round = int(state.get("round", 0)) if args.resume else 0
 
     print(f"Out: {outdir}")
     print(f"Pool: {pool_dir}")
     print(f"Merged: {merged_dir}")
-    print(f"Rounds: {args.max_rounds}  start_round: {start_round}")
+    print(f"Max rounds (sync_ok gate): {args.max_rounds}  state.round: {state.get('round', 0)}")
     print(
         f"Sim: {len(sim_gpu_ids)} GPU × {args.sim_per_gpu}/GPU = "
         f"{len(sim_gpu_ids) * args.sim_per_gpu} workers",
     )
 
-    for i in range(args.max_rounds):
-        r = start_round + i
+    rounds_advanced = 0
+    while rounds_advanced < args.max_rounds:
+        r = int(state.get("round", 0))
         print(f"\n{'='*60}")
         print(f"Round {r} ({round_tag(r)})")
         meta = run_one_round(cfg, r, resume=args.resume)
-        if meta.get("queue_complete", False):
+        if meta.get("sync_ok", False):
             state["round"] = r + 1
             _save_state(state_path, state)
+            rounds_advanced += 1
         else:
             state["round"] = r
             _save_state(state_path, state)
             print(
-                f"⚠️  Round {r} incomplete "
-                f"({meta.get('n_pending_tasks', '?')} pending tasks); "
-                f"state.round stays at {r} (re-run with --resume)",
+                f"⚠️  Round {r}: chunk↔queue sync failed; "
+                f"state.round stays at {r} (re-run with --resume to retry sync)",
+                flush=True,
+            )
+            break
+
+        if not meta.get("sim_complete", False):
+            print(
+                f"  Note: {meta.get('n_pending_tasks', '?')} task(s) have no chunk record "
+                f"(sim not finished); advanced because chunk and queue match.",
+                flush=True,
             )
 
         if meta["pool_exhausted"] and cfg.auto_refill:
             auto_refill_pool(
                 cfg,
                 r,
-                queue_complete=bool(meta.get("queue_complete", False)),
+                sim_complete=bool(meta.get("sim_complete", False)),
             )
         elif meta["pool_exhausted"]:
             print("⚠️  Pool exhausted (--no-auto-refill); stop after this round")

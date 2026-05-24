@@ -293,6 +293,8 @@ python3 scripts/batch_sim_candidates_pool.py \
 
 每轮默认 **500 candidate 槽位 × 4 yaw = 2000** sim task；低成功物体因加权会被更频繁抽到。
 
+**Early-stop（默认开启）：** 同一 `(obj, candidate)` **任一 yaw 抓取成功** 后，其余未试 yaw **不再进 Isaac sim**，在 chunk 中写 `skipped: true` 行；registry 将该 candidate 标为 resolved，下轮规划不再抽取。禁用：`--no-early-stop-yaw-on-success`。
+
 | 参数 | 默认 | 含义 |
 |------|------|------|
 | `--outdir` | `output/grasp_collect_no_rot` | 实验根目录 |
@@ -369,8 +371,9 @@ auto-refill 时 sim batch 用 **merged 成功数中位数（round≥3）** 作 `
 | 场景 | 做法 |
 |------|------|
 | 正常续跑 | 保留 `state.json`、`merged/`、`pool/`、`robot_gt/`、`sim_pool_registry.json`；加 `--resume` |
-| 某轮 worker crash / Ctrl+C | `--resume` 自动读 `sim_logs/round_R/chunks/chunk_*_results.json`，跳过已完成 task，只补 pending；`state.round` **不会**进位直到该轮 queue 完成 |
-| mid-round 中断 | 每个 worker 结束或 Ctrl+C 时 batch 会把磁盘 results ingest 进 `completed_task_ids` / registry；**无需等整轮跑完** |
+| 某轮 worker crash / Ctrl+C | `--resume` 从 **chunk results** 重建 `completed_task_ids`；只 sim **chunk 无记录** 的 task |
+| mid-round 中断 | worker 结束 / 每 ~5s / Ctrl+C / 轮末：从 **chunk 扫盘** 同步 queue+registry（chunk 为唯一真相） |
+| 进下一轮 | `state.round` 仅在 **chunk↔queue sync_ok** 后 +1；**不要求** 2000/2000 sim 跑满（pending=无 chunk 记录可保留） |
 | 新 outdir、round 从 0 | 新 `--outdir` 或 `state.json` → `{"round": 0}`；仍需 `merged/` 做加权 |
 | 换 pool / 上传新 pool 后 | **手动**清 `sim_pool_registry.json` 或删被覆盖物体的 registry 条目（§2.3）；auto-refill 仅自动清被 refill 物体（§7） |
 | pool 已 sim 过 | 保留 `sim_pool_registry.json`，否则同一 candidate 可能被重抽 |
@@ -388,7 +391,8 @@ auto-refill 时 sim batch 用 **merged 成功数中位数（round≥3）** 作 `
 | 同 GPU 多 worker OOM / crash | 降低 `--sim-per-gpu` |
 | worker 0 results | 该 task 不在 `chunk_*_results.json` 中 → `--resume` 会补跑；不会标 `simulated` |
 | 换 pool 后 registry 与 pose 对不上 | 删 `sim_pool_registry.json` 或按物体清 registry（§2.3） |
-| mid-round Ctrl+C 后重跑 | 已完成 task 会写入 `completed_task_ids`（来自 chunk results）；**不会**重复 sim（除非 worker 未写出 results） |
+| mid-round Ctrl+C 后重跑 | `completed_task_ids` 由 chunk 重建；有 chunk 行的 task **不会**重 sim |
+| chunk 有、queue 无（旧 ingest 缺口） | 轮末 sync 会补齐；或 `sync_queue_and_registry_from_chunks()` 手动跑一次 |
 
 ---
 
