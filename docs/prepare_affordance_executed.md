@@ -56,15 +56,34 @@ python3 tools/prepare_affordance_executed.py --no-hp   # 关闭 HP
 bash scripts/run_prepare_affordance_executed.sh
 ```
 
-## 训练
+## 输出 HDF5（默认）
 
-完整训练说明见 **[`docs/train_affordance.md`](train_affordance.md)**（`model/affordance.train`，soft heatmap + debug 过拟合）。
+| 文件 | 说明 |
+|------|------|
+| `affordance_all.h5` | 全量二值（默认必写） |
+| `affordance_all_soft.h5` | 全量 soft（默认必写，除非 `--no-soft`） |
+| `objects_train_val_split.json` | train/val 物体列表（用于训练划分） |
 
-`human_priors` 在 HDF5 中有字段，但当前 **未** 拼进网络输入；要用于训练需改 Dataset/模型通道数。
+加 **`--write-split`** 时再写：`affordance_train.h5`, `affordance_val.h5`, `affordance_train_soft.h5`, `affordance_val_soft.h5`（共 6 个 h5）。
+
+仅从已有 binary 重算 soft（不跑 merged）：
 
 ```bash
-python -m model.affordance.train \
-  --dataset_dir output/affordance_no_rot_executed \
-  --gpus 0 \
-  --batch_size 64
+python3 tools/prepare_affordance_executed.py \
+  --export-soft-only \
+  --dataset-dir output/affordance_no_rot_executed \
+  --heatmap-sigma-ratio 0.03 \
+  --overwrite
 ```
+
+已有 train/val、要补全量且**不覆盖原文件**：
+
+```bash
+python3 tools/merge_affordance_h5_splits.py --dataset-dir output/affordance_no_rot_executed
+```
+
+## 训练
+
+见 **[`docs/train_affordance.md`](train_affordance.md)**（`python -m model.train_v6`，仍用 train/val soft h5）
+
+`human_priors` 在 HDF5 中有字段，v6 默认 **未** 用作监督或输入。
