@@ -52,7 +52,7 @@ Dataset 内 **直接 mirror 仓库相对路径**（顶层即 `sim/`、`output/`�
 | `output/grasp_collect_no_rot/candidates/pool/` | ✅ | 同上（**见 §2.3**；HF 当前为旧 ~200 cand/物体，新 pool 上传后 **同路径覆盖**） |
 | `output/grasp_collect_no_rot/merged/` | ✅ | 同上 |
 | `output/grasp_collect_no_rot/state.json` | ✅ | 同上 |
-| `output/grasp_collect_no_rot/robot_gt/` | 推荐 | 同上 |
+| `output/grasp_collect_no_rot/robot_gt/` | 可选 | 仅本轮 sim 输出；规划/auto-refill **不依赖**历史 `robot_gt` |
 | `data_hub/meshes/SAM3DMesh/rotated_mesh/` | ⚠️ auto-refill | `data_hub/meshes/SAM3DMesh/rotated_mesh/` |
 | `data_hub/ProcessedData/train_fp_rotated/` | ⚠️ auto-refill | `data_hub/ProcessedData/train_fp_rotated/` |
 | `data_hub/ProcessedData/obj_meshes/**/scale.json` | ⚠️ auto-refill | `data_hub/ProcessedData/obj_meshes/`（**仅 scale.json**） |
@@ -96,7 +96,7 @@ $PROJ/                                          ← git clone 的 Affordance2Gra
 │       ├── candidates/pool/{OBJ}_grasp.hdf5    ← 来自 HF
 │       ├── merged/{OBJ}_robot_gt_merged.hdf5   ← 来自 HF
 │       ├── state.json                          ← 来自 HF
-│       └── robot_gt/round_*/                   ← 来自 HF（推荐）
+│       └── robot_gt/round_*/                   ← 可选（仅 sim 输出；规划不依赖历史）
 └── data_hub/                                   ← 来自 HF（auto-refill）
     ├── meshes/SAM3DMesh/rotated_mesh/...
     └── ProcessedData/
@@ -297,9 +297,9 @@ python3 scripts/batch_sim_candidates_pool.py \
 
 | 模式 | 行为 |
 |------|------|
-| **weighted**（默认） | 每个 pool 内 eligible 物体按 `1/(success+1)` 加权（success 来自 round≥3 的 merged 累计） |
+| **weighted**（默认） | 每个 pool 内 eligible 物体按 `1/(success+1)` 加权（success = `merged/` 内 `n_successful`） |
 | **`--equal-object-prob`** | eligible 物体 **等概率** 被抽到 |
-| **`--max-success-per-object N`** | round≥3 累计成功 ≥ N 的物体本轮 prob=0（与 weighted/equal 可叠加） |
+| **`--max-success-per-object N`** | merged 内成功数 ≥ N 的物体本轮 prob=0（与 weighted/equal 可叠加） |
 
 `round_{R}_task_queue.json` 会记录 `object_sampling: weighted|equal` 及可选 `max_success_per_object`。
 
@@ -309,7 +309,7 @@ python3 scripts/batch_sim_candidates_pool.py \
 # 物体等概率（不再偏向低成功物体）
 python3 scripts/batch_sim_candidates_pool.py --equal-object-prob --max-rounds 1
 
-# round≥3 累计成功 ≥80 的物体本轮不再被抽
+# merged 成功 ≥80 的物体本轮不再被抽
 python3 scripts/batch_sim_candidates_pool.py --max-success-per-object 80 --max-rounds 1
 ```
 
@@ -329,7 +329,7 @@ python3 scripts/batch_sim_candidates_pool.py --max-success-per-object 80 --max-r
 | `--no-auto-refill` | 关 | pool 空时不调候选池生成 |
 | `--resume` | 关 | 读 `state.json`；续跑未完成 `task_queue` |
 | `--equal-object-prob` | 关 | slot 规划时物体等概率（默认 weighted） |
-| `--max-success-per-object` | 无 | round≥3 成功 ≥ N 的物体 prob=0 |
+| `--max-success-per-object` | 无 | merged 成功 ≥ N 的物体 prob=0 |
 | `--no-early-stop-yaw-on-success` | 关 | 禁用 early-stop（成功仍 sim 其余 yaw） |
 | `--plan-seed` | 无 | slot 规划 RNG 种子（可复现） |
 | `--sim-timeout` | 7200 | 单 worker chunk 超时（秒） |
@@ -384,7 +384,7 @@ python3 scripts/batch_gen_candidates_pool.py \
   --force
 ```
 
-auto-refill 时 sim batch 用 **merged 成功数中位数（round≥3）** 作 `--success-threshold`，并固定 `--force`。
+auto-refill 时 sim batch 用 **merged 成功数中位数** 作 `--success-threshold`，并固定 `--force`。
 
 **Auto-refill 与 registry：** refill 会用 `--force` **覆盖** 低成功物体的 pool HDF5。成功后 batch 会：
 

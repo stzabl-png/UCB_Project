@@ -17,7 +17,7 @@ Pool 路线详见 **第 5 节**；Legacy 见 **第 4 节**。
 |------|------|
 | `output/grasp_collect_no_rot/` | **当前** 修改版 legacy batch 默认（rotated SAM3D + `train_fp_rotated` sampler） |
 | `output/grasp_collect_legacy/` | 旧一轮实验（原 `grasp_collect` 改名保留） |
-| `output/grasp_collect/` | placement batch 等仍可能共用（见 `batch_grasp_collect_placement.py`） |
+| `output/grasp_collect/` | 旧实验目录（placement 流水线已移除） |
 
 下文示例路径以 **`grasp_collect_no_rot`** 为准；续跑时 `--outdir` 必须与已有 `state.json` 一致。
 
@@ -576,7 +576,7 @@ batch_sim_candidates_pool.py（候选池 sim batch）
 - Registry **resolved**：任一 yaw **成功**（early-stop），或 4 yaw 都 attempted 且全失败（标 `simulated`，不再重抽）。
 - **Early-stop（默认）：** 同一 candidate 任一 yaw 成功后，其余 yaw 写 synthetic `skipped` chunk 行，不进 Isaac。禁用：`--no-early-stop-yaw-on-success`。
 - Sim 侧 **长驻 worker**，chunk 内顺序多物体；**换物体不重建 World/Franka**；chunk 异常退出 **最多自动重试 2 次**。
-- 同一张 GPU 上多个 worker **错开 10s** 启动（减轻 Isaac kvdb/CUDA 竞态）。
+- 同一张 GPU 上多个 worker **错开启动**（默认 45s，`--same-gpu-stagger-s`；每 worker 独立 Kit cache 目录，减轻 kvdb/CUDA 竞态）。
 - **续跑：** `sim_logs/round_R/chunks/chunk_*_results.json` 为真相；`state.round` 仅 **sync_ok** 后 +1。
 
 ### 5.2 输出路径（在 Legacy 基础上新增）
@@ -589,6 +589,8 @@ batch_sim_candidates_pool.py（候选池 sim batch）
 | `round_{R}_task_queue.json` | task 队列、`completed_task_ids`、`object_sampling` |
 | `sim_logs/round_{R}/chunks/chunk_*` | worker chunk、`chunk_*_results.json`、`chunk_*_progress.json` |
 | `sim_logs/round_{R}/chunks/synthesized_skipped_results.json` | early-stop 合成的 skipped 行（sync 时合并） |
+| `sim_logs/round_{R}/chunks/accumulated_results.json` | resume 前归档的 round 级 results（chunk 重分片不丢进度） |
+| `sim_logs/round_{R}/kit_cache/` | 每 worker 独立 Kit/Omni 缓存目录 |
 | `sim_logs/round_{R}/chunk_*_gpu*.log` | 各 worker Isaac 日志 |
 
 `candidates/round_R/`、`robot_gt/round_R/`、`merged/`、`state.json`、`summary.csv` 与 Legacy **同一约定**。
@@ -648,7 +650,7 @@ python3 scripts/batch_sim_candidates_pool.py --resume --max-rounds 10 ...
 # 物体等概率
 python3 scripts/batch_sim_candidates_pool.py --equal-object-prob --max-rounds 1
 
-# round≥3 累计成功 ≥80 的物体本轮不再参与规划
+# merged 累计成功 ≥80 的物体本轮不再参与规划
 python3 scripts/batch_sim_candidates_pool.py --max-success-per-object 80 --max-rounds 1
 ```
 
@@ -667,9 +669,20 @@ python3 scripts/batch_sim_candidates_pool.py --max-success-per-object 80 --max-r
 | `--resume` | 关 | 读 `state.json`；从 chunk 重建 queue 并补 pending |
 | `--no-auto-refill` | 关 | 关闭 pool 空时自动候选池生成 |
 | `--equal-object-prob` | 关 | slot 规划时物体等概率 |
-| `--max-success-per-object` | 无 | round≥3 成功 ≥ N 的物体 prob=0 |
+| `--max-success-per-object` | 无 | merged 成功 ≥ N 的物体 prob=0 |
 | `--no-early-stop-yaw-on-success` | 关 | 禁用 early-stop |
 | `--plan-seed` | 无 | slot 规划可复现 |
+| `--same-gpu-stagger-s` | `45` | 同 GPU 上多 worker 启动间隔（秒） |
+| `--incremental-merge` | 关 | merge：已有 `merged/` + 仅本轮 `robot_gt/round_R` |
+| `--full-merge` | 关 | 强制全量扫描 `robot_gt/round_*` |
+
+迁服务器续跑示例（不必拷贝历史 `robot_gt/round_*`）：
+
+```bash
+python3 scripts/batch_sim_candidates_pool.py \
+  --outdir output/grasp_collect_no_rot \
+  --incremental-merge --resume --max-rounds 5 ...
+```
 
 上例：**2 × 4 = 8** 个 Isaac 进程；每轮规划 **500×4 = 2000** task（early-stop 下实际 sim 可能更少）。
 
@@ -681,7 +694,7 @@ python3 scripts/batch_sim_candidates_pool.py --max-success-per-object 80 --max-r
 |------|------|
 | worker **0 results**（未写出 chunk results） | task 不在 `completed_task_ids`；`--resume` 补跑 |
 | worker chunk 崩溃 | batch **自动重试 ≤2 次**（间隔 15s），重试前 sync chunk |
-| mid-round 中断 | 启动前 / ~5s / worker 结束 / Ctrl+C / 轮末：从 **chunk 扫盘** sync queue+registry |
+| mid-round 中断 / resume 重分 chunk | 重分 chunk 前写入 `accumulated_results.json`；~5s / worker 结束 / Ctrl+C / 轮末从 chunk+archive 扫盘 sync |
 | 有 chunk 行的 task | **不会**重复 sim |
 | 4 yaw 全失败 | 标 `simulated`，下轮不再抽 |
 | 任一 yaw 成功 | early-stop + `success_yaws`；candidate **resolved** |
@@ -738,6 +751,8 @@ cat output/grasp_collect_no_rot/round_0015_task_queue.json | python3 -m json.too
 | `--no-convert` | 关 | 跳过 USD 转换 |
 | `--resume` | 关 | 跳过已有 HDF5 |
 | `--merge-deduplicate` | 关 | 写 `merged/` 时去掉相近 pose |
+| `--incremental-merge` | 关 | 读已有 `merged/` + 仅本轮 `robot_gt/round_R`（迁服务器不必拷历史 `round_*`） |
+| `--full-merge` | 关 | 强制全量扫描 `robot_gt/round_*`（覆盖 incremental） |
 | `--rotation` | 关 | 加上则使用 `rotation.json`（一般不要） |
 
 ### HDF5 中的 `mesh_prerotation/`（pose 级）

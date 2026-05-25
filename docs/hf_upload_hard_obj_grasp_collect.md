@@ -93,9 +93,8 @@ rsync -a output/grasp_collect_no_rot/merged/ \
 cp output/grasp_collect_no_rot/state.json \
   "$STAGING/output/grasp_collect_no_rot/state.json"
 
-# 推荐：历史 robot_gt（merge + 加权）
-rsync -a output/grasp_collect_no_rot/robot_gt/ \
-  "$STAGING/output/grasp_collect_no_rot/robot_gt/"
+# 历史 robot_gt 不必上传（weighted / max-success / auto-refill 均读 merged；
+# incremental-merge 只需 merged + 新机器上本轮 round_* robot_gt）
 
 # 续跑 registry（可选）；整包换 pool 上传时通常 **不要** 带 Titan 的 registry
 [ -f output/grasp_collect_no_rot/sim_pool_registry.json ] && \
@@ -229,7 +228,7 @@ staging/
 │       ├── candidates/pool/
 │       ├── merged/
 │       ├── state.json
-│       └── robot_gt/
+│       └── (robot_gt/ 不必上传；新 round 在本地生成)
 └── data_hub/
     ├── meshes/SAM3DMesh/rotated_mesh/
     └── ProcessedData/
