@@ -123,7 +123,8 @@ def _launch_sim(
 ) -> subprocess.Popen:
     os.makedirs(result_dir, exist_ok=True)
     env = os.environ.copy()
-    env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+    env.pop("CUDA_VISIBLE_DEVICES", None)
+    env["ISAAC_SIM_GPU_ID"] = str(gpu_id)
     cmd = [
         isaac_py, SIM_SCRIPT,
         "--hdf5", hdf5,

@@ -55,7 +55,29 @@ parser.add_argument(
 )
 args, _ = parser.parse_known_args()
 
-simulation_app = SimulationApp({"headless": args.headless})
+
+def _resolve_isaac_sim_gpu_id() -> int:
+    """Physical GPU index for Isaac/cuRobo (prefer ISAAC_SIM_GPU_ID over CUDA_VISIBLE_DEVICES)."""
+    raw = os.environ.get("ISAAC_SIM_GPU_ID")
+    if raw is not None and str(raw).strip() != "":
+        return int(raw)
+    cvd = os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
+    if cvd:
+        first = cvd.split(",")[0].strip()
+        if first:
+            return int(first)
+    return 0
+
+
+_SIM_GPU_ID = _resolve_isaac_sim_gpu_id()
+_launch_cfg: dict = {
+    "headless": args.headless,
+    "multi_gpu": False,
+    "max_gpu_count": 1,
+    "active_gpu": _SIM_GPU_ID,
+    "physics_gpu": _SIM_GPU_ID,
+}
+simulation_app = SimulationApp(_launch_cfg)
 
 
 # render=True 在非 headless 模式显示流畅运动；headless 模式下 render=False 加速
@@ -65,6 +87,16 @@ import numpy as np
 import h5py
 import torch
 from termcolor import cprint
+
+if os.environ.get("CUDA_VISIBLE_DEVICES", "").strip():
+    torch.cuda.set_device(0)
+else:
+    torch.cuda.set_device(_SIM_GPU_ID)
+print(
+    f"[grasp-sim] Isaac GPU {_SIM_GPU_ID} "
+    f"(torch cuda:{torch.cuda.current_device()})",
+    flush=True,
+)
 from scipy.spatial.transform import Rotation
 
 from isaacsim.core.api import World

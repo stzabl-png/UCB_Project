@@ -72,6 +72,7 @@ else:
 _launch_cfg: dict = {
     "headless": args.headless,
     "multi_gpu": False,
+    "max_gpu_count": 1,
     "active_gpu": _SIM_GPU_ID,
     "physics_gpu": _SIM_GPU_ID,
 }
