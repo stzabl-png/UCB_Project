@@ -53,7 +53,45 @@ _FIRST_TASK_ELAPSED_S: float | None = None
 _FIRST_TASK_STARTED = False
 
 _SIM_GPU_ID = int(os.environ.get("ISAAC_SIM_GPU_ID", "0"))
+_PHYSICAL_GPU_ID = int(
+    os.environ.get("ISAAC_PHYSICAL_GPU_ID", os.environ.get("ISAAC_SIM_GPU_ID", "0"))
+)
+_STRICT_GPU_MASK = os.environ.get("STRICT_GPU_MASK") == "1"
 _STARTUP_SLOTS = int(os.environ.get("ISAAC_STARTUP_SLOTS_PER_GPU", "0"))
+
+
+def _log_gpu_isolation_env() -> None:
+    print(f"[gpu-isolation] strict_gpu_mask={_STRICT_GPU_MASK}", flush=True)
+    print(f"[gpu-isolation] physical_gpu_id={_PHYSICAL_GPU_ID}", flush=True)
+    print(
+        f"[gpu-isolation] CUDA_DEVICE_ORDER={os.environ.get('CUDA_DEVICE_ORDER')!r}",
+        flush=True,
+    )
+    print(
+        f"[gpu-isolation] CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')!r}",
+        flush=True,
+    )
+    print(
+        f"[gpu-isolation] ISAAC_PHYSICAL_GPU_ID={os.environ.get('ISAAC_PHYSICAL_GPU_ID')!r}",
+        flush=True,
+    )
+    print(
+        f"[gpu-isolation] logical ISAAC_SIM_GPU_ID={os.environ.get('ISAAC_SIM_GPU_ID')!r}",
+        flush=True,
+    )
+
+
+def _log_gpu_isolation_torch() -> None:
+    import torch as _torch
+
+    print(f"[gpu-isolation] torch.cuda.device_count={_torch.cuda.device_count()}", flush=True)
+    print(f"[gpu-isolation] torch.cuda.current_device={_torch.cuda.current_device()}", flush=True)
+    if _torch.cuda.device_count() > 0:
+        print(
+            f"[gpu-isolation] torch.cuda.get_device_name(0)="
+            f"{_torch.cuda.get_device_name(0)!r}",
+            flush=True,
+        )
 
 
 def _worker_log_event(event: str, **fields) -> None:
@@ -61,7 +99,7 @@ def _worker_log_event(event: str, **fields) -> None:
         "[pool-worker-ts]",
         f"utc={datetime.now(timezone.utc).isoformat()}",
         f"elapsed_s={time.monotonic() - _PROCESS_START_TS:.3f}",
-        f"gpu={_SIM_GPU_ID}",
+        f"gpu={_PHYSICAL_GPU_ID}",
         f"chunk={_CHUNK_ID}",
         f"event={event}",
     ]
@@ -70,23 +108,24 @@ def _worker_log_event(event: str, **fields) -> None:
 
 
 _worker_log_event("process_start", pid=os.getpid(), worker_chunk=args.worker_chunk)
+_log_gpu_isolation_env()
 
 if _STARTUP_SLOTS > 0:
     _worker_log_event("before_acquire_startup_semaphore", max_slots=_STARTUP_SLOTS)
     print(
-        f"[pool-worker] GPU {_SIM_GPU_ID} {_CHUNK_ID}: "
+        f"[pool-worker] GPU {_PHYSICAL_GPU_ID} {_CHUNK_ID}: "
         f"waiting for cold-start slot (max {_STARTUP_SLOTS}/GPU)...",
         flush=True,
     )
     acquire_gpu_startup_slot(
-        _SIM_GPU_ID,
+        _PHYSICAL_GPU_ID,
         _OUTDIR,
         _ROUND_IDX,
         max_slots=_STARTUP_SLOTS,
     )
     _worker_log_event("after_acquire_startup_semaphore", max_slots=_STARTUP_SLOTS)
     print(
-        f"[pool-worker] GPU {_SIM_GPU_ID} {_CHUNK_ID}: "
+        f"[pool-worker] GPU {_PHYSICAL_GPU_ID} {_CHUNK_ID}: "
         f"acquired cold-start slot, launching Isaac...",
         flush=True,
     )
@@ -115,7 +154,7 @@ try:
     )
 finally:
     if _held_startup_slot:
-        release_gpu_startup_slot(_SIM_GPU_ID, _OUTDIR, _ROUND_IDX)
+        release_gpu_startup_slot(_PHYSICAL_GPU_ID, _OUTDIR, _ROUND_IDX)
         _worker_log_event("after_release_startup_semaphore")
 
 
@@ -123,13 +162,13 @@ if bool(_chunk_meta.get("worker_start_barrier", False)):
     _round_dir = os.path.join(_OUTDIR, "sim_logs", f"round_{_ROUND_IDX:04d}")
     _ready_dir = os.path.join(_round_dir, "ready")
     _start_flag = os.path.join(_round_dir, "start.flag")
-    _ready_path = os.path.join(_ready_dir, f"{_CHUNK_ID}_gpu{_SIM_GPU_ID}.ready")
+    _ready_path = os.path.join(_ready_dir, f"{_CHUNK_ID}_gpu{_PHYSICAL_GPU_ID}.ready")
     os.makedirs(_ready_dir, exist_ok=True)
     with open(_ready_path, "w", encoding="utf-8") as _rf:
         json.dump(
             {
                 "chunk_id": _CHUNK_ID,
-                "gpu_id": _SIM_GPU_ID,
+                "gpu_id": _PHYSICAL_GPU_ID,
                 "pid": os.getpid(),
                 "ready_utc": datetime.now(timezone.utc).isoformat(),
                 "startup_elapsed_s": (
@@ -161,6 +200,7 @@ import h5py
 import torch
 from termcolor import cprint
 
+_log_gpu_isolation_torch()
 torch.cuda.set_device(_SIM_GPU_ID)
 from scipy.spatial.transform import Rotation
 

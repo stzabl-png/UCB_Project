@@ -117,6 +117,7 @@ class PoolSimConfig:
     early_stop_on_candidate_success: bool
     worker_start_barrier: bool
     startup_ready_timeout_s: float
+    strict_gpu_mask: bool
 
 
 def _run_cmd(
@@ -437,6 +438,7 @@ def _make_isaac_worker_env(
     round_idx: int,
     chunk_path: str,
     isaac_startup_slots_per_gpu: int = 0,
+    strict_gpu_mask: bool = False,
 ) -> dict:
     """Isolate Kit/Omniverse state per worker for same-GPU parallel.
 
@@ -445,9 +447,22 @@ def _make_isaac_worker_env(
     OMNI_USER (unique /tmp/hub-<user>.lock), and per-worker TMPDIR.
     """
     env = base_env.copy()
-    # Use physical GPU index for Isaac/cuRobo; do NOT mask with CUDA_VISIBLE_DEVICES
-    # (PhysX on Isaac 5.0 fails with "no suitable CUDA GPU" when only GPU1 is visible).
-    env["ISAAC_SIM_GPU_ID"] = str(gpu_id)
+    if strict_gpu_mask:
+        # In strict GPU mask mode, CUDA_VISIBLE_DEVICES=<physical_gpu_id>
+        # remaps that physical GPU to logical CUDA device 0 inside the worker.
+        # Therefore Isaac active_gpu/physics_gpu and torch.cuda.set_device must use 0,
+        # not the physical GPU id.
+        env["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+        env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+        env["ISAAC_PHYSICAL_GPU_ID"] = str(gpu_id)
+        env["ISAAC_SIM_GPU_ID"] = "0"
+        env["STRICT_GPU_MASK"] = "1"
+    else:
+        env.pop("CUDA_VISIBLE_DEVICES", None)
+        env.pop("ISAAC_PHYSICAL_GPU_ID", None)
+        env.pop("STRICT_GPU_MASK", None)
+        # Use physical GPU index for Isaac/cuRobo; do NOT mask with CUDA_VISIBLE_DEVICES.
+        env["ISAAC_SIM_GPU_ID"] = str(gpu_id)
     chunk_id = os.path.basename(chunk_path).replace(".json", "")
     cache_root = os.path.join(
         outdir,
@@ -558,6 +573,7 @@ def run_sim_worker(
         round_idx=int(chunk_meta["round_idx"]),
         chunk_path=chunk_path,
         isaac_startup_slots_per_gpu=cfg.isaac_startup_slots_per_gpu,
+        strict_gpu_mask=cfg.strict_gpu_mask,
     )
     rc, out = _run_cmd(sim_cmd, timeout=cfg.sim_timeout, log_path=log_path, env=env)
 
@@ -1238,6 +1254,14 @@ def main():
         help="同 GPU 同时进行 Isaac 冷启动 (至 Startup Complete) 的上限; 0=不限制 (默认 2)",
     )
     parser.add_argument(
+        "--strict-gpu-mask",
+        action="store_true",
+        help=(
+            "每 worker 仅可见分配的物理 GPU (CUDA_VISIBLE_DEVICES=<id>); "
+            "worker 内 Isaac/torch 使用逻辑 GPU 0"
+        ),
+    )
+    parser.add_argument(
         "--worker-start-barrier",
         action="store_true",
         help=(
@@ -1355,6 +1379,7 @@ def main():
         early_stop_on_candidate_success=not args.no_early_stop_yaw_on_success,
         worker_start_barrier=args.worker_start_barrier,
         startup_ready_timeout_s=args.startup_ready_timeout_s,
+        strict_gpu_mask=args.strict_gpu_mask,
     )
 
     state_path = os.path.join(outdir, "state.json")
@@ -1379,6 +1404,11 @@ def main():
         f"Sim: {len(sim_gpu_ids)} GPU × {args.sim_per_gpu}/GPU = "
         f"{len(sim_gpu_ids) * args.sim_per_gpu} workers",
     )
+    if cfg.strict_gpu_mask:
+        print(
+            "  GPU isolation: strict (--strict-gpu-mask; "
+            "CUDA_VISIBLE_DEVICES per worker, logical GPU 0 in Isaac/torch)",
+        )
 
     rounds_advanced = 0
     while rounds_advanced < args.max_rounds:
