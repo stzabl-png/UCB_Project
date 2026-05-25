@@ -448,13 +448,14 @@ def rollout_chunked(scene, server_url, info, pc0_G, origin_world,
     n_obs    = int(info["n_obs_steps"])
     n_action = int(info["n_action_steps"])
 
-    def _pin():
-        obj.rigid.set_world_pose(obj_pos_w, obj_quat)
+    def _qpos_corrupt():
+        """Mid-execute NaN/extreme-qpos detector (mirrors v4 collector L603-612).
+        With pin removed, PhysX corruption is no longer masked — abort cleanly."""
         try:
-            obj.rigid.set_linear_velocity(np.zeros(3))
-            obj.rigid.set_angular_velocity(np.zeros(3))
+            qa = np.asarray(franka.get_joint_positions(), dtype=np.float64)
+            return (not np.isfinite(qa).all()) or (np.max(np.abs(qa)) > 10.0)
         except Exception:
-            pass
+            return True
 
     obj_centroid_w = np.asarray(obj_pos_w, dtype=np.float64)
     executed = []
@@ -462,9 +463,10 @@ def rollout_chunked(scene, server_url, info, pc0_G, origin_world,
     gripper_closed = False
     initial_z = None
 
+    # Match v4 collector L593-596: open gripper + free step (NO pin).
     franka.open_gripper()
     for _ in range(5):
-        world.step(render=True); _pin()
+        world.step(render=True)
 
     obs0 = build_observation(scene, pc0_G, origin_world, gripper_state=0.0)
     obs_window = [obs0] * n_obs
@@ -522,7 +524,9 @@ def rollout_chunked(scene, server_url, info, pc0_G, origin_world,
                     world.step(render=True)         # let gripper close (no pin)
                 gripper_closed = True
 
-            # Drive arm: kinematic+pin while open, PD after close
+            # Drive arm: gripper-open uses teleport+PD-sync (match v4 collector
+            # L617-619 pre-grasp/final); gripper-closed uses pure PD (match v4
+            # collector L672-676 lift). NO pinning on object in either case.
             if gripper_closed:
                 franka.close_gripper()              # re-assert closed each step
                 franka.apply_action(ArticulationAction(
@@ -531,10 +535,20 @@ def rollout_chunked(scene, server_url, info, pc0_G, origin_world,
                     world.step(render=True)
             else:
                 grip_finger = franka.get_joint_positions()[7:9]
-                franka.set_joint_positions(np.concatenate([qpos[k], grip_finger]))
+                full_q = np.concatenate([qpos[k], grip_finger])
+                franka.set_joint_positions(full_q)                  # teleport
+                franka.apply_action(ArticulationAction(             # PD target sync
+                    joint_positions=full_q))
                 for _ in range(2):
                     world.step(render=True)
-                _pin()
+
+            # Mid-execute PhysX corruption check (mirrors collector L623-625)
+            if _qpos_corrupt():
+                cprint(f"  ⚠️ PhysX corrupted Franka qpos at chunk {chunk} step {k} — abort", "red")
+                return {"success": False, "dz": 0.0, "n_chunks": chunk + 1,
+                        "grip_signal_idx": grip_signal_idx,
+                        "n_executed": len(executed),
+                        "stage": "physx_corrupt"}
 
             executed.append((chunk_wps[k][0].copy(), chunk_wps[k][1].copy()))
             last_qpos = qpos[k].copy()
@@ -645,8 +659,29 @@ def close_and_lift(scene, grasp_pos_w, grasp_quat_w, obj_pos_w, obj_quat):
 # Per-episode eval (one rollout)
 # ============================================================
 def eval_one_episode(scene, ep_path, info):
-    """Open the episode hdf5; place obj; init Franka; rollout; close+lift; return result."""
+    """Open the episode hdf5; place obj; init Franka; rollout; close+lift; return result.
+
+    Returns dict with key 'parent_poisoned': True if Franka articulation state is
+    NaN/extreme at episode start (a previous episode's PhysX corruption persisted
+    into this process). Caller should stop the run when this is set.
+    """
     name = os.path.basename(ep_path)
+
+    # Pre-episode sanity check (mirrors v4 collector L1024-1032). If the previous
+    # episode triggered physx_corrupt, the parent process is poisoned and ALL
+    # remaining eps will silently fail. Detect and abort early.
+    try:
+        qcheck = np.asarray(scene["franka"].get_joint_positions(), dtype=np.float64)
+        if (not np.isfinite(qcheck).all()) or (np.max(np.abs(qcheck)) > 10.0):
+            cprint(f"  ⚠️ pre-ep sanity FAIL — parent process poisoned "
+                   f"(qpos_max={np.nanmax(np.abs(qcheck)):.2e})", "red")
+            cprint(f"     skipping {name} and all remaining episodes", "red")
+            return {"name": name, "success": False, "dz": 0.0,
+                    "stage": "parent_poisoned", "parent_poisoned": True}
+    except Exception as e:
+        cprint(f"  ⚠️ pre-ep sanity check exception: {e}", "red")
+        return {"name": name, "success": False, "dz": 0.0,
+                "stage": "parent_poisoned", "parent_poisoned": True}
     with h5py.File(ep_path, "r") as h:
         obj_origin_G = np.array(h.attrs["obj_origin_G"], dtype=np.float64)
         obj_quat_G   = np.array(h.attrs["obj_quat_G_wxyz"], dtype=np.float64)
@@ -660,15 +695,24 @@ def eval_one_episode(scene, ep_path, info):
     obj_pos_w    = obj_origin_G + sim_origin_W
     origin_world = sim_origin_W                                                # for G↔world
 
+    from omni.isaac.core.utils.types import ArticulationAction
     obj = scene["obj"]
+    # Match v4 collector L1009-1012: teleport to HOME + sync PD target + zero
+    # velocities, so the 100-step free settle doesn't drift toward stale PD target
+    # (previous ep's lift apex).
     scene["franka"].set_joint_positions(HOME_JOINTS)
-    for _ in range(40):                                                       # pin while initialising
-        obj.rigid.set_world_pose(obj_pos_w, obj_quat_G)
-        try:
-            obj.rigid.set_linear_velocity(np.zeros(3))
-            obj.rigid.set_angular_velocity(np.zeros(3))
-        except Exception:
-            pass
+    scene["franka"].apply_action(ArticulationAction(
+        joint_positions=HOME_JOINTS, joint_velocities=np.zeros(9)))
+    scene["franka"].open_gripper()
+    # Match v4 collector: place once + 100 free-settle steps (NO pin).
+    # Object may topple/roll to natural pose — this is the distribution policy was trained on.
+    obj.rigid.set_world_pose(obj_pos_w, obj_quat_G)
+    try:
+        obj.rigid.set_linear_velocity(np.zeros(3))
+        obj.rigid.set_angular_velocity(np.zeros(3))
+    except Exception:
+        pass
+    for _ in range(100):
         scene["world"].step(render=True)
 
     # ── Init Franka at the episode's state[0] via cuRobo single-pose IK ────
@@ -678,9 +722,13 @@ def eval_one_episode(scene, ep_path, info):
     if qpos0 is None:
         cprint(f"  ❌ init IK failed for state[0] of {name}", "red")
         return {"name": name, "success": False, "dz": 0.0, "stage": "init_ik_fail"}
-    scene["franka"].set_joint_positions(np.concatenate([qpos0, [0.04, 0.04]]))
+    init_q = np.concatenate([qpos0, [0.04, 0.04]])
+    scene["franka"].set_joint_positions(init_q)
+    # PD-sync: without this the 15-step hold would drift toward stale PD target
+    scene["franka"].apply_action(ArticulationAction(
+        joint_positions=init_q, joint_velocities=np.zeros(9)))
+    # Match v4 collector: no pin during Franka init — object is already settled.
     for _ in range(15):
-        obj.rigid.set_world_pose(obj_pos_w, obj_quat_G)
         scene["world"].step(render=True)
     ee_after, _ = read_panda_hand_pose(scene["world"].stage)
     init_err = float(np.linalg.norm(ee_after - ee0_pos_w))
@@ -733,8 +781,14 @@ def main():
     with h5py.File(chosen[0], "r") as h:
         cid = int(h.attrs["ycb_class_id"])
     usd = os.path.join(PROJ_ROOT, "output/obj_usd_cad/ycb", f"ycb_dex_{cid:02d}.usd")
-    mass = grasp_physics.object_mass_kg(cid)
-    cprint(f"\n=== object ycb_dex_{cid:02d}  mass={mass}kg ===", "cyan")
+    # Match v4 collector L962: hardcoded mass=0.05kg. Real masses (0.3–0.6kg)
+    # cause PhysX collision force ~10× larger → solver overflow + NaN poison,
+    # AND the policy was trained on the lighter-object distribution → using real
+    # mass at eval means PD needs ~10× more force to lift than training implies.
+    mass = 0.05
+    real_mass = grasp_physics.object_mass_kg(cid)
+    cprint(f"\n=== object ycb_dex_{cid:02d}  mass={mass}kg "
+           f"(real {real_mass}kg, matching training collector) ===", "cyan")
     if not os.path.exists(usd):
         cprint(f"  ❌ USD missing: {usd}", "red")
         simulation_app.close(); return
@@ -742,6 +796,7 @@ def main():
     scene["obj_mesh"] = getattr(scene["obj"], "_curobo_mesh", None)
 
     results = []
+    poisoned = False
     for i, ep in enumerate(chosen):
         cprint(f"\n[{i+1}/{len(chosen)}] {os.path.basename(ep)}", "yellow")
         video_begin()
@@ -756,6 +811,15 @@ def main():
         results.append(r)
         video_end(scene["world"], r["name"].replace(".hdf5", ".mp4"),
                   keep=(r["success"] or args.video_all))
+        if r.get("parent_poisoned"):
+            poisoned = True
+            # Tag remaining eps so summary is honest
+            for ep_rest in chosen[i+1:]:
+                results.append({"name": os.path.basename(ep_rest),
+                                "success": False, "dz": 0.0,
+                                "stage": "skipped_parent_poisoned"})
+            cprint(f"  ⛔ aborting run — {len(chosen)-i-1} remaining eps skipped", "red")
+            break
 
     # ── Summary ────────────────────────────────────────────────────────────
     n_succ = sum(int(r["success"]) for r in results)
