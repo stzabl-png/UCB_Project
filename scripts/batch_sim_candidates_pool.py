@@ -19,9 +19,13 @@ merged/, state.json, summary.csv。
     python3 scripts/batch_sim_candidates_pool.py \\
         --equal-object-prob --max-rounds 1
 
-    # round≥3 累计成功 ≥ 80 的物体不再被抽中:
+    # merged 成功 ≥ 80 的物体不再被抽中:
     python3 scripts/batch_sim_candidates_pool.py \\
         --max-success-per-object 80 --max-rounds 1
+
+    # 增量 merged（只需拷贝 merged/ + 本轮 robot_gt，不必搬历史 round_*）:
+    python3 scripts/batch_sim_candidates_pool.py \\
+        --incremental-merge --resume --max-rounds 1 ...
 
     # 小规模 smoke:
     python3 scripts/batch_sim_candidates_pool.py \\
@@ -47,11 +51,14 @@ from typing import Optional
 import numpy as np
 
 PROJ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(PROJ, "tools"))
+_TOOLS = os.path.join(PROJ, "tools")
+sys.path.insert(0, _TOOLS)
+from merge_robot_gt import merge_robot_gt_files, merge_robot_gt_incremental
 sys.path.insert(0, os.path.join(PROJ, "scripts"))
 
 from grasp_pool_common import (  # noqa: E402
     DEFAULT_SLOTS_PER_ROUND,
+    archive_chunk_results_before_reshuffle,
     build_task_queue,
     clear_registry_for_objects,
     compute_median_success_threshold,
@@ -73,10 +80,8 @@ from batch_gen_candidates_pool import resolve_dataset, select_target_objects  # 
 
 DEFAULT_OUT = os.path.join(PROJ, "output", "grasp_collect_no_rot")
 GEN_POOL_SCRIPT = os.path.join(PROJ, "scripts", "batch_gen_candidates_pool.py")
-MERGE = os.path.join(PROJ, "tools", "merge_robot_gt.py")
 SIM_POOL_SCRIPT = os.path.join(PROJ, "sim", "run_grasp_sim_pool.py")
-SAME_GPU_STAGGER_S = 10.0
-SIM_PROGRESS_POLL_S = 20.0
+SAME_GPU_STAGGER_S = 45.0
 SIM_INGEST_POLL_S = 5.0
 WORKER_CRASH_RETRY_S = 15.0
 WORKER_MAX_RETRIES = 2
@@ -94,7 +99,9 @@ class PoolSimConfig:
     python_bin: str
     sim_gpu_ids: tuple[int, ...]
     sim_per_gpu: int
+    same_gpu_stagger_s: float
     merge_deduplicate: bool
+    incremental_merge: bool
     slots_per_round: int
     plan_seed: Optional[int]
     equal_object_prob: bool
@@ -162,27 +169,44 @@ def _append_summary(csv_path: str, row: dict) -> None:
         fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
 
-def _merge_all_rounds(cfg: PoolSimConfig, obj_id: str, up_to_round: int) -> str:
+def _merge_for_round(cfg: PoolSimConfig, obj_id: str, round_idx: int) -> str:
+    """Update merged/{obj}_robot_gt_merged.hdf5 after sim (incremental or full scan)."""
     paths = paths_for_outdir(cfg.outdir, 0)
-    inputs = []
-    for r in range(up_to_round + 1):
-        p = os.path.join(cfg.outdir, "robot_gt", round_tag(r), f"{obj_id}_robot_gt.hdf5")
-        if os.path.isfile(p):
-            inputs.append(p)
-    if not inputs:
-        return ""
     os.makedirs(paths["merged_dir"], exist_ok=True)
     out_path = os.path.join(paths["merged_dir"], f"{obj_id}_robot_gt_merged.hdf5")
-    cmd = [
-        cfg.python_bin, MERGE,
-        "--obj", obj_id,
-        "--output", out_path,
-        "--inputs", *inputs,
-    ]
-    if cfg.merge_deduplicate:
-        cmd.append("--deduplicate")
-    rc, _ = _run_cmd(cmd)
-    if rc != 0:
+    round_gt = os.path.join(
+        cfg.outdir, "robot_gt", round_tag(round_idx), f"{obj_id}_robot_gt.hdf5",
+    )
+    try:
+        if cfg.incremental_merge:
+            if not os.path.isfile(round_gt) and not os.path.isfile(out_path):
+                return ""
+            merge_robot_gt_incremental(
+                obj_id,
+                out_path,
+                existing_merged=out_path if os.path.isfile(out_path) else None,
+                new_round_gt=round_gt,
+                deduplicate=cfg.merge_deduplicate,
+                verbose=False,
+            )
+        else:
+            inputs = []
+            for r in range(round_idx + 1):
+                p = os.path.join(
+                    cfg.outdir, "robot_gt", round_tag(r), f"{obj_id}_robot_gt.hdf5",
+                )
+                if os.path.isfile(p):
+                    inputs.append(p)
+            if not inputs:
+                return ""
+            merge_robot_gt_files(
+                obj_id,
+                inputs,
+                out_path,
+                deduplicate=cfg.merge_deduplicate,
+                verbose=False,
+            )
+    except Exception:
         return ""
     return out_path if os.path.isfile(out_path) else ""
 
@@ -311,12 +335,34 @@ def _format_sim_progress(
         ok_tasks += ok
         gpu = gpu_for_chunk[i] if i < len(gpu_for_chunk) else "?"
         parts.append(f"c{i}:gpu{gpu} {done}/{tot}")
-    chunk_summary = " ".join(parts[:8])
-    if len(parts) > 8:
-        chunk_summary += f" ...+{len(parts) - 8}"
+    chunk_summary = " ".join(parts)
     return (
         f"  [sim progress] {done_tasks}/{batch_total} tasks "
         f"({ok_tasks} ok in partial results) | {chunk_summary}"
+    )
+
+
+def _print_sync_progress(
+    n_new: int,
+    chunk_paths: list[str],
+    gpu_for_chunk: list[int],
+    *,
+    batch_total: int,
+    pending: Optional[int] = None,
+) -> None:
+    """Print chunk sync + sim progress when new task results were ingested."""
+    if n_new <= 0:
+        return
+    if pending is not None:
+        print(
+            f"  [chunk sync] +{n_new} newly completed ({pending} pending sim)",
+            flush=True,
+        )
+    else:
+        print(f"  [chunk sync] +{n_new} newly completed", flush=True)
+    print(
+        _format_sim_progress(chunk_paths, gpu_for_chunk, batch_total=batch_total),
+        flush=True,
     )
 
 
@@ -333,7 +379,6 @@ class _SimProgressReporter(threading.Thread):
         ingest_fn=None,
         persist_lock: threading.Lock | None = None,
         ingest_interval_s: float = SIM_INGEST_POLL_S,
-        print_interval_s: float = SIM_PROGRESS_POLL_S,
     ):
         super().__init__(daemon=True)
         self._chunk_paths = chunk_paths
@@ -343,13 +388,11 @@ class _SimProgressReporter(threading.Thread):
         self._ingest_fn = ingest_fn
         self._persist_lock = persist_lock
         self._ingest_interval = ingest_interval_s
-        self._print_interval = print_interval_s
         self._stop_event = threading.Event()
-        self._last_print_mono = 0.0
 
     def run(self) -> None:
         print(
-            f"  Live progress every {self._print_interval:.0f}s; "
+            f"  Sim progress on newly completed tasks; "
             f"chunk→queue sync every {self._ingest_interval:.0f}s "
             f"(worker logs: {self._log_hint})",
             flush=True,
@@ -358,22 +401,12 @@ class _SimProgressReporter(threading.Thread):
             if self._ingest_fn is not None and self._persist_lock is not None:
                 with self._persist_lock:
                     n_new = self._ingest_fn()
-                if n_new:
-                    print(
-                        f"  [chunk sync] +{n_new} newly completed (from disk)",
-                        flush=True,
-                    )
-            now = time.monotonic()
-            if now - self._last_print_mono >= self._print_interval:
-                print(
-                    _format_sim_progress(
-                        self._chunk_paths,
-                        self._gpu_for_chunk,
-                        batch_total=self._batch_total,
-                    ),
-                    flush=True,
+                _print_sync_progress(
+                    n_new,
+                    self._chunk_paths,
+                    self._gpu_for_chunk,
+                    batch_total=self._batch_total,
                 )
-                self._last_print_mono = now
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -388,6 +421,61 @@ def _chunk_startup_delays(gpu_for_chunk: list[int], stagger_s: float) -> list[fl
         delays.append(idx * stagger_s)
         launch_index_by_gpu[gpu] = idx + 1
     return delays
+
+
+def _make_isaac_worker_env(
+    base_env: dict,
+    *,
+    gpu_id: int,
+    outdir: str,
+    round_idx: int,
+    chunk_path: str,
+) -> dict:
+    """Isolate Kit kvdb/cache per worker to avoid cross-process lock on same machine."""
+    env = base_env.copy()
+    env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+    chunk_id = os.path.basename(chunk_path).replace(".json", "")
+    cache_root = os.path.join(
+        outdir,
+        "sim_logs",
+        round_tag(round_idx),
+        "kit_cache",
+        f"gpu{gpu_id}_{chunk_id}",
+    )
+    hub_dir = os.path.join(cache_root, "hub")
+    omni_cache = os.path.join(cache_root, "omni_cache")
+    os.makedirs(hub_dir, exist_ok=True)
+    os.makedirs(omni_cache, exist_ok=True)
+    env["OMNICLIENT_HUB_CACHE_DIR"] = hub_dir
+    env["OMNI_CACHE_DIR"] = omni_cache
+    env["XDG_CACHE_HOME"] = cache_root
+    return env
+
+
+def _submit_chunk_worker(
+    executor: ProcessPoolExecutor,
+    ci: int,
+    chunk_paths: list[str],
+    gpu_for_chunk: list[int],
+    cfg_dict: dict,
+    stagger_s: float,
+    gpu_launch_idx: dict[int, int],
+):
+    gpu = gpu_for_chunk[ci]
+    delay = gpu_launch_idx.get(gpu, 0) * stagger_s
+    gpu_launch_idx[gpu] = gpu_launch_idx.get(gpu, 0) + 1
+    if delay > 0:
+        print(
+            f"    chunk {ci} GPU {gpu}: startup delay +{delay:.0f}s",
+            flush=True,
+        )
+    return executor.submit(
+        run_sim_worker,
+        chunk_paths[ci],
+        gpu,
+        cfg_dict,
+        delay,
+    )
 
 
 def run_sim_worker(
@@ -420,8 +508,13 @@ def run_sim_worker(
     if cfg.headless:
         sim_cmd.append("--headless")
 
-    env = os.environ.copy()
-    env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+    env = _make_isaac_worker_env(
+        os.environ.copy(),
+        gpu_id=gpu_id,
+        outdir=cfg.outdir,
+        round_idx=int(chunk_meta["round_idx"]),
+        chunk_path=chunk_path,
+    )
     rc, out = _run_cmd(sim_cmd, timeout=cfg.sim_timeout, log_path=log_path, env=env)
 
     results_path = chunk_path.replace(".json", "_results.json")
@@ -511,6 +604,13 @@ def run_sim_phase(
     chunk_dir = os.path.join(cfg.outdir, "sim_logs", round_tag(round_idx), "chunks")
     os.makedirs(chunk_dir, exist_ok=True)
 
+    n_archived = archive_chunk_results_before_reshuffle(cfg.outdir, round_idx)
+    if n_archived:
+        print(
+            f"  Archived {n_archived} sim result(s) before pending chunk reshuffle",
+            flush=True,
+        )
+
     batch_total = len(tasks)
     chunk_paths: list[str] = []
     for i, chunk_tasks in enumerate(chunks):
@@ -532,7 +632,7 @@ def run_sim_phase(
         chunk_paths.append(cpath)
 
     gpu_for_chunk = _assign_chunks_to_gpus(len(chunk_paths), cfg.sim_gpu_ids)
-    startup_delays = _chunk_startup_delays(gpu_for_chunk, SAME_GPU_STAGGER_S)
+    stagger_s = cfg.same_gpu_stagger_s
     cfg_dict = asdict(cfg)
 
     print(
@@ -544,8 +644,12 @@ def run_sim_phase(
             else ""
         ),
     )
-    if any(d > 0 for d in startup_delays):
-        print(f"  Same-GPU stagger: {SAME_GPU_STAGGER_S:.0f}s between workers on one GPU")
+    if stagger_s > 0:
+        print(
+            f"  Same-GPU stagger: {stagger_s:.0f}s between Isaac launches on one GPU "
+            f"(per-GPU process pools + isolated kit cache)",
+            flush=True,
+        )
 
     all_results: list[dict] = []
     worker_outcomes: list[dict] = []
@@ -577,125 +681,125 @@ def run_sim_phase(
     )
     reporter.start()
     interrupted = False
+    executors: dict[int, ProcessPoolExecutor] = {}
     try:
-        with ProcessPoolExecutor(max_workers=n_workers) as ex:
-            futures: dict = {}
-            chunk_attempts = [0] * len(chunk_paths)
-            for i in range(len(chunk_paths)):
-                chunk_attempts[i] = 1
-                if startup_delays[i] > 0:
+        executors = {
+            gpu: ProcessPoolExecutor(max_workers=cfg.sim_per_gpu)
+            for gpu in cfg.sim_gpu_ids
+        }
+        futures: dict = {}
+        chunk_attempts = [0] * len(chunk_paths)
+        gpu_launch_idx = {gpu: 0 for gpu in cfg.sim_gpu_ids}
+        for i in range(len(chunk_paths)):
+            chunk_attempts[i] = 1
+            gpu = gpu_for_chunk[i]
+            fut = _submit_chunk_worker(
+                executors[gpu],
+                i,
+                chunk_paths,
+                gpu_for_chunk,
+                cfg_dict,
+                stagger_s,
+                gpu_launch_idx,
+            )
+            futures[fut] = i
+
+        while futures:
+            done_set, _ = wait(futures.keys(), return_when=FIRST_COMPLETED)
+            for fut in done_set:
+                ci = futures.pop(fut)
+                try:
+                    out = fut.result()
+                except Exception as exc:
+                    out = {
+                        "chunk_path": chunk_paths[ci],
+                        "status": "worker_crashed",
+                        "results": [],
+                        "error": str(exc)[:500],
+                        "expected_tasks": len(
+                            _read_chunk_task_ids(chunk_paths[ci]),
+                        ),
+                        "elapsed_s": 0.0,
+                        "gpu_id": gpu_for_chunk[ci],
+                    }
+
+                done_n, total_n, _ = _read_chunk_progress(chunk_paths[ci])
+                if _chunk_run_complete(chunk_paths[ci]):
+                    out["status"] = "ok"
+                    out["results"] = _load_chunk_results(chunk_paths[ci])
+                    worker_outcomes.append(out)
+                    all_results.extend(out["results"])
                     print(
-                        f"    chunk {i} GPU {gpu_for_chunk[i]}: "
-                        f"startup delay +{startup_delays[i]:.0f}s",
+                        f"    chunk {ci} GPU {out.get('gpu_id', '?')}: ok  "
+                        f"{done_n}/{total_n} results  "
+                        f"{out.get('elapsed_s', 0)}s",
+                        flush=True,
                     )
-                fut = ex.submit(
-                    run_sim_worker,
-                    chunk_paths[i],
-                    gpu_for_chunk[i],
-                    cfg_dict,
-                    startup_delays[i],
-                )
-                futures[fut] = i
-
-            while futures:
-                done_set, _ = wait(futures.keys(), return_when=FIRST_COMPLETED)
-                for fut in done_set:
-                    ci = futures.pop(fut)
-                    try:
-                        out = fut.result()
-                    except Exception as exc:
-                        out = {
-                            "chunk_path": chunk_paths[ci],
-                            "status": "worker_crashed",
-                            "results": [],
-                            "error": str(exc)[:500],
-                            "expected_tasks": len(
-                                _read_chunk_task_ids(chunk_paths[ci]),
-                            ),
-                            "elapsed_s": 0.0,
-                            "gpu_id": gpu_for_chunk[ci],
-                        }
-
-                    done_n, total_n, _ = _read_chunk_progress(chunk_paths[ci])
-                    if _chunk_run_complete(chunk_paths[ci]):
-                        out["status"] = "ok"
+                else:
+                    retries_used = chunk_attempts[ci] - 1
+                    can_retry = retries_used < WORKER_MAX_RETRIES
+                    print(
+                        f"    chunk {ci} GPU {out.get('gpu_id', '?')}: "
+                        f"{out.get('status', '?')}  {done_n}/{total_n} results  "
+                        f"{out.get('elapsed_s', 0)}s"
+                        + (
+                            f" — retry in {WORKER_CRASH_RETRY_S:.0f}s "
+                            f"({retries_used + 1}/{WORKER_MAX_RETRIES})"
+                            if can_retry
+                            else f" — max retries ({WORKER_MAX_RETRIES}) exhausted"
+                        ),
+                        flush=True,
+                    )
+                    if out.get("error"):
+                        print(f"      {out['error'][:200]}", flush=True)
+                    if can_retry:
+                        time.sleep(WORKER_CRASH_RETRY_S)
+                        if registry is not None:
+                            with persist_lock:
+                                _sync_from_chunks()
+                        chunk_attempts[ci] += 1
+                        print(
+                            f"    chunk {ci} GPU {gpu_for_chunk[ci]}: "
+                            f"restart (attempt {chunk_attempts[ci]})",
+                            flush=True,
+                        )
+                        nf = _submit_chunk_worker(
+                            executors[gpu_for_chunk[ci]],
+                            ci,
+                            chunk_paths,
+                            gpu_for_chunk,
+                            cfg_dict,
+                            stagger_s,
+                            gpu_launch_idx,
+                        )
+                        futures[nf] = ci
+                    else:
                         out["results"] = _load_chunk_results(chunk_paths[ci])
                         worker_outcomes.append(out)
                         all_results.extend(out["results"])
-                        print(
-                            f"    chunk {ci} GPU {out.get('gpu_id', '?')}: ok  "
-                            f"{done_n}/{total_n} results  "
-                            f"{out.get('elapsed_s', 0)}s",
-                            flush=True,
-                        )
-                    else:
-                        retries_used = chunk_attempts[ci] - 1
-                        can_retry = retries_used < WORKER_MAX_RETRIES
-                        print(
-                            f"    chunk {ci} GPU {out.get('gpu_id', '?')}: "
-                            f"{out.get('status', '?')}  {done_n}/{total_n} results  "
-                            f"{out.get('elapsed_s', 0)}s"
-                            + (
-                                f" — retry in {WORKER_CRASH_RETRY_S:.0f}s "
-                                f"({retries_used + 1}/{WORKER_MAX_RETRIES})"
-                                if can_retry
-                                else f" — max retries ({WORKER_MAX_RETRIES}) exhausted"
-                            ),
-                            flush=True,
-                        )
-                        if out.get("error"):
-                            print(f"      {out['error'][:200]}", flush=True)
-                        if can_retry:
-                            time.sleep(WORKER_CRASH_RETRY_S)
-                            if registry is not None:
-                                with persist_lock:
-                                    _sync_from_chunks()
-                            chunk_attempts[ci] += 1
-                            print(
-                                f"    chunk {ci} GPU {gpu_for_chunk[ci]}: "
-                                f"restart (attempt {chunk_attempts[ci]})",
-                                flush=True,
-                            )
-                            nf = ex.submit(
-                                run_sim_worker,
-                                chunk_paths[ci],
-                                gpu_for_chunk[ci],
-                                cfg_dict,
-                                0.0,
-                            )
-                            futures[nf] = ci
-                        else:
-                            out["results"] = _load_chunk_results(chunk_paths[ci])
-                            worker_outcomes.append(out)
-                            all_results.extend(out["results"])
 
-                    if registry is not None:
-                        with persist_lock:
-                            n_saved = _sync_from_chunks()
-                        n_pending = len(
-                            pending_tasks(
-                                queue, cfg.outdir, round_idx, registry=registry,
-                            ),
-                        )
-                        if n_saved:
-                            print(
-                                f"      chunk sync: +{n_saved} completed "
-                                f"({n_pending} pending sim)",
-                                flush=True,
-                            )
-                    print(
-                        _format_sim_progress(
-                            chunk_paths,
-                            gpu_for_chunk,
-                            batch_total=batch_total,
+                if registry is not None:
+                    with persist_lock:
+                        n_saved = _sync_from_chunks()
+                    n_pending = len(
+                        pending_tasks(
+                            queue, cfg.outdir, round_idx, registry=registry,
                         ),
-                        flush=True,
+                    )
+                    _print_sync_progress(
+                        n_saved,
+                        chunk_paths,
+                        gpu_for_chunk,
+                        batch_total=batch_total,
+                        pending=n_pending,
                     )
     except KeyboardInterrupt:
         interrupted = True
         print("\n  ⚠️  Sim interrupted; saving progress from disk...", flush=True)
         raise
     finally:
+        for ex in executors.values():
+            ex.shutdown(wait=False, cancel_futures=True)
         reporter.stop()
         reporter.join(timeout=1.0)
         if registry is not None:
@@ -749,7 +853,7 @@ def auto_refill_pool(
     *,
     sim_complete: bool,
 ) -> bool:
-    threshold = compute_median_success_threshold(cfg.outdir, cfg.merged_dir)
+    threshold = compute_median_success_threshold(cfg.merged_dir)
     refill_targets = [
         obj_id
         for obj_id, _, _ in select_target_objects(cfg.merged_dir, threshold)
@@ -913,7 +1017,7 @@ def run_one_round(
         n_ok = _count_round_success(paths["gt_round_dir"], obj_id)
         gt_path = os.path.join(paths["gt_round_dir"], f"{obj_id}_robot_gt.hdf5")
         grasp_path = os.path.join(paths["cand_round_dir"], f"{obj_id}_grasp.hdf5")
-        merged = _merge_all_rounds(cfg, obj_id, round_idx)
+        merged = _merge_for_round(cfg, obj_id, round_idx)
         sim_status = "ok" if n_ok > 0 else "all_failed"
         if not os.path.isfile(grasp_path):
             sim_status = "no_grasp_hdf5"
@@ -975,6 +1079,12 @@ def main():
     parser.add_argument("--resume", action="store_true", help="从 state.json 的 round 续跑")
     parser.add_argument("--sim-gpu-ids", default="0")
     parser.add_argument("--sim-per-gpu", type=int, default=1)
+    parser.add_argument(
+        "--same-gpu-stagger-s",
+        type=float,
+        default=SAME_GPU_STAGGER_S,
+        help="同 GPU 上相邻 Isaac worker 启动间隔秒数 (默认 45)",
+    )
     parser.add_argument("--sim-timeout", type=int, default=7200, help="单个 worker chunk 超时秒")
     parser.add_argument("--headless", action="store_true", default=True)
     parser.add_argument("--object-scale", type=float, default=1.0)
@@ -982,14 +1092,14 @@ def main():
     parser.add_argument(
         "--equal-object-prob",
         action="store_true",
-        help="每轮抽 slot 时 pool 内每个 eligible 物体等概率（默认按 1/(success+1) 加权）",
+        help="每轮抽 slot 时 pool 内每个 eligible 物体等概率（默认按 merged 成功 1/(n+1) 加权）",
     )
     parser.add_argument(
         "--max-success-per-object",
         type=int,
         default=None,
         metavar="N",
-        help="round≥3 累计成功数 ≥ N 的物体本轮规划 prob=0（默认不限制；与 weighted/equal 均兼容）",
+        help="merged 内成功数 ≥ N 的物体本轮规划 prob=0（读 merged n_successful；默认不限制）",
     )
     parser.add_argument("--pool-target", type=int, default=50, help="auto-refill 时每物体 target")
     parser.add_argument("--score-threshold", type=float, default=70.0)
@@ -1003,6 +1113,16 @@ def main():
     parser.add_argument(
         "--merge-deduplicate", action="store_true",
         help="合并 merged 时去重 (默认不去重)",
+    )
+    parser.add_argument(
+        "--incremental-merge",
+        action="store_true",
+        help="merged 增量更新：读已有 merged + 仅本轮 robot_gt（无需历史 round_*）",
+    )
+    parser.add_argument(
+        "--full-merge",
+        action="store_true",
+        help="强制全量扫描 robot_gt/round_* 合并（覆盖 --incremental-merge）",
     )
     parser.add_argument("--python-bin", default=sys.executable)
     parser.add_argument("--isaac-python", default=None)
@@ -1048,7 +1168,9 @@ def main():
         python_bin=args.python_bin,
         sim_gpu_ids=sim_gpu_ids,
         sim_per_gpu=args.sim_per_gpu,
+        same_gpu_stagger_s=args.same_gpu_stagger_s,
         merge_deduplicate=args.merge_deduplicate,
+        incremental_merge=args.incremental_merge and not args.full_merge,
         slots_per_round=args.slots_per_round,
         plan_seed=args.plan_seed,
         equal_object_prob=args.equal_object_prob,
@@ -1066,6 +1188,9 @@ def main():
     print(f"Out: {outdir}")
     print(f"Pool: {pool_dir}")
     print(f"Merged: {merged_dir}")
+    print(
+        f"Merge mode: {'incremental (merged + this round gt)' if cfg.incremental_merge else 'full scan robot_gt/round_*'}",
+    )
     print(f"Max rounds (sync_ok gate): {args.max_rounds}  state.round: {state.get('round', 0)}")
     print(
         f"Object sampling: {'equal' if args.equal_object_prob else 'weighted (1/(success+1))'}"

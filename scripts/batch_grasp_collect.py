@@ -47,11 +47,11 @@ from typing import Optional
 
 PROJ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(PROJ, "tools"))
+from merge_robot_gt import merge_robot_gt_files, merge_robot_gt_incremental
 
 DEFAULT_OUT = os.path.join(PROJ, "output", "grasp_collect_no_rot")
 SAMPLER = os.path.join(PROJ, "tools", "random_grasp_sampler.py")
 CONVERT = os.path.join(PROJ, "tools", "convert_obj_usd.py")
-MERGE = os.path.join(PROJ, "tools", "merge_robot_gt.py")
 SIM_SCRIPT = os.path.join(PROJ, "sim", "run_grasp_sim.py")
 
 
@@ -71,6 +71,7 @@ class JobConfig:
     resume: bool
     sim_gpu_ids: tuple[int, ...]
     merge_deduplicate: bool
+    incremental_merge: bool = False
     random_z_yaw: bool = False
     z_yaw_seed: Optional[int] = None
 
@@ -191,26 +192,42 @@ def _paths(cfg: JobConfig, obj_id: str, round_idx: int):
     }
 
 
-def _merge_all_rounds(cfg: JobConfig, obj_id: str, up_to_round: int) -> str:
-    paths = _paths(cfg, obj_id, 0)
-    inputs = []
-    for r in range(up_to_round + 1):
-        p = os.path.join(cfg.outdir, "robot_gt", _round_tag(r), f"{obj_id}_robot_gt.hdf5")
-        if os.path.isfile(p):
-            inputs.append(p)
-    if not inputs:
-        return ""
+def _merge_for_round(cfg: JobConfig, obj_id: str, round_idx: int) -> str:
+    paths = _paths(cfg, obj_id, round_idx)
     os.makedirs(paths["merged_dir"], exist_ok=True)
-    cmd = [
-        cfg.python_bin, MERGE,
-        "--obj", obj_id,
-        "--output", paths["merged_hdf5"],
-        "--inputs", *inputs,
-    ]
-    if cfg.merge_deduplicate:
-        cmd.append("--deduplicate")
-    rc, _ = _run(cmd)
-    if rc != 0:
+    round_gt = paths["gt_hdf5"]
+    try:
+        if cfg.incremental_merge:
+            if not os.path.isfile(round_gt) and not os.path.isfile(paths["merged_hdf5"]):
+                return ""
+            merge_robot_gt_incremental(
+                obj_id,
+                paths["merged_hdf5"],
+                existing_merged=(
+                    paths["merged_hdf5"] if os.path.isfile(paths["merged_hdf5"]) else None
+                ),
+                new_round_gt=round_gt,
+                deduplicate=cfg.merge_deduplicate,
+                verbose=False,
+            )
+        else:
+            inputs = []
+            for r in range(round_idx + 1):
+                p = os.path.join(
+                    cfg.outdir, "robot_gt", _round_tag(r), f"{obj_id}_robot_gt.hdf5",
+                )
+                if os.path.isfile(p):
+                    inputs.append(p)
+            if not inputs:
+                return ""
+            merge_robot_gt_files(
+                obj_id,
+                inputs,
+                paths["merged_hdf5"],
+                deduplicate=cfg.merge_deduplicate,
+                verbose=False,
+            )
+    except Exception:
         return ""
     return paths["merged_hdf5"] if os.path.isfile(paths["merged_hdf5"]) else ""
 
@@ -321,7 +338,7 @@ def run_sim_job(
             with h5py.File(paths["gt_hdf5"], "r") as f:
                 result.n_success = int(f.attrs.get("n_successful", 0))
             result.gt_hdf5 = paths["gt_hdf5"]
-            merged = _merge_all_rounds(cfg, obj_id, round_idx)
+            merged = _merge_for_round(cfg, obj_id, round_idx)
             result.merged_hdf5 = merged
             result.status = "sim_skip"
             return asdict(result)
@@ -363,7 +380,7 @@ def run_sim_job(
         with h5py.File(paths["gt_hdf5"], "r") as f:
             result.n_success = int(f.attrs.get("n_successful", 0))
         result.gt_hdf5 = paths["gt_hdf5"]
-        result.merged_hdf5 = _merge_all_rounds(cfg, obj_id, round_idx)
+        result.merged_hdf5 = _merge_for_round(cfg, obj_id, round_idx)
         result.status = "ok" if result.n_success > 0 else "all_failed"
     except Exception as e:
         result.status = "error"
@@ -651,6 +668,16 @@ def main():
         help="合并 merged/ 时去掉相近 pose（默认不去重）",
     )
     parser.add_argument(
+        "--incremental-merge",
+        action="store_true",
+        help="merged 增量：已有 merged + 仅本轮 robot_gt",
+    )
+    parser.add_argument(
+        "--full-merge",
+        action="store_true",
+        help="强制全量扫描 robot_gt/round_*",
+    )
+    parser.add_argument(
         "--random-z-yaw",
         action="store_true",
         help="Sim 内每 (round, object) 随机绕竖直轴放置；候选 HDF5 不变",
@@ -732,6 +759,7 @@ def main():
         resume=args.resume,
         sim_gpu_ids=sim_gpu_ids,
         merge_deduplicate=args.merge_deduplicate,
+        incremental_merge=args.incremental_merge and not args.full_merge,
         random_z_yaw=args.random_z_yaw,
         z_yaw_seed=args.z_yaw_seed,
     )

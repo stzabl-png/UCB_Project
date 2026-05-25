@@ -18,6 +18,7 @@ DEFAULT_SLOTS_PER_ROUND = 500
 REGISTRY_NAME = "sim_pool_registry.json"
 TASK_QUEUE_TEMPLATE = "round_{round:04d}_task_queue.json"
 SYNTH_SKIPPED_RESULTS_NAME = "synthesized_skipped_results.json"
+ACCUMULATED_RESULTS_NAME = "accumulated_results.json"
 SKIP_REASON_CANDIDATE_SUCCESS = "candidate_success_at_yaw"
 
 
@@ -81,7 +82,12 @@ def count_success_in_gt_file(path: str) -> int:
 
 
 def scan_success_round_ge3(outdir: str, min_round: int = 3) -> dict[str, int]:
-    """obj_id -> total successful_grasps in robot_gt/round_R for R >= min_round."""
+    """
+    Legacy: obj_id -> successful_grasps summed over robot_gt/round_R for R >= min_round.
+
+    Pool sim planning, auto-refill threshold, and --max-success-per-object use
+    scan_merged_objects() instead. Kept for ad-hoc scripts / --full-merge tooling.
+    """
     totals: dict[str, int] = {}
     gt_root = os.path.join(os.path.abspath(outdir), "robot_gt")
     if not os.path.isdir(gt_root):
@@ -102,19 +108,13 @@ def scan_success_round_ge3(outdir: str, min_round: int = 3) -> dict[str, int]:
     return totals
 
 
-def compute_median_success_threshold(
-    outdir: str,
-    merged_dir: str,
-    *,
-    min_round: int = 3,
-) -> int:
+def compute_median_success_threshold(merged_dir: str) -> int:
     """
-    Median of success_round_ge3 over objects that have a merged file.
+    Median of n_successful in merged/ over objects that have a merged file.
     Used when auto-refilling the candidate pool.
     """
     merged_counts = scan_merged_objects(merged_dir)
-    success = scan_success_round_ge3(outdir, min_round=min_round)
-    values = [success.get(obj_id, 0) for obj_id in merged_counts]
+    values = list(merged_counts.values())
     if not values:
         return 0
     return int(np.median(np.array(values, dtype=np.float64)))
@@ -323,6 +323,7 @@ def object_selection_probs(
     equal_object_prob: bool = False,
     max_success_per_object: Optional[int] = None,
 ) -> dict[str, float]:
+    """success: obj_id -> count (pool batch uses scan_merged_objects)."""
     if equal_object_prob:
         probs = normalize_equal_weights(obj_ids)
     else:
@@ -361,7 +362,6 @@ def plan_round_slots(
     registry: dict,
     round_idx: int,
     slots_per_round: int,
-    min_success_round: int = 3,
     equal_object_prob: bool = False,
     max_success_per_object: Optional[int] = None,
     rng: Optional[np.random.Generator] = None,
@@ -371,13 +371,12 @@ def plan_round_slots(
     Returns (slot_list, exhausted) where exhausted=True if stopped early
     because no eligible candidate remained.
 
-    Object sampling: by default weight ~ 1/(success+1); with equal_object_prob
-    each eligible pool object has the same draw probability. With
-    max_success_per_object, objects at/above that success count get prob 0
-    (success from scan_success_round_ge3).
+    Object success counts for weighted sampling and max_success cap both come from
+    merged/{obj}_robot_gt_merged.hdf5 (n_successful). outdir is unused for planning
+    (kept for API compatibility with build_task_queue).
     """
     rng = rng or np.random.default_rng()
-    success = scan_success_round_ge3(outdir, min_round=min_success_round)
+    success = scan_merged_objects(merged_dir)
     eligible = eligible_objects(merged_dir, pool_dir, registry)
     if not eligible:
         return [], True
@@ -485,6 +484,7 @@ def build_task_queue(
         "slots_target": slots_per_round,
         "pool_exhausted": exhausted,
         "object_sampling": "equal" if equal_object_prob else "weighted",
+        "success_source": "merged",
         "tasks": tasks,
         "completed_task_ids": [],
     }
@@ -572,6 +572,57 @@ def synthesized_skipped_results_path(outdir: str, round_idx: int) -> str:
     return os.path.join(chunk_results_dir(outdir, round_idx), SYNTH_SKIPPED_RESULTS_NAME)
 
 
+def accumulated_results_path(outdir: str, round_idx: int) -> str:
+    return os.path.join(chunk_results_dir(outdir, round_idx), ACCUMULATED_RESULTS_NAME)
+
+
+def persist_accumulated_results(
+    outdir: str,
+    round_idx: int,
+    rows: list[dict],
+) -> None:
+    """Merge task results into round-level archive (survives chunk sidecar wipe on resume)."""
+    if not rows:
+        return
+    path = accumulated_results_path(outdir, round_idx)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    existing: dict[str, dict] = {}
+    if os.path.isfile(path):
+        try:
+            with open(path, "r") as f:
+                data = json.load(f)
+            for row in data.get("results", []):
+                tid = row.get("task_id")
+                if tid:
+                    existing[tid] = row
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            existing = {}
+    for row in rows:
+        tid = row.get("task_id")
+        if tid:
+            existing[tid] = row
+    with open(path, "w") as f:
+        json.dump({"results": list(existing.values())}, f, indent=2)
+
+
+def archive_chunk_results_before_reshuffle(outdir: str, round_idx: int) -> int:
+    """
+    Before re-splitting pending tasks into new chunk_*.json, persist all on-disk
+    results (chunk sidecars + synth + prior archive) into accumulated_results.json.
+    """
+    results = load_disk_sim_results(outdir, round_idx)
+    if results:
+        persist_accumulated_results(outdir, round_idx, results)
+    path = accumulated_results_path(outdir, round_idx)
+    if not os.path.isfile(path):
+        return 0
+    try:
+        with open(path, "r") as f:
+            return len(json.load(f).get("results", []))
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return 0
+
+
 def _merge_result_rows_into_by_task(
     by_task: dict[str, tuple[float, dict]],
     rows: list[dict],
@@ -636,6 +687,15 @@ def load_disk_sim_results_ex(
     chunk_dir = chunk_results_dir(outdir, round_idx)
     by_task: dict[str, tuple[float, dict]] = {}
     failed: list[str] = []
+    acc_path = accumulated_results_path(outdir, round_idx)
+    if os.path.isfile(acc_path):
+        try:
+            mtime = os.path.getmtime(acc_path)
+            with open(acc_path, "r") as f:
+                data = json.load(f)
+            _merge_result_rows_into_by_task(by_task, data.get("results", []), mtime)
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            failed.append(acc_path)
     for path in sorted(glob.glob(os.path.join(chunk_dir, "chunk_*_results.json"))):
         try:
             mtime = os.path.getmtime(path)
@@ -746,6 +806,8 @@ def sync_queue_and_registry_from_chunks(
             save_registry(registry_path, registry)
         if task_queue_path:
             save_task_queue(task_queue_path, queue)
+    if persist and round_results:
+        persist_accumulated_results(outdir, round_idx, round_results)
 
     n_pending = len([t for t in queue.get("tasks", []) if t["task_id"] not in done_set])
     return {

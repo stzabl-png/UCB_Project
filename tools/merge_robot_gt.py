@@ -16,6 +16,12 @@ merge_robot_gt.py — 合并多轮 / 多文件 robot_gt HDF5 中的成功抓取
     # 可选：去掉位置/朝向相近的重复抓取
     python3 tools/merge_robot_gt.py --obj A01001 --inputs ... --output ... \\
         --deduplicate --pos-tol 0.005 --rot-tol-deg 12
+
+    # 增量：已有 merged + 仅本轮 robot_gt（无需扫描历史 round_*）
+    python3 tools/merge_robot_gt.py --obj A01001 --incremental \\
+        --existing-merged output/.../merged/A01001_robot_gt_merged.hdf5 \\
+        --new-input output/.../robot_gt/round_0021/A01001_robot_gt.hdf5 \\
+        --output output/.../merged/A01001_robot_gt_merged.hdf5
 """
 from __future__ import annotations
 
@@ -84,7 +90,11 @@ def _load_successful(path: str) -> list[dict]:
                 "approach_type": g.attrs.get("approach_type", ""),
                 "grasp_point": np.array(g["grasp_point"][:], dtype=np.float64),
                 "rotation": np.array(g["rotation"][:], dtype=np.float64),
-                "source_file": os.path.abspath(path),
+                "source_file": (
+                    os.path.abspath(str(g.attrs["source_file"]))
+                    if g.attrs.get("source_file")
+                    else os.path.abspath(path)
+                ),
                 "round_key": key,
             }
             pr = read_mesh_prerotation_hdf5_pose(g, f)
@@ -242,6 +252,100 @@ def merge_robot_gt_files(
     return output
 
 
+def merge_robot_gt_incremental(
+    obj_id: str,
+    output: str,
+    *,
+    existing_merged: str | None,
+    new_round_gt: str,
+    deduplicate: bool = False,
+    pos_tol: float = 0.005,
+    rot_tol_deg: float = 12.0,
+    exclude_legacy_contact: bool = False,
+    verbose: bool = True,
+) -> str | None:
+    """
+    在已有 merged 基础上追加本轮 robot_gt 的成功条目，不扫描历史 round_*。
+
+    若 new_round_gt 已在 merged 的 source_files 中，先去掉该文件来源的旧行再写入
+    （同一轮重复 merge 可幂等）。
+    """
+    new_abs = os.path.abspath(new_round_gt) if new_round_gt else ""
+    base_rows: list[dict] = []
+    prior_sources: list[str] = []
+
+    if existing_merged and os.path.isfile(existing_merged):
+        base_rows = _load_successful(existing_merged)
+        with h5py.File(existing_merged, "r") as f:
+            raw = f.attrs.get("source_files")
+            if raw is not None:
+                prior_sources = [
+                    os.path.abspath(str(x)) for x in np.asarray(raw).tolist()
+                ]
+        if new_abs:
+            base_rows = [
+                r for r in base_rows
+                if r.get("source_file") != new_abs
+            ]
+        if verbose:
+            print(
+                f"  incremental base: {len(base_rows)} from "
+                f"{os.path.basename(existing_merged)}",
+            )
+
+    new_rows: list[dict] = []
+    if new_abs and os.path.isfile(new_abs):
+        new_rows = _load_successful(new_abs)
+        if verbose:
+            print(f"  + {len(new_rows)} from round file {new_abs}")
+
+    if not base_rows and not new_rows:
+        if os.path.isfile(output):
+            os.remove(output)
+        if verbose:
+            print(f"  ⬛ incremental: no successes; skip {output}")
+        return None
+
+    all_rows = base_rows + new_rows
+    merged = merge_grasps(
+        all_rows,
+        deduplicate=deduplicate,
+        pos_tol=pos_tol,
+        rot_tol_deg=rot_tol_deg,
+        exclude_legacy_contact=exclude_legacy_contact,
+    )
+    if not merged:
+        if os.path.isfile(output):
+            os.remove(output)
+        return None
+
+    source_files = list(dict.fromkeys(prior_sources))
+    for p in (existing_merged, new_abs):
+        if p and os.path.isfile(p):
+            ap = os.path.abspath(p)
+            if ap not in source_files:
+                source_files.append(ap)
+    for r in merged:
+        sf = r.get("source_file")
+        if sf and sf not in source_files:
+            source_files.append(sf)
+
+    write_merged(
+        output,
+        obj_id,
+        merged,
+        source_files,
+        deduplicated=deduplicate,
+        n_before=len(all_rows),
+    )
+    if verbose:
+        print(
+            f"✅ incremental merged {len(merged)} "
+            f"(+{len(new_rows)} this round, base {len(base_rows)}) → {output}",
+        )
+    return output
+
+
 def write_merged(
     path: str,
     obj_id: str,
@@ -312,8 +416,21 @@ def write_merged(
 def main():
     parser = argparse.ArgumentParser(description="Merge robot_gt successful grasps")
     parser.add_argument("--obj")
-    parser.add_argument("--inputs", nargs="+", help="robot_gt HDF5 paths")
+    parser.add_argument("--inputs", nargs="+", help="robot_gt HDF5 paths (full merge)")
     parser.add_argument("--output")
+    parser.add_argument(
+        "--incremental",
+        action="store_true",
+        help="增量合并：--existing-merged + --new-input，不扫描多轮 robot_gt",
+    )
+    parser.add_argument(
+        "--existing-merged",
+        help="已有 merged HDF5（可省略；无则仅用 --new-input）",
+    )
+    parser.add_argument(
+        "--new-input",
+        help="本轮 robot_gt HDF5（--incremental 必填）",
+    )
     parser.add_argument(
         "--deduplicate", action="store_true",
         help="去掉相近 pose（默认不去重，保留各轮全部成功）",
@@ -336,6 +453,21 @@ def main():
     if args.cleanup_empty_merged_dir:
         removed = cleanup_empty_merged_files(args.cleanup_empty_merged_dir)
         print(f"removed {removed} empty merged file(s) under {args.cleanup_empty_merged_dir}")
+        return
+
+    if args.incremental:
+        if not args.obj or not args.output or not args.new_input:
+            parser.error("--incremental requires --obj, --new-input, and --output")
+        merge_robot_gt_incremental(
+            args.obj,
+            args.output,
+            existing_merged=args.existing_merged,
+            new_round_gt=args.new_input,
+            deduplicate=args.deduplicate,
+            pos_tol=args.pos_tol,
+            rot_tol_deg=args.rot_tol_deg,
+            exclude_legacy_contact=args.exclude_legacy_contact,
+        )
         return
 
     if not args.obj or not args.inputs or not args.output:
