@@ -9,7 +9,8 @@
 | **Pool（当前推荐）** | `batch_gen_candidates_pool.py` + `batch_sim_candidates_pool.py` | 先建 candidate 池，再 sim（默认 weighted 抽样；可选 equal / 成功上限）；长驻 Isaac worker、chunk 续跑 |
 | **Legacy** | `batch_grasp_collect.py` | 每轮对所有物体重新 sampler + 每物体一个 `run_grasp_sim` |
 
-Pool 路线详见 **第 5 节**；Legacy 见 **第 4 节**。
+Pool 路线详见 **第 5 节**；Legacy 见 **第 4 节**。  
+**Pool sim 部署、HF 下载/上传、续跑：** [`pool_grasp_sim_pipeline.md`](pool_grasp_sim_pipeline.md)（唯一入口文档）。
 
 ## 输出目录约定
 
