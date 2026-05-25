@@ -11,9 +11,11 @@ run_grasp_sim_pool.py — 候选池 sim 长驻 Isaac worker
         --round-idx 15 --headless
 """
 import argparse
+from datetime import datetime, timezone
 import json
 import os
 import sys
+import time
 
 # Parse args before SimulationApp (因为 SimulationApp 修改了 sys.argv)
 parser = argparse.ArgumentParser(description="Pool sim worker: one Isaac session, many tasks")
@@ -43,14 +45,36 @@ _ROUND_IDX = int(
     args.round_idx if args.round_idx is not None else _chunk_meta["round_idx"]
 )
 _WORKER_Z_YAW: float | None = None
+_CHUNK_ID = _chunk_meta.get("chunk_id", os.path.basename(args.worker_chunk).replace(".json", ""))
+_PROCESS_START_TS = time.monotonic()
+_SIMAPP_RETURN_TS: float | None = None
+_READY_WAIT_ELAPSED_S = 0.0
+_FIRST_TASK_ELAPSED_S: float | None = None
+_FIRST_TASK_STARTED = False
 
 _SIM_GPU_ID = int(os.environ.get("ISAAC_SIM_GPU_ID", "0"))
 _STARTUP_SLOTS = int(os.environ.get("ISAAC_STARTUP_SLOTS_PER_GPU", "0"))
 
+
+def _worker_log_event(event: str, **fields) -> None:
+    parts = [
+        "[pool-worker-ts]",
+        f"utc={datetime.now(timezone.utc).isoformat()}",
+        f"elapsed_s={time.monotonic() - _PROCESS_START_TS:.3f}",
+        f"gpu={_SIM_GPU_ID}",
+        f"chunk={_CHUNK_ID}",
+        f"event={event}",
+    ]
+    parts.extend(f"{k}={v}" for k, v in fields.items())
+    print(" ".join(parts), flush=True)
+
+
+_worker_log_event("process_start", pid=os.getpid(), worker_chunk=args.worker_chunk)
+
 if _STARTUP_SLOTS > 0:
-    _chunk_id = _chunk_meta.get("chunk_id", os.path.basename(args.worker_chunk))
+    _worker_log_event("before_acquire_startup_semaphore", max_slots=_STARTUP_SLOTS)
     print(
-        f"[pool-worker] GPU {_SIM_GPU_ID} {_chunk_id}: "
+        f"[pool-worker] GPU {_SIM_GPU_ID} {_CHUNK_ID}: "
         f"waiting for cold-start slot (max {_STARTUP_SLOTS}/GPU)...",
         flush=True,
     )
@@ -60,13 +84,15 @@ if _STARTUP_SLOTS > 0:
         _ROUND_IDX,
         max_slots=_STARTUP_SLOTS,
     )
+    _worker_log_event("after_acquire_startup_semaphore", max_slots=_STARTUP_SLOTS)
     print(
-        f"[pool-worker] GPU {_SIM_GPU_ID} {_chunk_id}: "
+        f"[pool-worker] GPU {_SIM_GPU_ID} {_CHUNK_ID}: "
         f"acquired cold-start slot, launching Isaac...",
         flush=True,
     )
     _held_startup_slot = True
 else:
+    _worker_log_event("startup_semaphore_disabled")
     _held_startup_slot = False
 
 _launch_cfg: dict = {
@@ -80,10 +106,51 @@ _launch_cfg: dict = {
 try:
     from isaacsim import SimulationApp
 
+    _worker_log_event("before_simulation_app", launch_cfg=json.dumps(_launch_cfg, sort_keys=True))
     simulation_app = SimulationApp(_launch_cfg)
+    _SIMAPP_RETURN_TS = time.monotonic()
+    _worker_log_event(
+        "after_simulation_app",
+        startup_elapsed_s=f"{_SIMAPP_RETURN_TS - _PROCESS_START_TS:.3f}",
+    )
 finally:
     if _held_startup_slot:
         release_gpu_startup_slot(_SIM_GPU_ID, _OUTDIR, _ROUND_IDX)
+        _worker_log_event("after_release_startup_semaphore")
+
+
+if bool(_chunk_meta.get("worker_start_barrier", False)):
+    _round_dir = os.path.join(_OUTDIR, "sim_logs", f"round_{_ROUND_IDX:04d}")
+    _ready_dir = os.path.join(_round_dir, "ready")
+    _start_flag = os.path.join(_round_dir, "start.flag")
+    _ready_path = os.path.join(_ready_dir, f"{_CHUNK_ID}_gpu{_SIM_GPU_ID}.ready")
+    os.makedirs(_ready_dir, exist_ok=True)
+    with open(_ready_path, "w", encoding="utf-8") as _rf:
+        json.dump(
+            {
+                "chunk_id": _CHUNK_ID,
+                "gpu_id": _SIM_GPU_ID,
+                "pid": os.getpid(),
+                "ready_utc": datetime.now(timezone.utc).isoformat(),
+                "startup_elapsed_s": (
+                    None
+                    if _SIMAPP_RETURN_TS is None
+                    else round(_SIMAPP_RETURN_TS - _PROCESS_START_TS, 3)
+                ),
+            },
+            _rf,
+            indent=2,
+        )
+    _worker_log_event("worker_barrier_ready", ready_path=_ready_path)
+    _barrier_wait_t0 = time.monotonic()
+    while not os.path.isfile(_start_flag):
+        time.sleep(0.25)
+    _READY_WAIT_ELAPSED_S = time.monotonic() - _barrier_wait_t0
+    _worker_log_event(
+        "worker_barrier_released",
+        start_flag=_start_flag,
+        ready_wait_elapsed_s=f"{_READY_WAIT_ELAPSED_S:.3f}",
+    )
 
 
 # render=True 在非 headless 模式显示流畅运动；headless 模式下 render=False 加速
@@ -1400,6 +1467,7 @@ _WORKER_OBJ: str | None = None
 
 def worker_main():
     global _WORKER_SCENE, _WORKER_OBJ, _WORKER_Z_YAW, _CUROBO_MG
+    global _FIRST_TASK_ELAPSED_S, _FIRST_TASK_STARTED
 
     chunk_path = args.worker_chunk
     if not os.path.isfile(chunk_path):
@@ -1487,12 +1555,23 @@ def worker_main():
                 _flush_chunk_state(task, res)
                 continue
 
+            _first_task_t0 = None
+            if not _FIRST_TASK_STARTED:
+                _FIRST_TASK_STARTED = True
+                _first_task_t0 = time.monotonic()
+                _worker_log_event(
+                    "before_first_task",
+                    task_id=task.get("task_id", ""),
+                    obj_id=obj_id,
+                    z_yaw_deg=f"{z_yaw:.3f}",
+                )
+
             if _WORKER_SCENE is None:
                 cprint(f"\n📦 Setting up scene for {obj_id}...", "yellow")
                 _WORKER_Z_YAW = z_yaw
                 _WORKER_SCENE = setup_scene(obj_id, object_scale, sim_z_yaw_deg=z_yaw)
                 if _WORKER_SCENE is None:
-                    results.append({
+                    res = {
                         "task_id": task["task_id"],
                         "obj_id": obj_id,
                         "candidate_key": task.get("candidate_key", ""),
@@ -1500,8 +1579,17 @@ def worker_main():
                         "success": False,
                         "attempted": False,
                         "error": "setup_scene failed",
-                    })
-                    _flush_chunk_state(task, results[-1])
+                    }
+                    if _first_task_t0 is not None:
+                        _FIRST_TASK_ELAPSED_S = time.monotonic() - _first_task_t0
+                        _worker_log_event(
+                            "after_first_task",
+                            task_id=task.get("task_id", ""),
+                            success=False,
+                            first_task_elapsed_s=f"{_FIRST_TASK_ELAPSED_S:.3f}",
+                        )
+                    results.append(res)
+                    _flush_chunk_state(task, res)
                     continue
                 _WORKER_OBJ = obj_id
             elif _WORKER_OBJ != obj_id:
@@ -1517,7 +1605,7 @@ def worker_main():
                 if not swapped:
                     if not swap_err:
                         swap_err = "swap_scene_object failed"
-                    results.append({
+                    res = {
                         "task_id": task["task_id"],
                         "obj_id": obj_id,
                         "candidate_key": task.get("candidate_key", ""),
@@ -1525,8 +1613,17 @@ def worker_main():
                         "success": False,
                         "attempted": False,
                         "error": swap_err,
-                    })
-                    _flush_chunk_state(task, results[-1])
+                    }
+                    if _first_task_t0 is not None:
+                        _FIRST_TASK_ELAPSED_S = time.monotonic() - _first_task_t0
+                        _worker_log_event(
+                            "after_first_task",
+                            task_id=task.get("task_id", ""),
+                            success=False,
+                            first_task_elapsed_s=f"{_FIRST_TASK_ELAPSED_S:.3f}",
+                        )
+                    results.append(res)
+                    _flush_chunk_state(task, res)
                     continue
                 _WORKER_OBJ = obj_id
             elif abs(float(_WORKER_SCENE.get("sim_z_yaw_deg", 0.0)) - z_yaw) > 1e-6:
@@ -1535,6 +1632,14 @@ def worker_main():
                 _reset_scene_pose(_WORKER_SCENE, obj_id, object_scale, z_yaw)
 
             res = _run_single_task(task, outdir, int(round_idx), object_scale)
+            if _first_task_t0 is not None:
+                _FIRST_TASK_ELAPSED_S = time.monotonic() - _first_task_t0
+                _worker_log_event(
+                    "after_first_task",
+                    task_id=task.get("task_id", ""),
+                    success=bool(res.get("success")),
+                    first_task_elapsed_s=f"{_FIRST_TASK_ELAPSED_S:.3f}",
+                )
             results.append(res)
             _flush_chunk_state(task, res)
             if early_stop and res.get("success"):
@@ -1546,6 +1651,25 @@ def worker_main():
         with open(results_path, "w") as f:
             json.dump({"chunk": chunk.get("chunk_id", ""), "results": results}, f, indent=2)
         cprint(f"\n📁 Wrote {len(results)} results → {results_path}", "green")
+        total_elapsed_s = time.monotonic() - _PROCESS_START_TS
+        startup_elapsed_s = (
+            None
+            if _SIMAPP_RETURN_TS is None
+            else round(_SIMAPP_RETURN_TS - _PROCESS_START_TS, 3)
+        )
+        summary = {
+            "startup_elapsed_s": startup_elapsed_s,
+            "ready_wait_elapsed_s": round(_READY_WAIT_ELAPSED_S, 3),
+            "first_task_elapsed_s": (
+                None
+                if _FIRST_TASK_ELAPSED_S is None
+                else round(_FIRST_TASK_ELAPSED_S, 3)
+            ),
+            "total_tasks": len(tasks),
+            "total_elapsed_s": round(total_elapsed_s, 3),
+        }
+        _worker_log_event("chunk_complete", **summary)
+        print(f"[pool-worker-summary] {json.dumps(summary, sort_keys=True)}", flush=True)
         simulation_app.close()
 
 

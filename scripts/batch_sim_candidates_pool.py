@@ -39,6 +39,7 @@ import fcntl
 import glob
 import json
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -114,6 +115,8 @@ class PoolSimConfig:
     score_threshold: float
     no_rotation: bool
     early_stop_on_candidate_success: bool
+    worker_start_barrier: bool
+    startup_ready_timeout_s: float
 
 
 def _run_cmd(
@@ -606,6 +609,80 @@ def _assign_chunks_to_gpus(n_chunks: int, gpu_ids: tuple[int, ...]) -> list[int]
     return mapping[:n_chunks]
 
 
+def _barrier_paths(outdir: str, round_idx: int) -> tuple[str, str]:
+    round_dir = os.path.join(outdir, "sim_logs", round_tag(round_idx))
+    return os.path.join(round_dir, "ready"), os.path.join(round_dir, "start.flag")
+
+
+def _reset_worker_start_barrier(outdir: str, round_idx: int) -> None:
+    ready_dir, start_flag = _barrier_paths(outdir, round_idx)
+    if os.path.isfile(start_flag):
+        os.remove(start_flag)
+    if os.path.isdir(ready_dir):
+        shutil.rmtree(ready_dir)
+    os.makedirs(ready_dir, exist_ok=True)
+
+
+def _ready_file_for_chunk(ready_dir: str, chunk_path: str, gpu_id: int) -> str:
+    chunk_id = os.path.basename(chunk_path).replace(".json", "")
+    return os.path.join(ready_dir, f"{chunk_id}_gpu{gpu_id}.ready")
+
+
+def _wait_for_worker_start_barrier(
+    chunk_paths: list[str],
+    gpu_for_chunk: list[int],
+    *,
+    outdir: str,
+    round_idx: int,
+    timeout_s: float,
+    poll_s: float = 1.0,
+) -> None:
+    ready_dir, start_flag = _barrier_paths(outdir, round_idx)
+    os.makedirs(ready_dir, exist_ok=True)
+    expected = [
+        _ready_file_for_chunk(ready_dir, cp, gpu_for_chunk[i])
+        for i, cp in enumerate(chunk_paths)
+    ]
+    t0 = time.time()
+    last_report = -1
+    while True:
+        ready = [p for p in expected if os.path.isfile(p)]
+        n_ready = len(ready)
+        elapsed = time.time() - t0
+        if n_ready != last_report or int(elapsed) % 15 == 0:
+            print(
+                f"  Worker start barrier: {n_ready}/{len(expected)} ready "
+                f"({elapsed:.1f}s elapsed)",
+                flush=True,
+            )
+            last_report = n_ready
+        if n_ready >= len(expected):
+            break
+        if elapsed >= timeout_s:
+            missing = [os.path.basename(p) for p in expected if not os.path.isfile(p)]
+            print(
+                f"  ⚠️  Worker start barrier timeout after {elapsed:.1f}s: "
+                f"{n_ready}/{len(expected)} ready; releasing anyway. "
+                f"Missing: {', '.join(missing[:8])}"
+                + (" ..." if len(missing) > 8 else ""),
+                flush=True,
+            )
+            break
+        time.sleep(poll_s)
+
+    with open(start_flag, "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "released_at": datetime.now(timezone.utc).isoformat(),
+                "ready": len([p for p in expected if os.path.isfile(p)]),
+                "expected": len(expected),
+            },
+            f,
+            indent=2,
+        )
+    print(f"  Worker start barrier released: {start_flag}", flush=True)
+
+
 def run_sim_phase(
     queue: dict,
     cfg: PoolSimConfig,
@@ -642,6 +719,8 @@ def run_sim_phase(
 
     if cfg.isaac_startup_slots_per_gpu > 0:
         reset_gpu_startup_sems(cfg.outdir, round_idx, cfg.sim_gpu_ids)
+    if cfg.worker_start_barrier:
+        _reset_worker_start_barrier(cfg.outdir, round_idx)
 
     n_workers = len(cfg.sim_gpu_ids) * cfg.sim_per_gpu
     chunks = split_tasks_into_chunks(tasks, n_workers)
@@ -665,6 +744,7 @@ def run_sim_phase(
             "outdir": cfg.outdir,
             "object_scale": cfg.object_scale,
             "early_stop_on_candidate_success": cfg.early_stop_on_candidate_success,
+            "worker_start_barrier": cfg.worker_start_barrier,
             "tasks": chunk_tasks,
         }
         with open(cpath, "w") as f:
@@ -698,6 +778,12 @@ def run_sim_phase(
         print(
             f"  Isaac cold-start semaphore: max {cfg.isaac_startup_slots_per_gpu} "
             f"concurrent Startup per GPU (others queue)",
+            flush=True,
+        )
+    if cfg.worker_start_barrier:
+        print(
+            f"  Worker start barrier: wait for all {len(chunk_paths)} workers "
+            f"to report SimulationApp ready, timeout={cfg.startup_ready_timeout_s:.0f}s",
             flush=True,
         )
 
@@ -753,6 +839,15 @@ def run_sim_phase(
                 gpu_launch_idx,
             )
             futures[fut] = i
+
+        if cfg.worker_start_barrier:
+            _wait_for_worker_start_barrier(
+                chunk_paths,
+                gpu_for_chunk,
+                outdir=cfg.outdir,
+                round_idx=round_idx,
+                timeout_s=cfg.startup_ready_timeout_s,
+            )
 
         while futures:
             done_set, _ = wait(futures.keys(), return_when=FIRST_COMPLETED)
@@ -1142,6 +1237,20 @@ def main():
         metavar="N",
         help="同 GPU 同时进行 Isaac 冷启动 (至 Startup Complete) 的上限; 0=不限制 (默认 2)",
     )
+    parser.add_argument(
+        "--worker-start-barrier",
+        action="store_true",
+        help=(
+            "所有 worker 完成 SimulationApp 后先写 ready 文件并等待 start.flag; "
+            "主进程收齐 ready 或超时后统一放行 task"
+        ),
+    )
+    parser.add_argument(
+        "--startup-ready-timeout-s",
+        type=float,
+        default=600.0,
+        help="--worker-start-barrier 等待所有 worker ready 的超时秒数 (默认 600)",
+    )
     parser.add_argument("--sim-timeout", type=int, default=7200, help="单个 worker chunk 超时秒")
     parser.add_argument("--headless", action="store_true", default=True)
     parser.add_argument("--object-scale", type=float, default=1.0)
@@ -1199,6 +1308,9 @@ def main():
     if args.isaac_startup_slots_per_gpu < 0:
         print("❌ --isaac-startup-slots-per-gpu 须 >= 0")
         sys.exit(1)
+    if args.startup_ready_timeout_s <= 0:
+        print("❌ --startup-ready-timeout-s 须 > 0")
+        sys.exit(1)
 
     isaac_py = args.isaac_python
     if not isaac_py:
@@ -1241,6 +1353,8 @@ def main():
         score_threshold=args.score_threshold,
         no_rotation=not args.rotation,
         early_stop_on_candidate_success=not args.no_early_stop_yaw_on_success,
+        worker_start_barrier=args.worker_start_barrier,
+        startup_ready_timeout_s=args.startup_ready_timeout_s,
     )
 
     state_path = os.path.join(outdir, "state.json")
