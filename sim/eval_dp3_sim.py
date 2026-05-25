@@ -323,7 +323,7 @@ def setup_scene():
                 physics_material=PhysicsMaterial(prim_path="/World/PM/g",
                                                  static_friction=0.5, dynamic_friction=0.5,
                                                  restitution=0.8),
-                visual_material=None)
+                color=np.array([0.08, 0.08, 0.10]))   # near-black floor (high contrast)
     delete_prim("/World/Table")
     FixedCuboid(prim_path="/World/Table", name="table", position=TABLE_POS,
                 orientation=euler_angles_to_quat(np.array([0, 0, 0]), degrees=True),

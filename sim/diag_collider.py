@@ -27,7 +27,8 @@ OUT = os.path.join(PROJ, "replay_video_check")
 
 world = World(backend="numpy"); world.get_physics_context().set_solver_type("TGS")
 delete_prim("/Replicator/DomeLight_Xform"); rep.create.light(position=[0, 0, 0], light_type="dome")
-GroundPlane(prim_path="/World/defaultGroundPlane", z_position=0.0, visual_material=None)
+GroundPlane(prim_path="/World/defaultGroundPlane", z_position=0.0,
+            color=np.array([0.08, 0.08, 0.10]))   # near-black floor (high contrast)
 delete_prim("/World/Table")
 FixedCuboid(prim_path="/World/Table", name="table", position=np.array([0., 1., 0.75]),
             scale=np.array([2., 2., 0.1]), size=1.0, visible=True)

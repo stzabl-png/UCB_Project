@@ -42,7 +42,8 @@ rep.create.light(position=[0, 0, 0], light_type="dome")
 
 # ── ground + table  (sim_scaffolding) ────────────────────────────────────────
 GroundPlane(prim_path="/World/defaultGroundPlane",
-            z_position=ground["z_position"], visual_material=None)
+            z_position=ground["z_position"],
+            color=np.array([0.08, 0.08, 0.10]))   # near-black floor (high contrast vs white Franka + tan table)
 delete_prim("/World/Table")
 FixedCuboid(prim_path="/World/Table", name="table",
             position=np.array(table["position"], dtype=float),

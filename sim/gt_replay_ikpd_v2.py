@@ -58,6 +58,11 @@ parser.add_argument("--grasp-collision", action="store_true",
 parser.add_argument("--object-mass", type=float, default=None,
                     help="override object mass in kg for the grasp eval "
                          "(default = grasp_physics.GRASP_OBJECT_MASS_KG)")
+# ── viewport camera override (paper-figure multi-angle replays) ───────────────
+parser.add_argument("--camera-eye", type=float, nargs=3, default=[1.5, 1.5, 1.5],
+                    help="viewport camera position (x y z) in world frame")
+parser.add_argument("--camera-target", type=float, nargs=3, default=[0.0, 0.4, 0.85],
+                    help="viewport camera look-at target (x y z) in world frame")
 args, _ = parser.parse_known_args()
 
 PROJ_ROOT = "/home/accelerator/UCB_Project"
@@ -346,7 +351,8 @@ world = World(backend="numpy")
 phys = world.get_physics_context()
 phys.enable_ccd(True); phys.enable_gpu_dynamics(True); phys.set_broadphase_type("gpu")
 phys.enable_stablization(True); phys.set_solver_type("TGS")
-set_camera_view(eye=[1.5, 1.5, 1.5], target=[0, 0.4, 0.85], camera_prim_path="/OmniverseKit_Persp")
+set_camera_view(eye=list(args.camera_eye), target=list(args.camera_target),
+                camera_prim_path="/OmniverseKit_Persp")
 
 # ── video recording (PNG frames; ffmpeg to mp4 after) ────────────────────────
 VIDEO_DIR = args.video
@@ -385,7 +391,7 @@ rep.create.light(position=[0, 0, 0], light_type="dome")
 GroundPlane(prim_path="/World/defaultGroundPlane", z_position=0,
             physics_material=PhysicsMaterial(prim_path="/World/PM/g",
                                              static_friction=0.5, dynamic_friction=0.5, restitution=0.8),
-            visual_material=None)
+            color=np.array([0.08, 0.08, 0.10]))   # near-black floor (high contrast)
 delete_prim("/World/Table")
 FixedCuboid(prim_path="/World/Table", name="table", position=TABLE_POS,
             orientation=euler_angles_to_quat(np.array([0, 0, 0]), degrees=True),
@@ -427,12 +433,15 @@ else:
     obj_place_pos = np.array([sim_origin_W[0], sim_origin_W[1], TABLE_TOP_Z + obj_meta["height"] / 2])
 for i in range(10): delete_prim(f"/World/Rigid/rigid_{i}")
 delete_prim("/World/Rigid/rigid")
-obj_mass_kg = args.object_mass if args.object_mass is not None else grasp_physics.GRASP_OBJECT_MASS_KG
+if args.object_mass is not None:
+    obj_mass_kg = args.object_mass
+    cprint(f"  ⚖️  object mass OVERRIDE: {obj_mass_kg} kg", "yellow")
+else:
+    obj_mass_kg = grasp_physics.object_mass_kg(obj_meta["ycb_class_id"])
+    cprint(f"  ⚖️  object mass: {obj_mass_kg} kg (real YCB mass)", "cyan")
 obj = RigidObject(world, usd_path=obj_meta["usd"], pos=np.array(obj_place_pos),
                   ori=np.array([0., 0., 0.]), scale=np.array([1., 1., 1.]),
                   mass=obj_mass_kg)
-if args.object_mass is not None:
-    cprint(f"  ⚖️  object mass OVERRIDE: {obj_mass_kg} kg (default {grasp_physics.GRASP_OBJECT_MASS_KG})", "yellow")
 obj.rigid.set_world_pose(np.asarray(obj_place_pos, dtype=np.float64), obj_quat_G_wxyz)
 cprint(f"  obj placed at G-frame pose: pos={obj_place_pos.round(3)}  quat_G(wxyz)={obj_quat_G_wxyz.round(3)}", "cyan")
 

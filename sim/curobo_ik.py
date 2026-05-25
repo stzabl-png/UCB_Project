@@ -76,7 +76,16 @@ class CuroboIK:
         arm = pos[:, self._arm_idx]                                            # (K, 7)
         return arm[succ], perr[succ]
 
-    def solve_chain(self, targets, robot_pos, robot_ori_deg, verbose=True):
+    def solve_chain(self, targets, robot_pos, robot_ori_deg, verbose=True, start_qpos=None):
+        """Solve an IK chain.
+
+        start_qpos: optional (7,) ndarray — the joint config the chain should be
+            continuous WITH at its left edge. Used to stitch chunked DP3 rollouts:
+            pass the LAST executed qpos of the previous chunk so the DP picks IK
+            branches for frame 0 that are near it (avoids elbow-flip jumps across
+            chunks). Treated internally as a virtual frame -1 with one candidate
+            (zero error), so frame 0 candidates are continuity-gated against it.
+        """
         robot_pos = np.asarray(robot_pos, dtype=np.float64)
         yaw = robot_ori_deg[2] if hasattr(robot_ori_deg, "__len__") else robot_ori_deg
         Rz_inv = Rotation.from_euler("z", yaw, degrees=True).inv()
@@ -88,46 +97,67 @@ class CuroboIK:
             Rw = Rotation.from_quat([qw[1], qw[2], qw[3], qw[0]])              # wxyz → xyzw
             qb = (Rz_inv * Rw).as_quat()                                       # xyzw
             cands.append(self._solve_one(pos_b, [qb[3], qb[0], qb[1], qb[2]]))
-        qpos_list, ok_list, info = self._select_chain(cands)
+        qpos_list, ok_list, info = self._select_chain(cands, start_qpos=start_qpos)
         if verbose:
             ms = _chain_max_step(qpos_list)
-            print(f"   {self.cfg_str}")
+            seed_tag = f" seed={'on' if start_qpos is not None else 'off'}"
+            print(f"   {self.cfg_str}{seed_tag}")
             print(f"   solved {sum(ok_list)}/{len(ok_list)} frames   "
                   f"IK pos-err: mean {info['mean_err']*1000:.1f}mm  final {info['final_err']*1000:.1f}mm   "
                   f"chain max joint-step = {np.rad2deg(ms):.0f}°   ({info['mode']})")
         return qpos_list, ok_list
 
     @staticmethod
-    def _select_chain(cands):
-        """Accuracy-first DP under a hard continuity gate (see module header)."""
+    def _select_chain(cands, start_qpos=None):
+        """Accuracy-first DP under a hard continuity gate (see module header).
+
+        If start_qpos is provided, a virtual seed frame (1 candidate, zero error) is
+        prepended so frame 0 of the real chain is continuity-checked against it.
+        The returned chain still has length n (the seed itself is not returned).
+        """
         n = len(cands)
         Q = [c[0] for c in cands]
         E = [c[1].astype(np.float64) for c in cands]
         if any(len(q) == 0 for q in Q):
             chain, ok = CuroboIK._select_chain_minimax(Q)
             return chain, ok, dict(mode="minimax/holey", mean_err=float("nan"), final_err=float("nan"))
+
+        # Prepend seed as a virtual frame-(-1) with one candidate; DP then naturally
+        # continuity-gates real frame 0 against it.
+        if start_qpos is not None:
+            seed_arr = np.asarray(start_qpos, dtype=np.float64).reshape(1, -1)
+            Q = [seed_arr] + Q
+            E = [np.zeros(1, dtype=np.float64)] + E
+            n_eff = n + 1
+            first_real = 1
+        else:
+            n_eff = n
+            first_real = 0
+
         # forward DP: cost[i] = min total cost of a continuity-feasible chain ending at cand i
         cost = E[0].copy()
         bp = []
-        for t in range(1, n):
+        for t in range(1, n_eff):
             step = np.abs(Q[t][:, None, :] - Q[t - 1][None, :, :]).max(axis=2)   # (Kc,Kp) rad
             cc = cost[None, :] + W_CONT * step
             cc[step > CONT_THRESH] = np.inf
             j = np.argmin(cc, axis=1)
             base = cc[np.arange(len(Q[t])), j]
-            cost = base + (W_FINAL if t == n - 1 else 1.0) * E[t]
+            is_final = (t == n_eff - 1)
+            cost = base + (W_FINAL if is_final else 1.0) * E[t]
             bp.append(j)
         i = int(np.argmin(cost))
         if not np.isfinite(cost[i]):                                  # no feasible chain
-            chain, ok = CuroboIK._select_chain_minimax(Q)
+            # fallback: drop seed gate, run minimax on real frames only
+            chain, ok = CuroboIK._select_chain_minimax([c[0] for c in cands])
             return chain, ok, dict(mode="minimax/no-feasible-chain",
                                    mean_err=float("nan"), final_err=float("nan"))
         idx = [i]
-        for t in range(n - 1, 0, -1):
+        for t in range(n_eff - 1, 0, -1):
             i = int(bp[t - 1][i]); idx.append(i)
         idx.reverse()
-        chain = [Q[t][idx[t]] for t in range(n)]
-        errs = [float(E[t][idx[t]]) for t in range(n)]
+        chain = [Q[t][idx[t]] for t in range(first_real, n_eff)]
+        errs = [float(E[t][idx[t]]) for t in range(first_real, n_eff)]
         return chain, [True] * n, dict(mode="accuracy-DP",
                                        mean_err=float(np.mean(errs)), final_err=errs[-1])
 
@@ -195,7 +225,12 @@ if __name__ == "__main__":
         targets = list(zip(d["pos"], d["quat"]))            # Franka-convention quats
         cik = CuroboIK(num_seeds=int(d["num_seeds"]),
                        pos_tol=float(d["pos_tol"]), ori_tol=float(d["ori_tol"]))
-        qpos_list, ok_list = cik.solve_chain(targets, d["robot_pos"], d["robot_ori"])
+        # Optional warm-start: previous chunk's last qpos. Pass via `start_qpos` key.
+        start_qpos = d["start_qpos"] if "start_qpos" in d.files else None
+        if start_qpos is not None and start_qpos.size != 7:
+            start_qpos = None                                 # ignore malformed seed
+        qpos_list, ok_list = cik.solve_chain(targets, d["robot_pos"], d["robot_ori"],
+                                             start_qpos=start_qpos)
         out = np.full((len(qpos_list), 7), np.nan, dtype=np.float64)
         for i, q in enumerate(qpos_list):
             if q is not None:

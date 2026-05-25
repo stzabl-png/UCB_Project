@@ -208,7 +208,8 @@ def setup_scene(usd_path, obj_id, ds):
         static_friction=0.5, dynamic_friction=0.5, restitution=0.8,
     )
     GroundPlane(prim_path="/World/defaultGroundPlane", name="default_ground_plane",
-                z_position=0, physics_material=physics_material, visual_material=None)
+                z_position=0, physics_material=physics_material,
+                color=np.array([0.08, 0.08, 0.10]))   # near-black floor (high contrast)
 
     delete_prim("/World/Table")
     FixedCuboid(prim_path="/World/Table", name="table",

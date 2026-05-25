@@ -22,10 +22,50 @@ RESTITUTION             = 0.0
 CONTACT_OFFSET          = 0.02
 REST_OFFSET             = 0.001
 COLLISION_APPROXIMATION = "convexHull"
-GRASP_OBJECT_MASS_KG    = 0.05      # canonical object mass for the grasp eval
+GRASP_OBJECT_MASS_KG    = 0.05      # fallback mass for objects NOT in YCB_REAL_MASS_KG
 
 OBJECT_MATERIAL_PATH = "/World/PhysicsMaterials/BottleMaterial"
 FINGER_MATERIAL_PATH = "/World/PhysicsMaterials/FingerMaterial"
+
+# ── real YCB object masses (kg) ──────────────────────────────────────────────
+# YCB-benchmark measured masses, keyed by the DexYCB object index 1-21
+# (== gt_replay's obj_meta["ycb_class_id"]). Source: the official YCB object
+# list (ycbbenchmarks.com .../object-list-Sheet1.pdf); sugar/tomato/mustard
+# cross-checked against the Drake RobotLocomotion/models YCB SDFs (exact match).
+# These are the real physical masses — use them, not the 0.05kg fallback (too
+# light → a glancing gripper contact flings the object → false grasp failures).
+YCB_REAL_MASS_KG = {
+    1:  0.414,   # master_chef_can
+    2:  0.411,   # cracker_box
+    3:  0.514,   # sugar_box
+    4:  0.349,   # tomato_soup_can
+    5:  0.603,   # mustard_bottle
+    6:  0.171,   # tuna_fish_can
+    7:  0.187,   # pudding_box
+    8:  0.097,   # gelatin_box
+    9:  0.370,   # potted_meat_can
+    10: 0.066,   # banana
+    11: 0.178,   # pitcher_base
+    12: 1.131,   # bleach_cleanser
+    13: 0.147,   # bowl
+    14: 0.118,   # mug
+    15: 0.895,   # power_drill
+    16: 0.729,   # wood_block
+    17: 0.082,   # scissors
+    18: 0.0158,  # large_marker
+    19: 0.125,   # large_clamp
+    20: 0.202,   # extra_large_clamp
+    21: 0.028,   # foam_brick
+}
+
+
+def object_mass_kg(ycb_class_id, default=GRASP_OBJECT_MASS_KG):
+    """Real YCB object mass (kg) for a DexYCB object index (1-21).
+    Falls back to `default` for unknown ids."""
+    try:
+        return YCB_REAL_MASS_KG.get(int(ycb_class_id), default)
+    except (TypeError, ValueError):
+        return default
 
 
 def _make_physics_material(stage, path, mu_s, mu_d, restitution=RESTITUTION):
