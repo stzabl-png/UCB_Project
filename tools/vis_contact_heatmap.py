@@ -50,7 +50,11 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
-from scipy.spatial import cKDTree
+
+try:
+    from scipy.spatial import cKDTree
+except ModuleNotFoundError:
+    cKDTree = None
 
 PROJ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJ)
@@ -61,10 +65,24 @@ TRAINING_FP_DIR  = os.path.join(PROJ, "data_hub", "ProcessedData", "training_fp"
 EGO_HP_DIR       = os.path.join(PROJ, "data_hub", "ProcessedData", "human_prior_fp")
 YCB_MESH_DIR     = os.path.join(PROJ, "data_hub", "ProcessedData", "obj_meshes", "ycb")
 EGO_MESH_DIR     = os.path.join(PROJ, "data_hub", "ProcessedData", "obj_meshes", "egocentric")
+EGODEX_SCALED_MESH_DIR = os.path.join(PROJ, "data_hub", "ProcessedData", "Scaled_Mesh", "Egodex")
 OAKINK_MESH_DIR  = config.MESH_V1_DIR
 GRAB_MESH_DIR    = os.path.join(config.DATA_HUB, "meshes", "grab")
 CONTACTS_DIR     = config.CONTACTS_DIR
 OUT_BASE         = os.path.join(PROJ, "output", "vis_contact_heatmap")
+
+EGODEX_TRAINING_FP_DIRS = [
+    os.path.join(TRAINING_FP_DIR, "egodex"),
+    os.path.join(TRAINING_FP_DIR, "EgoDex"),
+    os.path.join(PROJ, "data_hub", "human_prior"),
+]
+
+EGODEX_MESH_DIRS = [
+    EGO_MESH_DIR,
+    EGODEX_SCALED_MESH_DIR,
+    os.path.join(PROJ, "data_hub", "meshes", "SAM3DMesh", "meshes", "egodex"),
+    os.path.join(PROJ, "data_hub", "meshes", "SAM3DMesh", "rotated_mesh", "egodex"),
+]
 
 GRAB_MESH_MAP = {
     "mug": "coffeemug", "phone": "phone", "fryingpan": "fryingpan",
@@ -101,11 +119,8 @@ def load_training_fp(dataset, obj_name):
 
 
 def load_egodex_hp(obj_name):
-    """Load egocentric HDF5 from human_prior_fp or training_fp/egodex."""
-    for base in [
-        os.path.join(TRAINING_FP_DIR, "egodex"),
-        os.path.join(PROJ, "data_hub", "human_prior"),
-    ]:
+    """Load EgoDex HDF5 from HF training_fp/EgoDex or legacy local folders."""
+    for base in EGODEX_TRAINING_FP_DIRS:
         path = os.path.join(base, f"{obj_name}.hdf5")
         if os.path.exists(path):
             with h5py.File(path, "r") as f:
@@ -157,10 +172,17 @@ def find_mesh(obj_id, dataset):
                 return p
         return None
     elif dataset == "egodex":
-        for ext in (".ply", ".obj"):
-            p = os.path.join(EGO_MESH_DIR, obj_id, f"mesh{ext}")
-            if os.path.exists(p):
-                return p
+        for root in EGODEX_MESH_DIRS:
+            for candidate in (
+                os.path.join(root, obj_id, "mesh.ply"),
+                os.path.join(root, obj_id, "mesh.obj"),
+                os.path.join(root, obj_id, f"{obj_id}.ply"),
+                os.path.join(root, obj_id, f"{obj_id}.obj"),
+                os.path.join(root, f"{obj_id}.ply"),
+                os.path.join(root, f"{obj_id}.obj"),
+            ):
+                if os.path.exists(candidate):
+                    return candidate
         return None
     elif dataset == "oakink":
         for ext in (".obj", ".ply"):
@@ -184,23 +206,29 @@ def find_mesh(obj_id, dataset):
 
 def dense_from_mesh(mesh_path, pc, hp, n_dense=N_DENSE):
     """Sample dense points from mesh and KNN-interpolate hp values."""
-    import trimesh
-    mesh = trimesh.load(mesh_path, force="mesh")
-    # apply scale if JSON present
-    scale_json = os.path.join(os.path.dirname(mesh_path), "scale.json")
-    if os.path.exists(scale_json):
-        import json
-        sf = float(json.load(open(scale_json)).get("scale_factor", 1.0))
-        mesh.vertices = mesh.vertices * sf
-
-    vis_pc, _ = trimesh.sample.sample_surface(mesh, n_dense)
-    vis_pc = vis_pc.astype(np.float32)
+    if cKDTree is None:
+        raise ImportError("scipy is required for mesh dense interpolation")
+    vis_pc = sample_mesh_surface(mesh_path, n_dense)
     _, idx  = cKDTree(pc).query(vis_pc, k=3)
     dists   = np.linalg.norm(vis_pc[:, None, :] - pc[idx], axis=2)
     weights = 1.0 / (dists + 1e-8)
     weights /= weights.sum(axis=1, keepdims=True)
     hp_dense = (weights * hp[idx]).sum(axis=1)
     return vis_pc, hp_dense
+
+
+def sample_mesh_surface(mesh_path, n_dense=N_DENSE):
+    """Sample points from a mesh after applying colocated scale.json, if present."""
+    import json
+    import trimesh
+
+    mesh = trimesh.load(mesh_path, force="mesh")
+    scale_json = os.path.join(os.path.dirname(mesh_path), "scale.json")
+    if os.path.exists(scale_json):
+        sf = float(json.load(open(scale_json)).get("scale_factor", 1.0))
+        mesh.vertices = mesh.vertices * sf
+    vis_pc, _ = trimesh.sample.sample_surface(mesh, n_dense)
+    return vis_pc.astype(np.float32)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -214,7 +242,50 @@ def _set_ax_equal(ax, pts, scale=0.6):
     ax.set_xlim(c[0] - r, c[0] + r)
     ax.set_ylim(c[1] - r, c[1] + r)
     ax.set_zlim(c[2] - r, c[2] + r)
-    ax.set_axis_off()
+    try:
+        ax.set_box_aspect((1, 1, 1))
+    except Exception:
+        pass
+    ax.set_xlabel("X (m)", fontsize=8, labelpad=2)
+    ax.set_ylabel("Y (m)", fontsize=8, labelpad=2)
+    ax.set_zlabel("Z (m)", fontsize=8, labelpad=2)
+    ax.tick_params(axis="both", which="major", labelsize=7, pad=0)
+    ax.grid(True, linewidth=0.45, alpha=0.45)
+    for axis in (ax.xaxis, ax.yaxis, ax.zaxis):
+        axis.pane.fill = True
+        axis.pane.set_facecolor((0.96, 0.96, 0.96, 0.22))
+        axis.pane.set_edgecolor((0.82, 0.82, 0.82, 0.75))
+
+
+def draw_xyz_frame(ax, pts):
+    """Draw a colored XYZ frame from the true object-frame origin."""
+    mn, mx = pts.min(0), pts.max(0)
+    span = mx - mn
+    axis_len = float(span.max()) * 0.35
+    origin = np.zeros(3, dtype=np.float32)
+    axes = [
+        ((1, 0, 0), "#d62728", "X"),
+        ((0, 1, 0), "#2ca02c", "Y"),
+        ((0, 0, 1), "#1f77b4", "Z"),
+    ]
+    ax.scatter(origin[0], origin[1], origin[2],
+               color="black", s=36, marker="o", depthshade=False, zorder=10)
+    ax.text(origin[0], origin[1], origin[2], " O",
+            color="black", fontsize=9, fontweight="bold", zorder=11)
+    for direction, color, label in axes:
+        d = np.asarray(direction, dtype=np.float32)
+        ax.quiver(
+            origin[0], origin[1], origin[2],
+            d[0], d[1], d[2],
+            length=axis_len,
+            color=color,
+            linewidth=2.0,
+            arrow_length_ratio=0.18,
+            normalize=False,
+        )
+        end = origin + d * axis_len * 1.08
+        ax.text(end[0], end[1], end[2], label, color=color,
+                fontsize=10, fontweight="bold")
 
 
 def render_pc(ax, pts, vals, title="", cmap="jet", vmin=0, vmax=None,
@@ -252,6 +323,34 @@ def render_pc(ax, pts, vals, title="", cmap="jet", vmin=0, vmax=None,
     _set_ax_equal(ax, p)
 
 
+def render_mesh_only(ax, pts, title="", elev=25, azim=135, show_xyz_frame=False):
+    """Render mesh surface samples without HP coloring."""
+    ax.scatter(pts[:, 0], pts[:, 1], pts[:, 2],
+               color=(0.72, 0.74, 0.78, 1.0), s=2.5, alpha=0.92, edgecolors="none")
+    if show_xyz_frame:
+        draw_xyz_frame(ax, pts)
+    ax.set_title(title, fontsize=11, fontweight="bold", pad=6)
+    ax.view_init(elev=elev, azim=azim)
+    _set_ax_equal(ax, pts)
+
+
+def render_overlay(ax, mesh_pts, hp_pts, hp_vals, title="", elev=25, azim=135):
+    """Render gray mesh surface with continuous HP points overlaid."""
+    hp_max = float(hp_vals.max()) if hp_vals.max() > 1e-8 else 1.0
+    order = np.argsort(hp_vals)
+    hp_pts = hp_pts[order]
+    hp_vals = hp_vals[order]
+    colors = plt.get_cmap("jet")(np.clip(hp_vals / (hp_max + 1e-8), 0, 1))
+
+    ax.scatter(mesh_pts[:, 0], mesh_pts[:, 1], mesh_pts[:, 2],
+               color=(0.72, 0.74, 0.78, 0.22), s=2.0, alpha=0.22, edgecolors="none")
+    ax.scatter(hp_pts[:, 0], hp_pts[:, 1], hp_pts[:, 2],
+               c=colors, s=3.2, alpha=0.95, edgecolors="none")
+    ax.set_title(title, fontsize=11, fontweight="bold", pad=6)
+    ax.view_init(elev=elev, azim=azim)
+    _set_ax_equal(ax, np.vstack([mesh_pts, hp_pts]))
+
+
 def make_stats_title(obj_name, hp, dataset):
     cov = float((hp > 0.1).mean()) * 100
     cov_01 = float((hp > 0.01).mean()) * 100
@@ -272,20 +371,43 @@ def render_static(obj_name, dataset, pc, hp, fc, out_path,
     show_binary=True: add binary panel on the left.
     compare=True:     add GT contact panel on the right.
     """
+    mesh_pts = None
+    mesh_note = "mesh missing; showing HDF5 point_cloud"
     if mesh_path and os.path.exists(mesh_path):
-        vis_pc, hp_dense = dense_from_mesh(mesh_path, pc, hp)
-        dense_label = f"mesh {N_DENSE:,}pts"
+        try:
+            mesh_pts = sample_mesh_surface(mesh_path, N_DENSE)
+            mesh_note = f"mesh {N_DENSE:,}pts"
+        except ImportError as e:
+            print(f"  ⚠️  {e}; using raw {len(pc)} HP pts")
+        except ModuleNotFoundError as e:
+            print(f"  ⚠️  {e}; using raw {len(pc)} HP pts")
+
+    if mesh_pts is not None:
+        if cKDTree is None:
+            vis_pc, hp_dense = pc, hp
+            dense_label = f"raw {len(pc)}pts — scipy missing"
+            print(f"  ⚠️  scipy is required for mesh HP interpolation; using raw {len(pc)} HP pts")
+        else:
+            vis_pc = mesh_pts
+            _, idx = cKDTree(pc).query(vis_pc, k=3)
+            dists = np.linalg.norm(vis_pc[:, None, :] - pc[idx], axis=2)
+            weights = 1.0 / (dists + 1e-8)
+            weights /= weights.sum(axis=1, keepdims=True)
+            hp_dense = (weights * hp[idx]).sum(axis=1)
+            dense_label = f"mesh {N_DENSE:,}pts"
     else:
+        mesh_pts = pc
         vis_pc, hp_dense = pc, hp
         dense_label = f"raw {len(pc)}pts — mesh not found"
         print(f"  ⚠️  Mesh not found for {obj_name}, using raw {len(pc)} pts")
 
     hp_max = float(hp_dense.max()) if hp_dense.max() > 1e-8 else 1.0
 
-    # 决定面板数
-    n_panels = 1
-    if show_binary: n_panels += 1
-    if compare and contact_pts is not None: n_panels += 1
+    # With --binary, produce the requested 4-panel diagnostic:
+    # 1 mesh, 2 HP binary, 3 HP continuous, 4 mesh + continuous HP overlay.
+    n_panels = 4 if show_binary else 1
+    if not show_binary and compare and contact_pts is not None:
+        n_panels += 1
 
     fig = plt.figure(figsize=(7 * n_panels, 7), facecolor="white")
     fig.suptitle(make_stats_title(obj_name, hp_dense, dataset),
@@ -294,21 +416,32 @@ def render_static(obj_name, dataset, pc, hp, fc, out_path,
     col = 1
     if show_binary:
         ax = fig.add_subplot(1, n_panels, col, projection="3d"); col += 1
+        render_mesh_only(ax, mesh_pts, f"1. Mesh ({mesh_note})", show_xyz_frame=True)
+
+        ax = fig.add_subplot(1, n_panels, col, projection="3d"); col += 1
         render_pc(ax, vis_pc, hp_dense,
-                  f"Human Prior (binary, thr={hp_max*0.5:.3f})",
+                  f"2. HP binary (thr={hp_max*0.5:.3f})",
                   binary=True, fc=fc)
 
-    # ── 主要面板：Jet ──────────────────────────────────────────────────────
     ax = fig.add_subplot(1, n_panels, col, projection="3d"); col += 1
     render_pc(ax, vis_pc, hp_dense,
-              f"Human Prior  ({dense_label})",
+              f"{'3. ' if show_binary else ''}HP continuous ({dense_label})",
               cmap="jet", vmax=hp_max, fc=fc)
 
-    if compare and contact_pts is not None:
-        dists, _ = cKDTree(contact_pts).query(vis_pc)
-        gt_on_mesh = (dists < 0.012).astype(np.float32)
-        ax = fig.add_subplot(1, n_panels, col, projection="3d")
-        render_pc(ax, vis_pc, gt_on_mesh, "GT Contact (raw finger pts)", binary=True)
+    if show_binary:
+        ax = fig.add_subplot(1, n_panels, col, projection="3d"); col += 1
+        render_overlay(ax, mesh_pts, vis_pc, hp_dense,
+                       f"4. Mesh overlay HP continuous")
+
+    if (not show_binary) and compare and contact_pts is not None:
+        if cKDTree is None:
+            print("  ⚠️  scipy is required for compare mode; skipping GT contact panel")
+            contact_pts = None
+        else:
+            dists, _ = cKDTree(contact_pts).query(vis_pc)
+            gt_on_mesh = (dists < 0.012).astype(np.float32)
+            ax = fig.add_subplot(1, n_panels, col, projection="3d")
+            render_pc(ax, vis_pc, gt_on_mesh, "GT Contact (raw finger pts)", binary=True)
 
     plt.tight_layout(rect=[0, 0, 1, 0.95])
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
@@ -327,7 +460,11 @@ def render_interactive(obj_name, dataset, pc, hp, fc, mesh_path=None):
 
     # Prefer mesh
     if mesh_path and os.path.exists(mesh_path):
-        vis_pc, hp_dense = dense_from_mesh(mesh_path, pc, hp)
+        try:
+            vis_pc, hp_dense = dense_from_mesh(mesh_path, pc, hp)
+        except ImportError as e:
+            print(f"  ⚠️  {e}; using raw {len(pc)} HP pts")
+            vis_pc, hp_dense = pc, hp
     else:
         vis_pc, hp_dense = pc, hp
 
@@ -382,6 +519,9 @@ def process_obj(dataset, obj_name, mode, compare, out_dir, show_binary=False):
         mesh = trimesh.load(mesh_path, force="mesh")
         pc, _ = trimesh.sample.sample_surface(mesh, 4096)
         pc = pc.astype(np.float32)
+        if cKDTree is None:
+            print("❌ scipy is required for oakink/grab contact density")
+            return False
         dists, _ = cKDTree(contact_pts).query(pc)
         hp = np.exp(-dists / 0.01).astype(np.float32)
         hp = hp / (hp.max() + 1e-8)
@@ -423,11 +563,11 @@ def list_objects(dataset):
         return [os.path.splitext(f)[0]
                 for f in os.listdir(folder) if f.endswith(".hdf5")]
     elif dataset == "egodex":
-        folder = os.path.join(TRAINING_FP_DIR, "egodex")
-        if not os.path.isdir(folder):
-            folder = os.path.join(PROJ, "data_hub", "human_prior")
-        return [os.path.splitext(f)[0]
-                for f in os.listdir(folder) if f.endswith(".hdf5")]
+        for folder in EGODEX_TRAINING_FP_DIRS:
+            if os.path.isdir(folder):
+                return [os.path.splitext(f)[0]
+                        for f in os.listdir(folder) if f.endswith(".hdf5")]
+        return []
     elif dataset == "oakink":
         return [os.path.splitext(f)[0]
                 for f in os.listdir(OAKINK_MESH_DIR)
