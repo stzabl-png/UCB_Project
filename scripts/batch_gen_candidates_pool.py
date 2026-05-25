@@ -117,9 +117,10 @@ def resolve_dataset(obj_id: str) -> Optional[str]:
 def select_target_objects(
     merged_dir: str,
     success_threshold: int,
+    min_merged_success: int = 0,
 ) -> list[tuple[str, str, int]]:
     """
-    Objects with merged file and success count strictly below threshold.
+    Objects with merged file, success >= min_merged_success, and success < success_threshold.
     Returns [(obj_id, dataset, merged_success), ...] sorted by success then obj_id.
     """
     merged_counts = scan_merged_objects(merged_dir)
@@ -127,6 +128,8 @@ def select_target_objects(
     skipped_no_dataset: list[str] = []
 
     for obj_id, success in merged_counts.items():
+        if success < min_merged_success:
+            continue
         if success >= success_threshold:
             continue
         dataset = resolve_dataset(obj_id)
@@ -279,6 +282,12 @@ def main():
         help="只生成 merged 成功数 **严格小于** 该值的物体",
     )
     parser.add_argument(
+        "--min-merged-success",
+        type=int,
+        default=0,
+        help="只生成 merged 成功数 **>=** 该值的物体（默认 0 不限制下限）",
+    )
+    parser.add_argument(
         "--target",
         type=int,
         default=50,
@@ -326,6 +335,12 @@ def main():
     if args.success_threshold < 0:
         print("❌ --success-threshold 须 >= 0")
         sys.exit(1)
+    if args.min_merged_success < 0:
+        print("❌ --min-merged-success 须 >= 0")
+        sys.exit(1)
+    if args.min_merged_success >= args.success_threshold:
+        print("❌ --min-merged-success 须 < --success-threshold")
+        sys.exit(1)
     if args.target < 1:
         print("❌ --target 须 >= 1")
         sys.exit(1)
@@ -335,13 +350,22 @@ def main():
 
     os.makedirs(args.output_dir, exist_ok=True)
 
-    targets = select_target_objects(args.merged_dir, args.success_threshold)
+    targets = select_target_objects(
+        args.merged_dir,
+        args.success_threshold,
+        min_merged_success=args.min_merged_success,
+    )
     if args.obj:
         targets = [t for t in targets if t[0] == args.obj]
         if not targets:
             merged_counts = scan_merged_objects(args.merged_dir)
             if args.obj not in merged_counts:
                 print(f"❌ {args.obj}: no merged file in {args.merged_dir}")
+            elif merged_counts[args.obj] < args.min_merged_success:
+                print(
+                    f"❌ {args.obj}: merged success={merged_counts[args.obj]} "
+                    f"< min {args.min_merged_success}"
+                )
             elif merged_counts[args.obj] >= args.success_threshold:
                 print(
                     f"❌ {args.obj}: merged success={merged_counts[args.obj]} "
@@ -353,8 +377,8 @@ def main():
 
     if not targets:
         print(
-            f"❌ no objects with merged success < {args.success_threshold} "
-            f"(merged dir: {args.merged_dir})"
+            f"❌ no objects with {args.min_merged_success} <= merged success "
+            f"< {args.success_threshold} (merged dir: {args.merged_dir})"
         )
         sys.exit(1)
 
@@ -372,7 +396,9 @@ def main():
 
     print(f"Merged:  {args.merged_dir}")
     print(f"Pool out: {args.output_dir}")
-    print(f"Threshold: success < {args.success_threshold}")
+    print(
+        f"Filter: {args.min_merged_success} <= merged success < {args.success_threshold}"
+    )
     print(f"Target: {args.target} candidates / object")
     print(f"Objects: {len(targets)}")
     print(f"Workers: {args.sampler_workers}")

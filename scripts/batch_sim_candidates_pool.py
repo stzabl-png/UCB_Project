@@ -39,6 +39,7 @@ import fcntl
 import glob
 import json
 import os
+import signal
 import subprocess
 import sys
 import threading
@@ -83,6 +84,8 @@ GEN_POOL_SCRIPT = os.path.join(PROJ, "scripts", "batch_gen_candidates_pool.py")
 SIM_POOL_SCRIPT = os.path.join(PROJ, "sim", "run_grasp_sim_pool.py")
 SAME_GPU_STAGGER_S = 45.0
 SIM_INGEST_POLL_S = 5.0
+SIM_WORKER_POLL_S = 2.0
+SIM_SHUTDOWN_GRACE_S = 60.0
 WORKER_CRASH_RETRY_S = 15.0
 WORKER_MAX_RETRIES = 2
 
@@ -95,6 +98,7 @@ class PoolSimConfig:
     headless: bool
     isaac_python: str
     sim_timeout: int
+    sim_shutdown_grace_s: float
     object_scale: float
     python_bin: str
     sim_gpu_ids: tuple[int, ...]
@@ -291,8 +295,114 @@ def _load_chunk_results(chunk_path: str) -> list[dict]:
 
 
 def _chunk_run_complete(chunk_path: str) -> bool:
+    _, progress_path = _chunk_sidecar_paths(chunk_path)
+    try:
+        if os.path.isfile(progress_path):
+            with open(progress_path, "r") as f:
+                prog = json.load(f)
+            total = int(prog.get("total", 0))
+            done = int(prog.get("completed", 0))
+            if total > 0 and done >= total:
+                return True
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        pass
     done, total, _ = _read_chunk_progress(chunk_path)
     return total > 0 and done >= total
+
+
+def _terminate_process_group(
+    proc: subprocess.Popen,
+    *,
+    grace_s: float = 5.0,
+) -> None:
+    """SIGTERM then SIGKILL the Isaac worker process group."""
+    if proc.poll() is not None:
+        return
+
+    def _signal(sig: signal.Signals) -> None:
+        try:
+            os.killpg(os.getpgid(proc.pid), sig)
+        except ProcessLookupError:
+            pass
+        except (PermissionError, OSError):
+            try:
+                proc.send_signal(sig)
+            except ProcessLookupError:
+                pass
+
+    _signal(signal.SIGTERM)
+    deadline = time.time() + grace_s
+    while time.time() < deadline:
+        if proc.poll() is not None:
+            return
+        time.sleep(0.2)
+    _signal(signal.SIGKILL)
+    try:
+        proc.wait(timeout=10.0)
+    except subprocess.TimeoutExpired:
+        pass
+
+
+def _run_isaac_chunk_subprocess(
+    cmd: list[str],
+    *,
+    chunk_path: str,
+    log_path: str,
+    env: dict,
+    timeout: int,
+    shutdown_grace_s: float,
+    poll_s: float = SIM_WORKER_POLL_S,
+) -> tuple[int, str, bool]:
+    """
+    Run Isaac pool worker; poll chunk sidecars on disk.
+
+    When all chunk tasks are recorded, wait ``shutdown_grace_s`` for a clean
+    exit, then kill the process group (Isaac ``simulation_app.close()`` often
+    hangs after long runs).
+
+    Returns (returncode, message, terminated_after_complete).
+    """
+    log_f = open(log_path, "w")
+    proc = subprocess.Popen(
+        cmd,
+        cwd=PROJ,
+        env=env,
+        stdout=log_f,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+        text=True,
+    )
+    deadline = time.time() + timeout if timeout and timeout > 0 else None
+    complete_since: Optional[float] = None
+    terminated_after_complete = False
+
+    try:
+        while proc.poll() is None:
+            now = time.time()
+            if deadline is not None and now >= deadline:
+                _terminate_process_group(proc)
+                return -9, "timeout", False
+
+            if _chunk_run_complete(chunk_path):
+                if complete_since is None:
+                    complete_since = now
+                elif now - complete_since >= shutdown_grace_s:
+                    _terminate_process_group(proc)
+                    terminated_after_complete = True
+                    rc = proc.wait()
+                    return (
+                        rc,
+                        "chunk complete on disk; terminated hung Isaac shutdown",
+                        True,
+                    )
+            else:
+                complete_since = None
+
+            time.sleep(poll_s)
+
+        return proc.wait(), "", terminated_after_complete
+    finally:
+        log_f.close()
 
 
 def _read_chunk_progress(chunk_path: str) -> tuple[int, int, int]:
@@ -515,31 +625,54 @@ def run_sim_worker(
         round_idx=int(chunk_meta["round_idx"]),
         chunk_path=chunk_path,
     )
-    rc, out = _run_cmd(sim_cmd, timeout=cfg.sim_timeout, log_path=log_path, env=env)
+    rc, out, terminated_after_complete = _run_isaac_chunk_subprocess(
+        sim_cmd,
+        chunk_path=chunk_path,
+        log_path=log_path,
+        env=env,
+        timeout=cfg.sim_timeout,
+        shutdown_grace_s=cfg.sim_shutdown_grace_s,
+    )
 
     results_path = chunk_path.replace(".json", "_results.json")
     if results_path == chunk_path:
         results_path = chunk_path + "_results.json"
 
+    results: list[dict] = []
+    if os.path.isfile(results_path):
+        with open(results_path, "r") as f:
+            results = json.load(f).get("results", [])
+
     payload = {
         "chunk_path": chunk_path,
         "status": "ok",
-        "results": [],
+        "results": results,
         "error": "",
         "expected_tasks": expected_tasks,
     }
-    if rc != 0:
-        payload["status"] = "sim_timeout" if rc == -9 else "sim_failed"
-        payload["error"] = (out or f"exit {rc}")[:500]
-    elif os.path.isfile(results_path):
-        with open(results_path, "r") as f:
-            data = json.load(f)
-        payload["results"] = data.get("results", [])
-        n_got = len(payload["results"])
+    n_got = len(results)
+    chunk_ok = _chunk_run_complete(chunk_path)
+
+    if chunk_ok and (rc == 0 or terminated_after_complete):
         if expected_tasks > 0 and n_got < expected_tasks:
             payload["status"] = "partial"
             payload["error"] = f"got {n_got}/{expected_tasks} task results"
-    else:
+        elif expected_tasks > 0 and n_got == 0:
+            payload["status"] = "no_results"
+            payload["error"] = f"missing {results_path}"
+        elif terminated_after_complete:
+            payload["error"] = out[:500]
+    elif chunk_ok and rc != 0:
+        payload["status"] = "ok" if n_got >= expected_tasks else "partial"
+        if payload["status"] == "partial":
+            payload["error"] = f"got {n_got}/{expected_tasks} task results (exit {rc})"
+    elif rc != 0:
+        payload["status"] = "sim_timeout" if rc == -9 else "sim_failed"
+        payload["error"] = (out or f"exit {rc}")[:500]
+    elif expected_tasks > 0 and n_got < expected_tasks:
+        payload["status"] = "partial"
+        payload["error"] = f"got {n_got}/{expected_tasks} task results"
+    elif expected_tasks > 0 and n_got == 0:
         payload["status"] = "no_results"
         payload["error"] = f"missing {results_path}"
 
@@ -1086,6 +1219,12 @@ def main():
         help="同 GPU 上相邻 Isaac worker 启动间隔秒数 (默认 45)",
     )
     parser.add_argument("--sim-timeout", type=int, default=7200, help="单个 worker chunk 超时秒")
+    parser.add_argument(
+        "--sim-shutdown-grace-s",
+        type=float,
+        default=SIM_SHUTDOWN_GRACE_S,
+        help="chunk 全部写盘后，等待 Isaac 正常退出的秒数；超时则 kill 进程组 (默认 60)",
+    )
     parser.add_argument("--headless", action="store_true", default=True)
     parser.add_argument("--object-scale", type=float, default=1.0)
     parser.add_argument("--plan-seed", type=int, default=None)
@@ -1164,6 +1303,7 @@ def main():
         headless=args.headless,
         isaac_python=isaac_py,
         sim_timeout=args.sim_timeout,
+        sim_shutdown_grace_s=args.sim_shutdown_grace_s,
         object_scale=args.object_scale,
         python_bin=args.python_bin,
         sim_gpu_ids=sim_gpu_ids,
