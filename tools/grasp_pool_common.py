@@ -3,11 +3,13 @@ grasp_pool_common.py — 候选池 sim batch 规划 / registry / pool↔round �
 """
 from __future__ import annotations
 
+import fcntl
 import glob
 import json
 import os
 import re
 import shutil
+import time
 from typing import Any, Optional
 
 import h5py
@@ -24,6 +26,76 @@ SKIP_REASON_CANDIDATE_SUCCESS = "candidate_success_at_yaw"
 
 def round_tag(round_idx: int) -> str:
     return f"round_{round_idx:04d}"
+
+
+def gpu_startup_sem_path(outdir: str, round_idx: int, gpu_id: int) -> str:
+    return os.path.join(
+        os.path.abspath(outdir),
+        "sim_logs",
+        round_tag(round_idx),
+        "startup_sem",
+        f"gpu{gpu_id}.sem",
+    )
+
+
+def acquire_gpu_startup_slot(
+    gpu_id: int,
+    outdir: str,
+    round_idx: int,
+    *,
+    max_slots: int = 2,
+    poll_s: float = 2.0,
+) -> None:
+    """Block until this GPU has fewer than max_slots workers in Isaac cold-start."""
+    if max_slots <= 0:
+        return
+    path = gpu_startup_sem_path(outdir, round_idx, gpu_id)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    open(path, "a", encoding="utf-8").close()
+    while True:
+        with open(path, "r+", encoding="utf-8") as f:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            try:
+                f.seek(0)
+                raw = f.read().strip()
+                n = int(raw) if raw else 0
+                if n < max_slots:
+                    f.seek(0)
+                    f.truncate()
+                    f.write(str(n + 1))
+                    f.flush()
+                    os.fsync(f.fileno())
+                    return
+            finally:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        time.sleep(poll_s)
+
+
+def reset_gpu_startup_sems(outdir: str, round_idx: int, gpu_ids: tuple[int, ...] | list[int]) -> None:
+    for gpu_id in gpu_ids:
+        path = gpu_startup_sem_path(outdir, round_idx, gpu_id)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("0")
+
+
+def release_gpu_startup_slot(gpu_id: int, outdir: str, round_idx: int) -> None:
+    path = gpu_startup_sem_path(outdir, round_idx, gpu_id)
+    if not os.path.isfile(path):
+        return
+    with open(path, "r+", encoding="utf-8") as f:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        try:
+            f.seek(0)
+            raw = f.read().strip()
+            n = int(raw) if raw else 0
+            f.seek(0)
+            f.truncate()
+            f.write(str(max(0, n - 1)))
+            f.flush()
+            os.fsync(f.fileno())
+        finally:
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
 
 def task_queue_name(round_idx: int) -> str:

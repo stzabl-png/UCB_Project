@@ -48,11 +48,22 @@ _SIM_GPU_ID = int(os.environ.get("ISAAC_SIM_GPU_ID", "0"))
 _STARTUP_SLOTS = int(os.environ.get("ISAAC_STARTUP_SLOTS_PER_GPU", "0"))
 
 if _STARTUP_SLOTS > 0:
+    _chunk_id = _chunk_meta.get("chunk_id", os.path.basename(args.worker_chunk))
+    print(
+        f"[pool-worker] GPU {_SIM_GPU_ID} {_chunk_id}: "
+        f"waiting for cold-start slot (max {_STARTUP_SLOTS}/GPU)...",
+        flush=True,
+    )
     acquire_gpu_startup_slot(
         _SIM_GPU_ID,
         _OUTDIR,
         _ROUND_IDX,
         max_slots=_STARTUP_SLOTS,
+    )
+    print(
+        f"[pool-worker] GPU {_SIM_GPU_ID} {_chunk_id}: "
+        f"acquired cold-start slot, launching Isaac...",
+        flush=True,
     )
     _held_startup_slot = True
 else:

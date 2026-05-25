@@ -68,6 +68,7 @@ from grasp_pool_common import (  # noqa: E402
     load_task_queue,
     paths_for_outdir,
     pending_tasks,
+    reset_gpu_startup_sems,
     round_tag,
     save_registry,
     save_task_queue,
@@ -638,6 +639,9 @@ def run_sim_phase(
         tasks = pending_tasks(queue)
     if not tasks:
         return [], []
+
+    if cfg.isaac_startup_slots_per_gpu > 0:
+        reset_gpu_startup_sems(cfg.outdir, round_idx, cfg.sim_gpu_ids)
 
     n_workers = len(cfg.sim_gpu_ids) * cfg.sim_per_gpu
     chunks = split_tasks_into_chunks(tasks, n_workers)
@@ -1225,6 +1229,7 @@ def main():
         sim_gpu_ids=sim_gpu_ids,
         sim_per_gpu=args.sim_per_gpu,
         same_gpu_stagger_s=args.same_gpu_stagger_s,
+        isaac_startup_slots_per_gpu=args.isaac_startup_slots_per_gpu,
         merge_deduplicate=args.merge_deduplicate,
         incremental_merge=args.incremental_merge and not args.full_merge,
         slots_per_round=args.slots_per_round,
