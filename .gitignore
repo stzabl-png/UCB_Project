@@ -31,6 +31,7 @@ build/
 # Environment
 .env
 .venv/
+uv.lock
 # IDE
 .vscode/
 .idea/
