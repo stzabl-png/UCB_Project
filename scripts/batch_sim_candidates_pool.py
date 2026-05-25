@@ -448,18 +448,19 @@ def _make_isaac_worker_env(
     """
     env = base_env.copy()
     if strict_gpu_mask:
-        # In strict GPU mask mode, CUDA_VISIBLE_DEVICES=<physical_gpu_id>
-        # remaps that physical GPU to logical CUDA device 0 inside the worker.
-        # Therefore Isaac active_gpu/physics_gpu and torch.cuda.set_device must use 0,
-        # not the physical GPU id.
+        # CUDA_VISIBLE_DEVICES limits torch/cuRobo/PhysX to one physical GPU as cuda:0.
+        # Kit/Vulkan ignores CVD; active_gpu must be the Kit GPU-table index (physical id).
+        # physics_gpu (cudaDevice) stays logical 0 so PhysX uses the masked CUDA device.
         env["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
         env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
         env["ISAAC_PHYSICAL_GPU_ID"] = str(gpu_id)
         env["ISAAC_SIM_GPU_ID"] = "0"
+        env["ISAAC_KIT_ACTIVE_GPU"] = str(gpu_id)
         env["STRICT_GPU_MASK"] = "1"
     else:
         env.pop("CUDA_VISIBLE_DEVICES", None)
         env.pop("ISAAC_PHYSICAL_GPU_ID", None)
+        env.pop("ISAAC_KIT_ACTIVE_GPU", None)
         env.pop("STRICT_GPU_MASK", None)
         # Use physical GPU index for Isaac/cuRobo; do NOT mask with CUDA_VISIBLE_DEVICES.
         env["ISAAC_SIM_GPU_ID"] = str(gpu_id)
@@ -1257,8 +1258,8 @@ def main():
         "--strict-gpu-mask",
         action="store_true",
         help=(
-            "每 worker 仅可见分配的物理 GPU (CUDA_VISIBLE_DEVICES=<id>); "
-            "worker 内 Isaac/torch 使用逻辑 GPU 0"
+            "每 worker CUDA 仅见分配的物理 GPU (CUDA_VISIBLE_DEVICES=<id>, torch 用 cuda:0); "
+            "Kit/Vulkan active_gpu 用物理索引, PhysX cudaDevice 用逻辑 0"
         ),
     )
     parser.add_argument(
@@ -1407,7 +1408,7 @@ def main():
     if cfg.strict_gpu_mask:
         print(
             "  GPU isolation: strict (--strict-gpu-mask; "
-            "CUDA_VISIBLE_DEVICES per worker, logical GPU 0 in Isaac/torch)",
+            "CUDA_VISIBLE_DEVICES per worker; Kit active_gpu=physical id, torch/PhysX=cuda:0)",
         )
 
     rounds_advanced = 0

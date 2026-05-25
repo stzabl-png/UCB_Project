@@ -53,6 +53,9 @@ _FIRST_TASK_ELAPSED_S: float | None = None
 _FIRST_TASK_STARTED = False
 
 _SIM_GPU_ID = int(os.environ.get("ISAAC_SIM_GPU_ID", "0"))
+_KIT_GPU_ID = int(
+    os.environ.get("ISAAC_KIT_ACTIVE_GPU", os.environ.get("ISAAC_SIM_GPU_ID", "0"))
+)
 _PHYSICAL_GPU_ID = int(
     os.environ.get("ISAAC_PHYSICAL_GPU_ID", os.environ.get("ISAAC_SIM_GPU_ID", "0"))
 )
@@ -77,6 +80,10 @@ def _log_gpu_isolation_env() -> None:
     )
     print(
         f"[gpu-isolation] logical ISAAC_SIM_GPU_ID={os.environ.get('ISAAC_SIM_GPU_ID')!r}",
+        flush=True,
+    )
+    print(
+        f"[gpu-isolation] kit ISAAC_KIT_ACTIVE_GPU={os.environ.get('ISAAC_KIT_ACTIVE_GPU')!r}",
         flush=True,
     )
 
@@ -138,9 +145,13 @@ _launch_cfg: dict = {
     "headless": args.headless,
     "multi_gpu": False,
     "max_gpu_count": 1,
-    "active_gpu": _SIM_GPU_ID,
+    "active_gpu": _KIT_GPU_ID,
     "physics_gpu": _SIM_GPU_ID,
 }
+print(
+    f"[gpu-isolation] launch active_gpu={_KIT_GPU_ID} physics_gpu(cudaDevice)={_SIM_GPU_ID}",
+    flush=True,
+)
 
 try:
     from isaacsim import SimulationApp
