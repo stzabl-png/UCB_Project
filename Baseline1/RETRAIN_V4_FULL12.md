@@ -116,32 +116,27 @@ Each file is ~1.5 MB; total dataset is **238 MB**.
 
 ### 3.2 Download
 
-The 162 files live at
-`Baseline1/data/episodes_b3_v4_full12_yaw/` on the source machine. Three ways
-to obtain them:
+Hosted on HuggingFace Datasets:
+[`UCBProject/DP3_DexYCB_training_data`](https://huggingface.co/datasets/UCBProject/DP3_DexYCB_training_data).
 
-**Option A — direct rsync from the source dev box** (fastest if you have ssh):
 ```bash
-mkdir -p Baseline1/data
-rsync -av --progress \
-    accelerator@<DEV_HOST>:/home/accelerator/UCB_Project/Baseline1/data/episodes_b3_v4_full12_yaw \
-    Baseline1/data/
+pip install huggingface_hub                # if not already installed
+
+mkdir -p Baseline1/data/episodes_b3_v4_full12_yaw
+huggingface-cli download \
+    UCBProject/DP3_DexYCB_training_data \
+    --repo-type dataset \
+    --local-dir Baseline1/data/episodes_b3_v4_full12_yaw
+
+# Files land under .../episodes_b3_v4_full12_yaw/data/<162 hdf5>.
+# The training pipeline expects them one level up — flatten:
+mv Baseline1/data/episodes_b3_v4_full12_yaw/data/*.hdf5 \
+   Baseline1/data/episodes_b3_v4_full12_yaw/
+rmdir Baseline1/data/episodes_b3_v4_full12_yaw/data
 ```
 
-**Option B — tarball from a shared cloud bucket** (URL to be filled in by the
-project owner before handing this README over):
-```bash
-mkdir -p Baseline1/data
-cd Baseline1/data
-wget <PASTE_DOWNLOAD_URL_HERE> -O episodes_b3_v4_full12_yaw.tar.gz
-tar xzf episodes_b3_v4_full12_yaw.tar.gz   # extracts ./episodes_b3_v4_full12_yaw/
-rm episodes_b3_v4_full12_yaw.tar.gz
-cd -
-```
-
-**Option C — already on the machine.** If the dataset is pre-staged, just
-make sure the directory layout matches
-`Baseline1/data/episodes_b3_v4_full12_yaw/<162 hdf5 files>` and skip ahead.
+If the dataset is private and `huggingface-cli` 401s, run
+`huggingface-cli login` first and paste a read-token.
 
 Verify after download:
 ```bash
