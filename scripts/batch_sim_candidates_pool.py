@@ -82,6 +82,7 @@ DEFAULT_OUT = os.path.join(PROJ, "output", "grasp_collect_no_rot")
 GEN_POOL_SCRIPT = os.path.join(PROJ, "scripts", "batch_gen_candidates_pool.py")
 SIM_POOL_SCRIPT = os.path.join(PROJ, "sim", "run_grasp_sim_pool.py")
 SAME_GPU_STAGGER_S = 45.0
+ISAAC_STARTUP_SLOTS_PER_GPU = 2
 SIM_INGEST_POLL_S = 5.0
 WORKER_CRASH_RETRY_S = 15.0
 WORKER_MAX_RETRIES = 2
@@ -100,6 +101,7 @@ class PoolSimConfig:
     sim_gpu_ids: tuple[int, ...]
     sim_per_gpu: int
     same_gpu_stagger_s: float
+    isaac_startup_slots_per_gpu: int
     merge_deduplicate: bool
     incremental_merge: bool
     slots_per_round: int
@@ -430,10 +432,18 @@ def _make_isaac_worker_env(
     outdir: str,
     round_idx: int,
     chunk_path: str,
+    isaac_startup_slots_per_gpu: int = 0,
 ) -> dict:
-    """Isolate Kit kvdb/cache per worker to avoid cross-process lock on same machine."""
+    """Isolate Kit/Omniverse state per worker for same-GPU parallel.
+
+    HOME alone is insufficient: Isaac still shares install-dir kit/cache/DerivedDataCache,
+    /tmp/hub-<user>.lock (all workers as root), and kvdb. We also set per-worker TMPDIR,
+    OMNI_USER (unique /tmp/hub-<user>.lock), and per-worker TMPDIR.
+    """
     env = base_env.copy()
-    env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+    # Use physical GPU index for Isaac/cuRobo; do NOT mask with CUDA_VISIBLE_DEVICES
+    # (PhysX on Isaac 5.0 fails with "no suitable CUDA GPU" when only GPU1 is visible).
+    env["ISAAC_SIM_GPU_ID"] = str(gpu_id)
     chunk_id = os.path.basename(chunk_path).replace(".json", "")
     cache_root = os.path.join(
         outdir,
@@ -444,11 +454,40 @@ def _make_isaac_worker_env(
     )
     hub_dir = os.path.join(cache_root, "hub")
     omni_cache = os.path.join(cache_root, "omni_cache")
+    worker_tmp = os.path.join(cache_root, "tmp")
     os.makedirs(hub_dir, exist_ok=True)
     os.makedirs(omni_cache, exist_ok=True)
+    os.makedirs(worker_tmp, exist_ok=True)
     env["OMNICLIENT_HUB_CACHE_DIR"] = hub_dir
     env["OMNI_CACHE_DIR"] = omni_cache
     env["XDG_CACHE_HOME"] = cache_root
+    env["TMPDIR"] = worker_tmp
+    env["TEMP"] = worker_tmp
+    env["TMP"] = worker_tmp
+    # Hub discovery lock defaults to /tmp/hub-<user>.lock; unique per worker.
+    env["OMNI_USER"] = f"isaac_g{gpu_id}_{chunk_id}"
+    if isaac_startup_slots_per_gpu > 0:
+        env["ISAAC_STARTUP_SLOTS_PER_GPU"] = str(isaac_startup_slots_per_gpu)
+
+    worker_home = os.path.join(cache_root, "home")
+    for sub in (
+        ".local/share/ov/data",
+        ".nvidia-omniverse/logs",
+        ".nvidia-omniverse/config",
+        ".nv/ComputeCache",
+        ".cache/ov",
+        ".cache/pip",
+        ".cache/nvidia/GLCache",
+    ):
+        os.makedirs(os.path.join(worker_home, sub), exist_ok=True)
+
+    global_pkg = os.path.expanduser("~/.local/share/ov/pkg")
+    worker_pkg = os.path.join(worker_home, ".local/share/ov/pkg")
+    if os.path.isdir(global_pkg) and not os.path.lexists(worker_pkg):
+        os.makedirs(os.path.dirname(worker_pkg), exist_ok=True)
+        os.symlink(global_pkg, worker_pkg, target_is_directory=True)
+
+    env["HOME"] = worker_home
     return env
 
 
@@ -514,6 +553,7 @@ def run_sim_worker(
         outdir=cfg.outdir,
         round_idx=int(chunk_meta["round_idx"]),
         chunk_path=chunk_path,
+        isaac_startup_slots_per_gpu=cfg.isaac_startup_slots_per_gpu,
     )
     rc, out = _run_cmd(sim_cmd, timeout=cfg.sim_timeout, log_path=log_path, env=env)
 
@@ -648,6 +688,12 @@ def run_sim_phase(
         print(
             f"  Same-GPU stagger: {stagger_s:.0f}s between Isaac launches on one GPU "
             f"(per-GPU process pools + isolated kit cache)",
+            flush=True,
+        )
+    if cfg.isaac_startup_slots_per_gpu > 0:
+        print(
+            f"  Isaac cold-start semaphore: max {cfg.isaac_startup_slots_per_gpu} "
+            f"concurrent Startup per GPU (others queue)",
             flush=True,
         )
 
@@ -1085,6 +1131,13 @@ def main():
         default=SAME_GPU_STAGGER_S,
         help="同 GPU 上相邻 Isaac worker 启动间隔秒数 (默认 45)",
     )
+    parser.add_argument(
+        "--isaac-startup-slots-per-gpu",
+        type=int,
+        default=ISAAC_STARTUP_SLOTS_PER_GPU,
+        metavar="N",
+        help="同 GPU 同时进行 Isaac 冷启动 (至 Startup Complete) 的上限; 0=不限制 (默认 2)",
+    )
     parser.add_argument("--sim-timeout", type=int, default=7200, help="单个 worker chunk 超时秒")
     parser.add_argument("--headless", action="store_true", default=True)
     parser.add_argument("--object-scale", type=float, default=1.0)
@@ -1138,6 +1191,9 @@ def main():
         sys.exit(1)
     if args.sim_per_gpu < 1:
         print("❌ --sim-per-gpu 须 >= 1")
+        sys.exit(1)
+    if args.isaac_startup_slots_per_gpu < 0:
+        print("❌ --isaac-startup-slots-per-gpu 须 >= 0")
         sys.exit(1)
 
     isaac_py = args.isaac_python

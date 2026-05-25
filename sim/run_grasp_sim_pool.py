@@ -10,11 +10,10 @@ run_grasp_sim_pool.py — 候选池 sim 长驻 Isaac worker
         --worker-chunk /tmp/chunk_0.json --outdir output/grasp_collect_no_rot \\
         --round-idx 15 --headless
 """
-from isaacsim import SimulationApp
 import argparse
+import json
 import os
 import sys
-import json
 
 # Parse args before SimulationApp (因为 SimulationApp 修改了 sys.argv)
 parser = argparse.ArgumentParser(description="Pool sim worker: one Isaac session, many tasks")
@@ -31,9 +30,48 @@ parser.add_argument(
 )
 args, _ = parser.parse_known_args()
 
+_SIM_DIR = os.path.dirname(os.path.abspath(__file__))
+_PROJ = os.path.dirname(_SIM_DIR)
+if _PROJ not in sys.path:
+    sys.path.insert(0, _PROJ)
+from tools.grasp_pool_common import acquire_gpu_startup_slot, release_gpu_startup_slot
+
+with open(args.worker_chunk, "r", encoding="utf-8") as _cf:
+    _chunk_meta = json.load(_cf)
+_OUTDIR = os.path.abspath(args.outdir or _chunk_meta["outdir"])
+_ROUND_IDX = int(
+    args.round_idx if args.round_idx is not None else _chunk_meta["round_idx"]
+)
 _WORKER_Z_YAW: float | None = None
 
-simulation_app = SimulationApp({"headless": args.headless})
+_SIM_GPU_ID = int(os.environ.get("ISAAC_SIM_GPU_ID", "0"))
+_STARTUP_SLOTS = int(os.environ.get("ISAAC_STARTUP_SLOTS_PER_GPU", "0"))
+
+if _STARTUP_SLOTS > 0:
+    acquire_gpu_startup_slot(
+        _SIM_GPU_ID,
+        _OUTDIR,
+        _ROUND_IDX,
+        max_slots=_STARTUP_SLOTS,
+    )
+    _held_startup_slot = True
+else:
+    _held_startup_slot = False
+
+_launch_cfg: dict = {
+    "headless": args.headless,
+    "multi_gpu": False,
+    "active_gpu": _SIM_GPU_ID,
+    "physics_gpu": _SIM_GPU_ID,
+}
+
+try:
+    from isaacsim import SimulationApp
+
+    simulation_app = SimulationApp(_launch_cfg)
+finally:
+    if _held_startup_slot:
+        release_gpu_startup_slot(_SIM_GPU_ID, _OUTDIR, _ROUND_IDX)
 
 
 # render=True 在非 headless 模式显示流畅运动；headless 模式下 render=False 加速
@@ -43,6 +81,8 @@ import numpy as np
 import h5py
 import torch
 from termcolor import cprint
+
+torch.cuda.set_device(_SIM_GPU_ID)
 from scipy.spatial.transform import Rotation
 
 from isaacsim.core.api import World
@@ -726,7 +766,7 @@ def plan_trajectory(motion_gen, franka, target_pos_world, target_quat_wxyz_world
     joint_names = [f"panda_joint{i}" for i in range(1, 8)]
 
     start_state = CuJointState.from_position(
-        torch.tensor(current_joints, dtype=torch.float32).unsqueeze(0).cuda(),
+        torch.tensor(current_joints, dtype=torch.float32).unsqueeze(0).cuda(_SIM_GPU_ID),
         joint_names=joint_names,
     )
 
