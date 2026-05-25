@@ -1,0 +1,22 @@
+# baseline_3 cuRobo + fixed grip schedule (grip=1 from first lift frame).
+# Same as baseline1_b3_curobo.yaml but points to v2 zarr.
+name: baseline1_b3_curobo_v2
+task_name: b3_curobo_tuna_v2
+shape_meta: &shape_meta
+  obs:
+    point_cloud: {shape: [4096, 3], type: point_cloud}
+    agent_pos:   {shape: [8],       type: low_dim}
+  action:
+    shape: [8]
+env_runner: null
+dataset:
+  _target_: diffusion_policy_3d.dataset.baseline1_dataset.Baseline1Dataset
+  zarr_path: /home/accelerator/UCB_Project/Baseline1/data/b3_curobo_tuna_v2.zarr
+  lazy: false
+  yaw_aug: false
+  horizon: ${horizon}
+  pad_before: ${eval:'${n_obs_steps}-1'}
+  pad_after:  ${eval:'${n_action_steps}-1'}
+  seed: 42
+  val_ratio: 0.10
+  max_train_episodes: null

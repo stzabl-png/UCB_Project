@@ -1,0 +1,30 @@
+# Baseline_3 cuRobo-plan-grasp trajectories — tuna fish can only (smoke pipeline).
+# Goal: validate train→eval pipeline end-to-end on a single object, no yaw aug.
+name: baseline1_b3_curobo
+
+task_name: b3_curobo_tuna
+
+shape_meta: &shape_meta
+  obs:
+    point_cloud:
+      shape: [4096, 3]
+      type: point_cloud
+    agent_pos:
+      shape: [8]
+      type: low_dim
+  action:
+    shape: [8]
+
+env_runner: null
+
+dataset:
+  _target_: diffusion_policy_3d.dataset.baseline1_dataset.Baseline1Dataset
+  zarr_path: /home/accelerator/UCB_Project/Baseline1/data/b3_curobo_tuna.zarr   # 10 ep × ~31 steps, tiny
+  lazy: false
+  yaw_aug: false              # user requested: no yaw augmentation for pipeline-validation run
+  horizon: ${horizon}
+  pad_before: ${eval:'${n_obs_steps}-1'}
+  pad_after:  ${eval:'${n_action_steps}-1'}
+  seed: 42
+  val_ratio: 0.10             # 10 ep → 1 val (need ≥1 for val loss to compute)
+  max_train_episodes: null

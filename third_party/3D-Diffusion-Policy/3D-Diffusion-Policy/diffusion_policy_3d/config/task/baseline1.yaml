@@ -1,0 +1,28 @@
+name: baseline1
+
+task_name: human_retarget_dp
+
+shape_meta: &shape_meta
+  obs:
+    point_cloud:
+      shape: [4096, 3]
+      type: point_cloud
+    agent_pos:
+      shape: [8]
+      type: low_dim
+  action:
+    shape: [8]
+
+env_runner: null
+
+dataset:
+  _target_: diffusion_policy_3d.dataset.baseline1_dataset.Baseline1Dataset
+  zarr_path: /home/accelerator/UCB_Project/Baseline1/data/human_dp_baseline.zarr   # DexYCB 4800 ep (CAD mesh + per-subject gravity), 5.1G
+  lazy: false   # 5.1G zarr — copy_from_path fits easily in 60G RAM, faster per-sample
+  yaw_aug: true   # rotate each sequence about the gravity axis by a random angle (exact symmetry) — fills DexYCB's 30-90deg yaw holes
+  horizon: ${horizon}
+  pad_before: ${eval:'${n_obs_steps}-1'}
+  pad_after:  ${eval:'${n_action_steps}-1'}
+  seed: 42
+  val_ratio: 0.02
+  max_train_episodes: null

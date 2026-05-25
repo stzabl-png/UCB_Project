@@ -1,0 +1,22 @@
+# baseline_3 v4 — sugar+mustard+tomato consolidated (32 train ep, 8 test ep held out).
+# Train zarr is pre-split (80%); val_ratio=0 since test is external.
+name: baseline1_b3_v4_sml
+task_name: b3_v4_sml
+shape_meta: &shape_meta
+  obs:
+    point_cloud: {shape: [4096, 3], type: point_cloud}
+    agent_pos:   {shape: [8],       type: low_dim}
+  action:
+    shape: [8]
+env_runner: null
+dataset:
+  _target_: diffusion_policy_3d.dataset.baseline1_dataset.Baseline1Dataset
+  zarr_path: /home/accelerator/UCB_Project/Baseline1/data/b3_v4_sml_train.zarr
+  lazy: false
+  yaw_aug: false
+  horizon: ${horizon}
+  pad_before: ${eval:'${n_obs_steps}-1'}
+  pad_after:  ${eval:'${n_action_steps}-1'}
+  seed: 42
+  val_ratio: 0.0
+  max_train_episodes: null
