@@ -111,13 +111,21 @@ def scan_success_round_ge3(outdir: str, min_round: int = 3) -> dict[str, int]:
 def compute_median_success_threshold(merged_dir: str) -> int:
     """
     Median of n_successful in merged/ over objects that have a merged file.
-    Used when auto-refilling the candidate pool.
+    Ad-hoc / scripts; pool sim auto-refill uses --pool-success-threshold (default 20).
     """
     merged_counts = scan_merged_objects(merged_dir)
     values = list(merged_counts.values())
     if not values:
         return 0
     return int(np.median(np.array(values, dtype=np.float64)))
+
+
+def all_merged_objects_at_success_cap(merged_dir: str, cap: int) -> bool:
+    """True if every object in merged/ has n_successful >= cap."""
+    counts = scan_merged_objects(merged_dir)
+    if not counts:
+        return False
+    return all(n >= cap for n in counts.values())
 
 
 def scan_merged_objects(merged_dir: str) -> dict[str, int]:

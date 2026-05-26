@@ -59,10 +59,10 @@ sys.path.insert(0, os.path.join(PROJ, "scripts"))
 
 from grasp_pool_common import (  # noqa: E402
     DEFAULT_SLOTS_PER_ROUND,
+    all_merged_objects_at_success_cap,
     archive_chunk_results_before_reshuffle,
     build_task_queue,
     clear_registry_for_objects,
-    compute_median_success_threshold,
     copy_slots_to_round_hdf5,
     is_queue_complete,
     load_registry,
@@ -88,6 +88,8 @@ SIM_WORKER_POLL_S = 2.0
 SIM_SHUTDOWN_GRACE_S = 60.0
 WORKER_CRASH_RETRY_S = 15.0
 WORKER_MAX_RETRIES = 2
+SUCCESS_TIER_STEP = 10
+DEFAULT_POOL_SUCCESS_THRESHOLD = 20
 
 
 @dataclass
@@ -112,7 +114,10 @@ class PoolSimConfig:
     max_success_per_object: Optional[int]
     pool_target: int
     auto_refill: bool
+    pool_success_threshold: int
     score_threshold: float
+    pool_gen_mode: str  # raycast | anchored | mixed
+    pool_min_merged_success: int
     no_rotation: bool
     early_stop_on_candidate_success: bool
 
@@ -150,6 +155,54 @@ def _load_state(path: str) -> dict:
         return {"round": 0, "objects": {}, "updated_at": None}
     with open(path, "r") as f:
         return json.load(f)
+
+
+def resolve_sim_success_thresholds(
+    *,
+    max_success_cli: Optional[int],
+    pool_success_cli: Optional[int],
+    state: dict,
+    resume: bool,
+) -> tuple[Optional[int], int]:
+    """
+    pool_success_threshold defaults to max_success_per_object when unset.
+    On --resume, restored from state.json if present.
+    """
+    max_cap = max_success_cli
+    pool_thr = pool_success_cli
+    if resume:
+        if state.get("max_success_per_object") is not None:
+            max_cap = int(state["max_success_per_object"])
+        if "pool_success_threshold" in state:
+            pool_thr = int(state["pool_success_threshold"])
+    if pool_thr is None:
+        pool_thr = max_cap if max_cap is not None else DEFAULT_POOL_SUCCESS_THRESHOLD
+    return max_cap, pool_thr
+
+
+def maybe_bump_success_tiers(
+    cfg: PoolSimConfig,
+    state: dict,
+    state_path: str,
+) -> bool:
+    """If every merged object reached max_success cap, raise cap and pool threshold by +10."""
+    cap = cfg.max_success_per_object
+    if cap is None:
+        return False
+    if not all_merged_objects_at_success_cap(cfg.merged_dir, cap):
+        return False
+    cfg.max_success_per_object = cap + SUCCESS_TIER_STEP
+    cfg.pool_success_threshold += SUCCESS_TIER_STEP
+    state["max_success_per_object"] = cfg.max_success_per_object
+    state["pool_success_threshold"] = cfg.pool_success_threshold
+    _save_state(state_path, state)
+    print(
+        f"\n📈 All merged objects reached success cap {cap}; "
+        f"next round: max_success={cfg.max_success_per_object}  "
+        f"pool_refill_threshold={cfg.pool_success_threshold}",
+        flush=True,
+    )
+    return True
 
 
 def _save_state(path: str, state: dict) -> None:
@@ -986,13 +1039,16 @@ def auto_refill_pool(
     *,
     sim_complete: bool,
 ) -> bool:
-    threshold = compute_median_success_threshold(cfg.merged_dir)
+    threshold = cfg.pool_success_threshold
     refill_targets = [
         obj_id
         for obj_id, _, _ in select_target_objects(cfg.merged_dir, threshold)
     ]
-    print(f"\n🔄 Pool exhausted — auto refill (success_threshold=median={threshold})")
-    print(f"   refill {len(refill_targets)} object(s) → {cfg.pool_dir}")
+    print(f"\n🔄 Pool exhausted — auto refill (success_threshold={threshold})")
+    print(
+        f"   refill {len(refill_targets)} object(s) → {cfg.pool_dir}  "
+        f"gen_mode={cfg.pool_gen_mode}  target={cfg.pool_target}",
+    )
     cmd = [
         cfg.python_bin, GEN_POOL_SCRIPT,
         "--merged-dir", cfg.merged_dir,
@@ -1001,7 +1057,10 @@ def auto_refill_pool(
         "--target", str(cfg.pool_target),
         "--force",
         "--score-threshold", str(cfg.score_threshold),
+        "--gen-mode", cfg.pool_gen_mode,
     ]
+    if cfg.pool_gen_mode in ("anchored", "mixed"):
+        cmd.extend(["--min-merged-success", str(cfg.pool_min_merged_success)])
     if cfg.no_rotation:
         pass  # default no-rotation in gen script
     else:
@@ -1241,7 +1300,25 @@ def main():
         help="merged 内成功数 ≥ N 的物体本轮规划 prob=0（读 merged n_successful；默认不限制）",
     )
     parser.add_argument("--pool-target", type=int, default=50, help="auto-refill 时每物体 target")
+    parser.add_argument(
+        "--pool-success-threshold",
+        type=int,
+        default=None,
+        help="auto-refill 时 batch_gen 的 --success-threshold（默认=--max-success-per-object，否则 20）",
+    )
     parser.add_argument("--score-threshold", type=float, default=70.0)
+    parser.add_argument(
+        "--pool-gen-mode",
+        choices=("raycast", "anchored", "mixed"),
+        default="raycast",
+        help="auto-refill 时调用 batch_gen_candidates_pool 的 --gen-mode",
+    )
+    parser.add_argument(
+        "--pool-min-merged-success",
+        type=int,
+        default=1,
+        help="auto-refill 且 --pool-gen-mode anchored 时传给 batch_gen 的 --min-merged-success",
+    )
     parser.add_argument("--no-auto-refill", action="store_true")
     parser.add_argument("--rotation", action="store_true")
     parser.add_argument(
@@ -1295,6 +1372,20 @@ def main():
     if args.max_success_per_object is not None and args.max_success_per_object < 0:
         print("❌ --max-success-per-object 须 >= 0")
         sys.exit(1)
+    if args.pool_success_threshold is not None and args.pool_success_threshold < 0:
+        print("❌ --pool-success-threshold 须 >= 0")
+        sys.exit(1)
+
+    state_path = os.path.join(outdir, "state.json")
+    state = _load_state(state_path) if args.resume else {"round": 0, "objects": {}}
+    max_success_cap, pool_success_thr = resolve_sim_success_thresholds(
+        max_success_cli=args.max_success_per_object,
+        pool_success_cli=args.pool_success_threshold,
+        state=state,
+        resume=args.resume,
+    )
+    state["max_success_per_object"] = max_success_cap
+    state["pool_success_threshold"] = pool_success_thr
 
     cfg = PoolSimConfig(
         outdir=outdir,
@@ -1314,20 +1405,35 @@ def main():
         slots_per_round=args.slots_per_round,
         plan_seed=args.plan_seed,
         equal_object_prob=args.equal_object_prob,
-        max_success_per_object=args.max_success_per_object,
+        max_success_per_object=max_success_cap,
         pool_target=args.pool_target,
         auto_refill=not args.no_auto_refill,
+        pool_success_threshold=pool_success_thr,
         score_threshold=args.score_threshold,
+        pool_gen_mode=args.pool_gen_mode,
+        pool_min_merged_success=args.pool_min_merged_success,
         no_rotation=not args.rotation,
         early_stop_on_candidate_success=not args.no_early_stop_yaw_on_success,
     )
 
-    state_path = os.path.join(outdir, "state.json")
-    state = _load_state(state_path) if args.resume else {"round": 0, "objects": {}}
-
     print(f"Out: {outdir}")
     print(f"Pool: {pool_dir}")
     print(f"Merged: {merged_dir}")
+    if cfg.max_success_per_object is not None:
+        print(
+            f"Success cap: max_success_per_object={cfg.max_success_per_object}  "
+            f"(tier +{SUCCESS_TIER_STEP} when all merged objects reach cap)",
+        )
+    if cfg.auto_refill:
+        print(
+            f"Auto-refill: on  merged_success<{cfg.pool_success_threshold}  "
+            f"gen_mode={cfg.pool_gen_mode}  target={cfg.pool_target}  "
+            f"score≥{cfg.score_threshold}",
+        )
+        if cfg.pool_gen_mode in ("anchored", "mixed"):
+            print(f"  {cfg.pool_gen_mode} min_merged_success={cfg.pool_min_merged_success}")
+    else:
+        print("Auto-refill: off (--no-auto-refill)")
     print(
         f"Merge mode: {'incremental (merged + this round gt)' if cfg.incremental_merge else 'full scan robot_gt/round_*'}",
     )
@@ -1335,8 +1441,8 @@ def main():
     print(
         f"Object sampling: {'equal' if args.equal_object_prob else 'weighted (1/(success+1))'}"
         + (
-            f"  max_success_per_object={args.max_success_per_object}"
-            if args.max_success_per_object is not None
+            f"  max_success_per_object={cfg.max_success_per_object}"
+            if cfg.max_success_per_object is not None
             else ""
         ),
     )
@@ -1353,8 +1459,11 @@ def main():
         meta = run_one_round(cfg, r, resume=args.resume)
         if meta.get("sync_ok", False):
             state["round"] = r + 1
+            state["max_success_per_object"] = cfg.max_success_per_object
+            state["pool_success_threshold"] = cfg.pool_success_threshold
             _save_state(state_path, state)
             rounds_advanced += 1
+            maybe_bump_success_tiers(cfg, state, state_path)
         else:
             state["round"] = r
             _save_state(state_path, state)
