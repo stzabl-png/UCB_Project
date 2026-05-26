@@ -1,0 +1,999 @@
+{
+  "_schema": "OakInk per-object geometry + session count + graspability flag",
+  "_generated": "2026-05-25",
+  "_franka_max_open_cm": 8.0,
+  "_threshold_cm": 8.0,
+  "_threshold_meaning": "graspable iff min_width_cm <= 8.0 (i.e., there EXISTS a finger-axis direction where the object fits inside Franka's 8cm opening). Objects whose narrowest direction still exceeds 8cm are NOT graspable.",
+  "_min_width_method": "support-function min over 2000 random unit directions",
+  "_n_objects": 76,
+  "objects": [
+    {
+      "obj_id": "S10018",
+      "aabb_cm": [
+        8.3444,
+        10.943200000000001,
+        11.0212
+      ],
+      "aabb_min_cm": 8.3444,
+      "min_width_cm": 8.273051511366383,
+      "n_sessions": 64,
+      "has_usd": true,
+      "graspable_8cm": false
+    },
+    {
+      "obj_id": "O01000",
+      "aabb_cm": [
+        6.3591999999999995,
+        9.8408,
+        20.288999999999998
+      ],
+      "aabb_min_cm": 6.3591999999999995,
+      "min_width_cm": 6.360096510841755,
+      "n_sessions": 60,
+      "has_usd": true,
+      "graspable_8cm": true
+    },
+    {
+      "obj_id": "S10021",
+      "aabb_cm": [
+        8.1204,
+        11.454400000000001,
+        10.7726
+      ],
+      "aabb_min_cm": 8.1204,
+      "min_width_cm": 7.86585525104897,
+      "n_sessions": 60,
+      "has_usd": true,
+      "graspable_8cm": true
+    },
+    {
+      "obj_id": "A01001",
+      "aabb_cm": [
+        6.5008,
+        10.208200000000001,
+        22.7964
+      ],
+      "aabb_min_cm": 6.5008,
+      "min_width_cm": 6.2437312064595405,
+      "n_sessions": 56,
+      "has_usd": true,
+      "graspable_8cm": true
+    },
+    {
+      "obj_id": "S10011",
+      "aabb_cm": [
+        10.4348,
+        12.213000000000001,
+        7.1974
+      ],
+      "aabb_min_cm": 7.1974,
+      "min_width_cm": 7.377803730698057,
+      "n_sessions": 56,
+      "has_usd": true,
+      "graspable_8cm": true
+    },
+    {
+      "obj_id": "S10006",
+      "aabb_cm": [
+        10.2346,
+        12.895599999999998,
+        15.1586
+      ],
+      "aabb_min_cm": 10.2346,
+      "min_width_cm": 10.113822254983358,
+      "n_sessions": 56,
+      "has_usd": true,
+      "graspable_8cm": false
+    },
+    {
+      "obj_id": "S10001",
+      "aabb_cm": [
+        9.971,
+        13.0607,
+        6.3770999999999995
+      ],
+      "aabb_min_cm": 6.3770999999999995,
+      "min_width_cm": 6.607350020905773,
+      "n_sessions": 52,
+      "has_usd": true,
+      "graspable_8cm": true
+    },
+    {
+      "obj_id": "S10008",
+      "aabb_cm": [
+        7.280200000000001,
+        10.1792,
+        12.4246
+      ],
+      "aabb_min_cm": 7.280200000000001,
+      "min_width_cm": 7.231593549575846,
+      "n_sessions": 52,
+      "has_usd": true,
+      "graspable_8cm": true
+    },
+    {
+      "obj_id": "A01008",
+      "aabb_cm": [
+        7.4088,
+        10.8672,
+        25.529200000000003
+      ],
+      "aabb_min_cm": 7.4088,
+      "min_width_cm": 7.381795031227331,
+      "n_sessions": 52,
+      "has_usd": true,
+      "graspable_8cm": true
+    },
+    {
+      "obj_id": "S10007",
+      "aabb_cm": [
+        7.6568,
+        11.4854,
+        10.9748
+      ],
+      "aabb_min_cm": 7.6568,
+      "min_width_cm": 8.007635689913837,
+      "n_sessions": 52,
+      "has_usd": true,
+      "graspable_8cm": false
+    },
+    {
+      "obj_id": "S10005",
+      "aabb_cm": [
+        8.1082,
+        10.3906,
+        11.7168
+      ],
+      "aabb_min_cm": 8.1082,
+      "min_width_cm": 8.043817973562954,
+      "n_sessions": 52,
+      "has_usd": true,
+      "graspable_8cm": false
+    },
+    {
+      "obj_id": "S10017",
+      "aabb_cm": [
+        8.195,
+        11.1346,
+        10.9476
+      ],
+      "aabb_min_cm": 8.195,
+      "min_width_cm": 8.12023642128486,
+      "n_sessions": 52,
+      "has_usd": true,
+      "graspable_8cm": false
+    },
+    {
+      "obj_id": "S10009",
+      "aabb_cm": [
+        8.1616,
+        12.511,
+        9.3728
+      ],
+      "aabb_min_cm": 8.1616,
+      "min_width_cm": 8.196814964960067,
+      "n_sessions": 52,
+      "has_usd": true,
+      "graspable_8cm": false
+    },
+    {
+      "obj_id": "S10019",
+      "aabb_cm": [
+        8.3488,
+        11.211,
+        10.7518
+      ],
+      "aabb_min_cm": 8.3488,
+      "min_width_cm": 8.248348952441034,
+      "n_sessions": 52,
+      "has_usd": true,
+      "graspable_8cm": false
+    },
+    {
+      "obj_id": "S10024",
+      "aabb_cm": [
+        8.3608,
+        11.781600000000001,
+        10.113199999999999
+      ],
+      "aabb_min_cm": 8.3608,
+      "min_width_cm": 8.364645489460187,
+      "n_sessions": 52,
+      "has_usd": true,
+      "graspable_8cm": false
+    },
+    {
+      "obj_id": "S10020",
+      "aabb_cm": [
+        8.326,
+        12.5972,
+        10.0592
+      ],
+      "aabb_min_cm": 8.326,
+      "min_width_cm": 8.466210281773561,
+      "n_sessions": 52,
+      "has_usd": true,
+      "graspable_8cm": false
+    },
+    {
+      "obj_id": "A01023",
+      "aabb_cm": [
+        8.4796,
+        11.3646,
+        22.354000000000003
+      ],
+      "aabb_min_cm": 8.4796,
+      "min_width_cm": 8.469361533250277,
+      "n_sessions": 52,
+      "has_usd": true,
+      "graspable_8cm": false
+    },
+    {
+      "obj_id": "S10014",
+      "aabb_cm": [
+        8.556999999999999,
+        11.945,
+        9.7056
+      ],
+      "aabb_min_cm": 8.556999999999999,
+      "min_width_cm": 8.555055204571271,
+      "n_sessions": 52,
+      "has_usd": true,
+      "graspable_8cm": false
+    },
+    {
+      "obj_id": "S10023",
+      "aabb_cm": [
+        9.936200000000001,
+        11.905000000000001,
+        8.3984
+      ],
+      "aabb_min_cm": 8.3984,
+      "min_width_cm": 8.588357771621306,
+      "n_sessions": 52,
+      "has_usd": true,
+      "graspable_8cm": false
+    },
+    {
+      "obj_id": "A01027",
+      "aabb_cm": [
+        8.623800000000001,
+        11.4625,
+        31.7625
+      ],
+      "aabb_min_cm": 8.623800000000001,
+      "min_width_cm": 8.594777914806395,
+      "n_sessions": 52,
+      "has_usd": true,
+      "graspable_8cm": false
+    },
+    {
+      "obj_id": "S10016",
+      "aabb_cm": [
+        8.791599999999999,
+        12.5154,
+        8.7786
+      ],
+      "aabb_min_cm": 8.7786,
+      "min_width_cm": 8.755032113412536,
+      "n_sessions": 52,
+      "has_usd": true,
+      "graspable_8cm": false
+    },
+    {
+      "obj_id": "S10015",
+      "aabb_cm": [
+        8.8716,
+        11.947199999999999,
+        9.463000000000001
+      ],
+      "aabb_min_cm": 8.8716,
+      "min_width_cm": 8.820611333055892,
+      "n_sessions": 52,
+      "has_usd": true,
+      "graspable_8cm": false
+    },
+    {
+      "obj_id": "S10022",
+      "aabb_cm": [
+        9.099400000000001,
+        11.860800000000001,
+        9.3546
+      ],
+      "aabb_min_cm": 9.099400000000001,
+      "min_width_cm": 9.054281221663244,
+      "n_sessions": 52,
+      "has_usd": true,
+      "graspable_8cm": false
+    },
+    {
+      "obj_id": "A01006",
+      "aabb_cm": [
+        10.927299999999999,
+        11.2328,
+        21.2626
+      ],
+      "aabb_min_cm": 10.927299999999999,
+      "min_width_cm": 9.589973225850223,
+      "n_sessions": 52,
+      "has_usd": true,
+      "graspable_8cm": false
+    },
+    {
+      "obj_id": "S10012",
+      "aabb_cm": [
+        10.214899999999998,
+        15.770600000000002,
+        11.8366
+      ],
+      "aabb_min_cm": 10.214899999999998,
+      "min_width_cm": 10.18598765613442,
+      "n_sessions": 52,
+      "has_usd": true,
+      "graspable_8cm": false
+    },
+    {
+      "obj_id": "A01002",
+      "aabb_cm": [
+        6.687899999999999,
+        9.204899999999999,
+        25.3943
+      ],
+      "aabb_min_cm": 6.687899999999999,
+      "min_width_cm": 6.60359828788509,
+      "n_sessions": 48,
+      "has_usd": true,
+      "graspable_8cm": true
+    },
+    {
+      "obj_id": "A01010",
+      "aabb_cm": [
+        6.9296,
+        9.295200000000001,
+        26.801
+      ],
+      "aabb_min_cm": 6.9296,
+      "min_width_cm": 6.86514976875231,
+      "n_sessions": 48,
+      "has_usd": true,
+      "graspable_8cm": true
+    },
+    {
+      "obj_id": "S10002",
+      "aabb_cm": [
+        8.3938,
+        13.5101,
+        7.6164
+      ],
+      "aabb_min_cm": 7.6164,
+      "min_width_cm": 7.683851390492995,
+      "n_sessions": 48,
+      "has_usd": true,
+      "graspable_8cm": true
+    },
+    {
+      "obj_id": "A01026",
+      "aabb_cm": [
+        8.4844,
+        10.7362,
+        21.3553
+      ],
+      "aabb_min_cm": 8.4844,
+      "min_width_cm": 8.464233120895203,
+      "n_sessions": 48,
+      "has_usd": true,
+      "graspable_8cm": false
+    },
+    {
+      "obj_id": "S10013",
+      "aabb_cm": [
+        8.5274,
+        12.081999999999999,
+        9.5844
+      ],
+      "aabb_min_cm": 8.5274,
+      "min_width_cm": 8.465412744292783,
+      "n_sessions": 48,
+      "has_usd": true,
+      "graspable_8cm": false
+    },
+    {
+      "obj_id": "S10010",
+      "aabb_cm": [
+        9.114600000000001,
+        11.697000000000001,
+        9.5266
+      ],
+      "aabb_min_cm": 9.114600000000001,
+      "min_width_cm": 8.65468448722281,
+      "n_sessions": 48,
+      "has_usd": true,
+      "graspable_8cm": false
+    },
+    {
+      "obj_id": "S10004",
+      "aabb_cm": [
+        8.9964,
+        11.8312,
+        9.4908
+      ],
+      "aabb_min_cm": 8.9964,
+      "min_width_cm": 8.979071510858262,
+      "n_sessions": 48,
+      "has_usd": true,
+      "graspable_8cm": false
+    },
+    {
+      "obj_id": "S10003",
+      "aabb_cm": [
+        9.1424,
+        11.392199999999999,
+        9.8802
+      ],
+      "aabb_min_cm": 9.1424,
+      "min_width_cm": 9.077234689544266,
+      "n_sessions": 48,
+      "has_usd": true,
+      "graspable_8cm": false
+    },
+    {
+      "obj_id": "O50001",
+      "aabb_cm": [
+        14.223999999999998,
+        11.6252,
+        20.765
+      ],
+      "aabb_min_cm": 11.6252,
+      "min_width_cm": 11.687956688593978,
+      "n_sessions": 48,
+      "has_usd": true,
+      "graspable_8cm": false
+    },
+    {
+      "obj_id": "A01005",
+      "aabb_cm": [
+        4.8006,
+        9.317,
+        15.576800000000002
+      ],
+      "aabb_min_cm": 4.8006,
+      "min_width_cm": 4.821032485743471,
+      "n_sessions": 44,
+      "has_usd": true,
+      "graspable_8cm": true
+    },
+    {
+      "obj_id": "A01009",
+      "aabb_cm": [
+        5.8853,
+        8.716,
+        25.401
+      ],
+      "aabb_min_cm": 5.8853,
+      "min_width_cm": 5.922746632686767,
+      "n_sessions": 44,
+      "has_usd": true,
+      "graspable_8cm": true
+    },
+    {
+      "obj_id": "Y29040",
+      "aabb_cm": [
+        1.9352999999999998,
+        1.8625000000000003,
+        12.079300000000002
+      ],
+      "aabb_min_cm": 1.8625000000000003,
+      "min_width_cm": 1.8694288776311714,
+      "n_sessions": 40,
+      "has_usd": true,
+      "graspable_8cm": true
+    },
+    {
+      "obj_id": "S16001",
+      "aabb_cm": [
+        2.5114,
+        7.5108,
+        14.006599999999999
+      ],
+      "aabb_min_cm": 2.5114,
+      "min_width_cm": 2.596535501222339,
+      "n_sessions": 40,
+      "has_usd": true,
+      "graspable_8cm": true
+    },
+    {
+      "obj_id": "O03002",
+      "aabb_cm": [
+        2.6164,
+        5.0997,
+        11.4872
+      ],
+      "aabb_min_cm": 2.6164,
+      "min_width_cm": 2.6323822682499705,
+      "n_sessions": 40,
+      "has_usd": true,
+      "graspable_8cm": true
+    },
+    {
+      "obj_id": "A16013",
+      "aabb_cm": [
+        4.5066999999999995,
+        7.483799999999999,
+        15.073999999999998
+      ],
+      "aabb_min_cm": 4.5066999999999995,
+      "min_width_cm": 4.650501521779127,
+      "n_sessions": 40,
+      "has_usd": true,
+      "graspable_8cm": true
+    },
+    {
+      "obj_id": "O03001",
+      "aabb_cm": [
+        4.8586,
+        9.7138,
+        24.4172
+      ],
+      "aabb_min_cm": 4.8586,
+      "min_width_cm": 4.880380412639882,
+      "n_sessions": 40,
+      "has_usd": true,
+      "graspable_8cm": true
+    },
+    {
+      "obj_id": "A16026",
+      "aabb_cm": [
+        5.565100000000001,
+        10.562299999999999,
+        17.4925
+      ],
+      "aabb_min_cm": 5.565100000000001,
+      "min_width_cm": 5.552036987950566,
+      "n_sessions": 40,
+      "has_usd": true,
+      "graspable_8cm": true
+    },
+    {
+      "obj_id": "Y27035",
+      "aabb_cm": [
+        5.7041,
+        18.180000000000003,
+        20.212
+      ],
+      "aabb_min_cm": 5.7041,
+      "min_width_cm": 5.798868262678594,
+      "n_sessions": 40,
+      "has_usd": true,
+      "graspable_8cm": true
+    },
+    {
+      "obj_id": "A02015",
+      "aabb_cm": [
+        6.0355,
+        6.183199999999999,
+        18.1491
+      ],
+      "aabb_min_cm": 6.0355,
+      "min_width_cm": 6.034603602560589,
+      "n_sessions": 40,
+      "has_usd": true,
+      "graspable_8cm": true
+    },
+    {
+      "obj_id": "O02001",
+      "aabb_cm": [
+        6.1132,
+        9.3034,
+        16.5294
+      ],
+      "aabb_min_cm": 6.1132,
+      "min_width_cm": 6.105887064640934,
+      "n_sessions": 40,
+      "has_usd": true,
+      "graspable_8cm": true
+    },
+    {
+      "obj_id": "A02011",
+      "aabb_cm": [
+        6.2089,
+        8.6903,
+        23.9685
+      ],
+      "aabb_min_cm": 6.2089,
+      "min_width_cm": 6.200386781217576,
+      "n_sessions": 40,
+      "has_usd": true,
+      "graspable_8cm": true
+    },
+    {
+      "obj_id": "Y03021",
+      "aabb_cm": [
+        6.7661999999999995,
+        9.8578,
+        25.4853
+      ],
+      "aabb_min_cm": 6.7661999999999995,
+      "min_width_cm": 6.76438236535542,
+      "n_sessions": 40,
+      "has_usd": true,
+      "graspable_8cm": true
+    },
+    {
+      "obj_id": "A02014",
+      "aabb_cm": [
+        6.8201,
+        6.9826,
+        12.433900000000001
+      ],
+      "aabb_min_cm": 6.8201,
+      "min_width_cm": 6.891458914466645,
+      "n_sessions": 40,
+      "has_usd": true,
+      "graspable_8cm": true
+    },
+    {
+      "obj_id": "A15027",
+      "aabb_cm": [
+        7.2543999999999995,
+        7.277,
+        25.989799999999995
+      ],
+      "aabb_min_cm": 7.2543999999999995,
+      "min_width_cm": 7.243823093367713,
+      "n_sessions": 40,
+      "has_usd": true,
+      "graspable_8cm": true
+    },
+    {
+      "obj_id": "A02032",
+      "aabb_cm": [
+        7.2004,
+        16.8274,
+        25.471100000000003
+      ],
+      "aabb_min_cm": 7.2004,
+      "min_width_cm": 7.307956476565722,
+      "n_sessions": 40,
+      "has_usd": true,
+      "graspable_8cm": true
+    },
+    {
+      "obj_id": "A15015",
+      "aabb_cm": [
+        7.7076,
+        7.6851,
+        18.729200000000002
+      ],
+      "aabb_min_cm": 7.6851,
+      "min_width_cm": 7.6389588759094105,
+      "n_sessions": 40,
+      "has_usd": true,
+      "graspable_8cm": true
+    },
+    {
+      "obj_id": "A02029",
+      "aabb_cm": [
+        7.66,
+        16.2708,
+        22.911700000000003
+      ],
+      "aabb_min_cm": 7.66,
+      "min_width_cm": 7.709308508159346,
+      "n_sessions": 40,
+      "has_usd": true,
+      "graspable_8cm": true
+    },
+    {
+      "obj_id": "A16012",
+      "aabb_cm": [
+        8.7621,
+        8.6861,
+        19.0603
+      ],
+      "aabb_min_cm": 8.6861,
+      "min_width_cm": 8.517509203811175,
+      "n_sessions": 40,
+      "has_usd": true,
+      "graspable_8cm": false
+    },
+    {
+      "obj_id": "A02018",
+      "aabb_cm": [
+        12.046499999999998,
+        23.229,
+        26.9458
+      ],
+      "aabb_min_cm": 12.046499999999998,
+      "min_width_cm": 11.959265820947266,
+      "n_sessions": 40,
+      "has_usd": true,
+      "graspable_8cm": false
+    },
+    {
+      "obj_id": "O03003",
+      "aabb_cm": [
+        3.5373,
+        6.533800000000001,
+        17.62
+      ],
+      "aabb_min_cm": 3.5373,
+      "min_width_cm": 3.513068509246231,
+      "n_sessions": 36,
+      "has_usd": true,
+      "graspable_8cm": true
+    },
+    {
+      "obj_id": "Y03006",
+      "aabb_cm": [
+        5.9123,
+        9.6735,
+        19.1907
+      ],
+      "aabb_min_cm": 5.9123,
+      "min_width_cm": 5.825639684570722,
+      "n_sessions": 36,
+      "has_usd": true,
+      "graspable_8cm": true
+    },
+    {
+      "obj_id": "A02030",
+      "aabb_cm": [
+        7.3736,
+        5.9226,
+        19.402
+      ],
+      "aabb_min_cm": 5.9226,
+      "min_width_cm": 5.92074387378412,
+      "n_sessions": 36,
+      "has_usd": true,
+      "graspable_8cm": true
+    },
+    {
+      "obj_id": "S15004",
+      "aabb_cm": [
+        7.0356000000000005,
+        7.0354,
+        12.642999999999999
+      ],
+      "aabb_min_cm": 7.0354,
+      "min_width_cm": 6.843114922001617,
+      "n_sessions": 36,
+      "has_usd": true,
+      "graspable_8cm": true
+    },
+    {
+      "obj_id": "A02012",
+      "aabb_cm": [
+        6.6477,
+        7.5619,
+        27.2448
+      ],
+      "aabb_min_cm": 6.6477,
+      "min_width_cm": 6.972961578845627,
+      "n_sessions": 36,
+      "has_usd": true,
+      "graspable_8cm": true
+    },
+    {
+      "obj_id": "Y35037",
+      "aabb_cm": [
+        1.5652,
+        8.751000000000001,
+        20.241999999999997
+      ],
+      "aabb_min_cm": 1.5652,
+      "min_width_cm": 1.7015468534050116,
+      "n_sessions": 32,
+      "has_usd": true,
+      "graspable_8cm": true
+    },
+    {
+      "obj_id": "O36001",
+      "aabb_cm": [
+        2.7308,
+        5.6769,
+        16.7321
+      ],
+      "aabb_min_cm": 2.7308,
+      "min_width_cm": 2.7447934465468427,
+      "n_sessions": 32,
+      "has_usd": true,
+      "graspable_8cm": true
+    },
+    {
+      "obj_id": "S16005",
+      "aabb_cm": [
+        4.869,
+        6.778300000000001,
+        14.091999999999999
+      ],
+      "aabb_min_cm": 4.869,
+      "min_width_cm": 4.631672709709591,
+      "n_sessions": 32,
+      "has_usd": true,
+      "graspable_8cm": true
+    },
+    {
+      "obj_id": "A02021",
+      "aabb_cm": [
+        6.342300000000001,
+        6.5774,
+        20.3644
+      ],
+      "aabb_min_cm": 6.342300000000001,
+      "min_width_cm": 6.224248625841522,
+      "n_sessions": 32,
+      "has_usd": true,
+      "graspable_8cm": true
+    },
+    {
+      "obj_id": "A02028",
+      "aabb_cm": [
+        6.331100000000001,
+        7.438899999999999,
+        19.7748
+      ],
+      "aabb_min_cm": 6.331100000000001,
+      "min_width_cm": 6.259142762877736,
+      "n_sessions": 32,
+      "has_usd": true,
+      "graspable_8cm": true
+    },
+    {
+      "obj_id": "S16002",
+      "aabb_cm": [
+        6.8991999999999996,
+        8.0974,
+        12.4953
+      ],
+      "aabb_min_cm": 6.8991999999999996,
+      "min_width_cm": 6.83407955837321,
+      "n_sessions": 32,
+      "has_usd": true,
+      "graspable_8cm": true
+    },
+    {
+      "obj_id": "O50002",
+      "aabb_cm": [
+        12.2196,
+        12.6463,
+        9.6159
+      ],
+      "aabb_min_cm": 9.6159,
+      "min_width_cm": 9.156323846150197,
+      "n_sessions": 32,
+      "has_usd": true,
+      "graspable_8cm": false
+    },
+    {
+      "obj_id": "O93001",
+      "aabb_cm": [
+        9.7128,
+        9.857099999999999,
+        4.8046
+      ],
+      "aabb_min_cm": 4.8046,
+      "min_width_cm": 4.764479421892796,
+      "n_sessions": 28,
+      "has_usd": true,
+      "graspable_8cm": true
+    },
+    {
+      "obj_id": "S20005",
+      "aabb_cm": [
+        2.3334,
+        7.391,
+        20.994
+      ],
+      "aabb_min_cm": 2.3334,
+      "min_width_cm": 1.2896752392971211,
+      "n_sessions": 24,
+      "has_usd": true,
+      "graspable_8cm": true
+    },
+    {
+      "obj_id": "S20022",
+      "aabb_cm": [
+        1.494,
+        4.197,
+        21.9314
+      ],
+      "aabb_min_cm": 1.494,
+      "min_width_cm": 1.5078863523652604,
+      "n_sessions": 24,
+      "has_usd": true,
+      "graspable_8cm": true
+    },
+    {
+      "obj_id": "O24001",
+      "aabb_cm": [
+        1.5058,
+        5.741700000000001,
+        21.051000000000002
+      ],
+      "aabb_min_cm": 1.5058,
+      "min_width_cm": 1.5916833801933574,
+      "n_sessions": 24,
+      "has_usd": true,
+      "graspable_8cm": true
+    },
+    {
+      "obj_id": "O21001",
+      "aabb_cm": [
+        3.412,
+        3.3822000000000005,
+        21.855200000000004
+      ],
+      "aabb_min_cm": 3.3822000000000005,
+      "min_width_cm": 3.3910425845985026,
+      "n_sessions": 24,
+      "has_usd": true,
+      "graspable_8cm": true
+    },
+    {
+      "obj_id": "A02031",
+      "aabb_cm": [
+        6.9494,
+        7.147300000000001,
+        22.8981
+      ],
+      "aabb_min_cm": 6.9494,
+      "min_width_cm": 6.924971866328381,
+      "n_sessions": 24,
+      "has_usd": true,
+      "graspable_8cm": true
+    },
+    {
+      "obj_id": "S20021",
+      "aabb_cm": [
+        0.642,
+        2.1386,
+        22.267400000000002
+      ],
+      "aabb_min_cm": 0.642,
+      "min_width_cm": 0.7394946839535048,
+      "n_sessions": 16,
+      "has_usd": true,
+      "graspable_8cm": true
+    },
+    {
+      "obj_id": "S20001",
+      "aabb_cm": [
+        1.8572000000000002,
+        3.7998,
+        21.9802
+      ],
+      "aabb_min_cm": 1.8572000000000002,
+      "min_width_cm": 1.889139795890768,
+      "n_sessions": 16,
+      "has_usd": true,
+      "graspable_8cm": true
+    },
+    {
+      "obj_id": "O36002",
+      "aabb_cm": [
+        2.8064999999999998,
+        5.6627,
+        16.3265
+      ],
+      "aabb_min_cm": 2.8064999999999998,
+      "min_width_cm": 2.8425737925730514,
+      "n_sessions": 16,
+      "has_usd": true,
+      "graspable_8cm": true
+    },
+    {
+      "obj_id": "S16003",
+      "aabb_cm": [
+        2.8048,
+        8.5714,
+        13.5698
+      ],
+      "aabb_min_cm": 2.8048,
+      "min_width_cm": 2.484292771598621,
+      "n_sessions": 8,
+      "has_usd": true,
+      "graspable_8cm": true
+    }
+  ]
+}
