@@ -24,6 +24,11 @@ batch_gen_candidates_pool.py — 为 merged 成功数低于阈值的物体批量
         --min-merged-success 1 \\
         --success-threshold 20 --target 50
 
+    # ~50% anchored + ~50% raycast（增加 exploration）
+    python3 scripts/batch_gen_candidates_pool.py \\
+        --gen-mode mixed --min-merged-success 1 \\
+        --success-threshold 20 --target 50
+
     python3 scripts/batch_gen_candidates_pool.py \\
         --merged-dir output/grasp_collect_no_rot/merged \\
         --output-dir output/grasp_collect_no_rot/candidates/pool \\
@@ -64,12 +69,14 @@ class PoolJobConfig:
     resume: bool
     force: bool
     convert_usd: bool
-    gen_mode: str = "raycast"  # raycast | anchored
+    gen_mode: str = "raycast"  # raycast | anchored | mixed
     merged_dir: str = ""
     anchor_seed: int = 42
     anchor_max_rot_deg: float = 8.0
     anchor_max_tip_jitter_mm: float = 3.0
-    anchor_max_retry_per_slot: int = 40
+    anchor_max_retry_per_slot: int | None = None
+    write_anchor_meta: bool = False
+    keep_gen_logs: bool = False
 
 
 @dataclass
@@ -82,6 +89,58 @@ class PoolGenResult:
     grasp_hdf5: str = ""
     error: str = ""
     elapsed_s: float = 0.0
+    score_threshold: float = 0.0
+    n_above_threshold: int = 0
+    score_min: Optional[float] = None
+    score_max: Optional[float] = None
+
+
+def _summarize_grasp_hdf5(grasp_path: str, score_threshold: float) -> dict:
+    """Read per-candidate scores from pool HDF5."""
+    import h5py
+
+    scores: list[float] = []
+    with h5py.File(grasp_path, "r") as f:
+        cg = f["candidates"]
+        for key in cg.keys():
+            scores.append(float(cg[key].attrs.get("score", 0.0)))
+    if not scores:
+        return {
+            "n_candidates": 0,
+            "n_above_threshold": 0,
+            "score_min": None,
+            "score_max": None,
+        }
+    return {
+        "n_candidates": len(scores),
+        "n_above_threshold": sum(1 for s in scores if s >= score_threshold),
+        "score_min": float(min(scores)),
+        "score_max": float(max(scores)),
+    }
+
+
+def _format_pool_gen_line(res: dict) -> str:
+    oid = res["obj_id"]
+    st = res["status"]
+    elapsed = res.get("elapsed_s", 0)
+    n = int(res.get("n_candidates", 0))
+    if st == "ok" and n > 0:
+        thr = res.get("score_threshold", 0)
+        na = int(res.get("n_above_threshold", 0))
+        smin = res.get("score_min")
+        smax = res.get("score_max")
+        if smin is not None and smax is not None:
+            return (
+                f"  {oid}: ok  n={n}  ≥{thr:g}:{na}  "
+                f"score {smax:.1f}~{smin:.1f}  {elapsed}s"
+            )
+        return f"  {oid}: ok  n={n}  {elapsed}s"
+    if st == "skip":
+        return f"  {oid}: skip  n={n}  {elapsed}s"
+    err = res.get("error", "")
+    if err:
+        return f"  {oid}: {st}  n={n}  {elapsed}s  ({err[:80]})"
+    return f"  {oid}: {st}  n={n}  {elapsed}s"
 
 
 def _run_cmd(cmd: list[str], log_path: Optional[str] = None) -> tuple[int, str]:
@@ -160,6 +219,30 @@ def select_target_objects(
     return selected
 
 
+def _append_anchor_sampler_args(
+    gen_cmd: list[str],
+    cfg: PoolJobConfig,
+    obj_id: str,
+    *,
+    sampling_mode: str,
+) -> None:
+    merged_path = os.path.join(cfg.merged_dir, f"{obj_id}_robot_gt_merged.hdf5")
+    gen_cmd.extend([
+        "--sampling-mode", sampling_mode,
+        "--anchor-merged-path", merged_path,
+        "--anchor-seed", str(cfg.anchor_seed),
+        "--anchor-max-rot-deg", str(cfg.anchor_max_rot_deg),
+        "--anchor-max-tip-jitter-mm", str(cfg.anchor_max_tip_jitter_mm),
+    ])
+    if cfg.anchor_max_retry_per_slot is not None:
+        gen_cmd.extend([
+            "--anchor-max-retry-per-slot",
+            str(cfg.anchor_max_retry_per_slot),
+        ])
+    if cfg.write_anchor_meta:
+        gen_cmd.append("--write-anchor-meta")
+
+
 def run_pool_gen_job(
     obj_id: str,
     dataset: str,
@@ -169,8 +252,9 @@ def run_pool_gen_job(
     cfg = PoolJobConfig(**cfg_dict)
     t0 = time.time()
     os.makedirs(cfg.output_dir, exist_ok=True)
-    log_dir = os.path.join(cfg.output_dir, "logs")
-    os.makedirs(log_dir, exist_ok=True)
+    log_dir = os.path.join(cfg.output_dir, "logs") if cfg.keep_gen_logs else None
+    if log_dir:
+        os.makedirs(log_dir, exist_ok=True)
 
     out_path = os.path.join(cfg.output_dir, f"{obj_id}_grasp.hdf5")
     result = PoolGenResult(
@@ -184,12 +268,12 @@ def run_pool_gen_job(
     try:
         if os.path.isfile(out_path):
             if cfg.resume and not cfg.force:
-                import h5py
-
-                with h5py.File(out_path, "r") as f:
-                    result.n_candidates = int(
-                        f["candidates"].attrs.get("n_candidates", 0)
-                    )
+                stats = _summarize_grasp_hdf5(out_path, cfg.score_threshold)
+                result.n_candidates = stats["n_candidates"]
+                result.n_above_threshold = stats["n_above_threshold"]
+                result.score_min = stats["score_min"]
+                result.score_max = stats["score_max"]
+                result.score_threshold = cfg.score_threshold
                 result.status = "skip"
                 return asdict(result)
             if not cfg.force:
@@ -206,7 +290,8 @@ def run_pool_gen_job(
             if cfg.no_rotation:
                 conv_cmd.append("--no-rotation")
             rc, out = _run_cmd(
-                conv_cmd, log_path=os.path.join(log_dir, f"{obj_id}_convert.log"),
+                conv_cmd,
+                log_path=os.path.join(log_dir, f"{obj_id}_convert.log") if log_dir else None,
             )
             if rc != 0:
                 result.status = "convert_failed"
@@ -225,24 +310,21 @@ def run_pool_gen_job(
         if cfg.no_rotation:
             gen_cmd.append("--no-rotation")
         if cfg.gen_mode == "anchored":
-            merged_path = os.path.join(
-                cfg.merged_dir, f"{obj_id}_robot_gt_merged.hdf5",
+            _append_anchor_sampler_args(
+                gen_cmd, cfg, obj_id, sampling_mode="anchored_contact_v2",
             )
-            gen_cmd.extend([
-                "--sampling-mode", "anchored_contact_v2",
-                "--anchor-merged-path", merged_path,
-                "--anchor-seed", str(cfg.anchor_seed),
-                "--anchor-max-rot-deg", str(cfg.anchor_max_rot_deg),
-                "--anchor-max-tip-jitter-mm", str(cfg.anchor_max_tip_jitter_mm),
-                "--anchor-max-retry-per-slot", str(cfg.anchor_max_retry_per_slot),
-            ])
+        elif cfg.gen_mode == "mixed":
+            _append_anchor_sampler_args(
+                gen_cmd, cfg, obj_id, sampling_mode="mixed_anchored_raycast_v1",
+            )
         elif cfg.gen_mode != "raycast":
             result.status = "error"
             result.error = f"unknown gen_mode: {cfg.gen_mode}"
             return asdict(result)
 
         rc, out = _run_cmd(
-            gen_cmd, log_path=os.path.join(log_dir, f"{obj_id}_gen.log"),
+            gen_cmd,
+            log_path=os.path.join(log_dir, f"{obj_id}_gen.log") if log_dir else None,
         )
         if rc != 0:
             result.status = "gen_failed"
@@ -259,10 +341,12 @@ def run_pool_gen_job(
                 result.status = "no_output"
             return asdict(result)
 
-        import h5py
-
-        with h5py.File(out_path, "r") as f:
-            result.n_candidates = int(f["candidates"].attrs.get("n_candidates", 0))
+        stats = _summarize_grasp_hdf5(out_path, cfg.score_threshold)
+        result.n_candidates = stats["n_candidates"]
+        result.n_above_threshold = stats["n_above_threshold"]
+        result.score_min = stats["score_min"]
+        result.score_max = stats["score_max"]
+        result.score_threshold = cfg.score_threshold
         result.status = "ok" if result.n_candidates > 0 else "no_candidates"
     except Exception as e:
         result.status = "error"
@@ -278,7 +362,8 @@ def _save_manifest(
     *,
     merged_dir: str,
     output_dir: str,
-    success_threshold: int,
+    merged_success_threshold: int,
+    score_threshold: float,
     target: int,
     results: list[dict],
     gen_mode: str = "raycast",
@@ -290,7 +375,8 @@ def _save_manifest(
         "output_dir": os.path.abspath(output_dir),
         "gen_mode": gen_mode,
         "min_merged_success": min_merged_success,
-        "success_threshold": success_threshold,
+        "merged_success_threshold": merged_success_threshold,
+        "score_threshold": score_threshold,
         "target_per_object": target,
         "n_objects": len(results),
         "objects": results,
@@ -365,14 +451,33 @@ def main():
     )
     parser.add_argument(
         "--gen-mode",
-        choices=("raycast", "anchored"),
+        choices=("raycast", "anchored", "mixed"),
         default="raycast",
-        help="raycast: 默认 random_grasp_sampler；anchored: 锚定 merged 成功 pose",
+        help=(
+            "raycast: 默认 random_grasp_sampler；"
+            "anchored: 锚定 merged 成功 pose；"
+            "mixed: ~50%% anchored + ~50%% raycast"
+        ),
     )
     parser.add_argument("--anchor-seed", type=int, default=42)
     parser.add_argument("--anchor-max-rot-deg", type=float, default=8.0)
     parser.add_argument("--anchor-max-tip-jitter-mm", type=float, default=3.0)
-    parser.add_argument("--anchor-max-retry-per-slot", type=int, default=40)
+    parser.add_argument(
+        "--anchor-max-retry-per-slot",
+        type=int,
+        default=None,
+        help="覆盖每工位 retry；默认 (100×--target)/工位数",
+    )
+    parser.add_argument(
+        "--write-anchor-meta",
+        action="store_true",
+        help="写入 {obj}_grasp_anchor_meta.json（默认不写；sim 不读）",
+    )
+    parser.add_argument(
+        "--keep-gen-logs",
+        action="store_true",
+        help="在 pool 下写 logs/{obj}_gen.log（默认不写）",
+    )
     parser.add_argument("--python-bin", default=sys.executable)
     parser.add_argument(
         "--obj",
@@ -392,9 +497,9 @@ def main():
     if args.target < 1:
         print("❌ --target 须 >= 1")
         sys.exit(1)
-    if args.gen_mode == "anchored" and args.min_merged_success < 1:
+    if args.gen_mode in ("anchored", "mixed") and args.min_merged_success < 1:
         print(
-            "⚠️  --gen-mode anchored 建议 --min-merged-success 1；"
+            f"⚠️  --gen-mode {args.gen_mode} 建议 --min-merged-success 1；"
             "已自动设为 1",
         )
         args.min_merged_success = 1
@@ -451,6 +556,8 @@ def main():
         anchor_max_rot_deg=args.anchor_max_rot_deg,
         anchor_max_tip_jitter_mm=args.anchor_max_tip_jitter_mm,
         anchor_max_retry_per_slot=args.anchor_max_retry_per_slot,
+        write_anchor_meta=args.write_anchor_meta,
+        keep_gen_logs=args.keep_gen_logs,
     )
     cfg_dict = asdict(cfg)
 
@@ -479,7 +586,7 @@ def main():
             print(f"\n>> {obj_id} (merged={success})")
             res = run_pool_gen_job(obj_id, dataset, success, cfg_dict)
             results.append(res)
-            print(f"   {res['status']}  n={res.get('n_candidates', 0)}  {res['elapsed_s']}s")
+            print(_format_pool_gen_line(res))
     else:
         with ProcessPoolExecutor(max_workers=workers) as ex:
             futures = {
@@ -490,17 +597,15 @@ def main():
                 oid = futures[fut]
                 res = fut.result()
                 results.append(res)
-                print(
-                    f"  {oid}: {res['status']}  "
-                    f"n={res.get('n_candidates', 0)}  {res['elapsed_s']}s"
-                )
+                print(_format_pool_gen_line(res))
 
     manifest_path = os.path.join(args.output_dir, MANIFEST_NAME)
     _save_manifest(
         manifest_path,
         merged_dir=args.merged_dir,
         output_dir=args.output_dir,
-        success_threshold=args.success_threshold,
+        merged_success_threshold=args.success_threshold,
+        score_threshold=args.score_threshold,
         target=args.target,
         results=sorted(results, key=lambda r: r["obj_id"]),
         gen_mode=args.gen_mode,

@@ -155,6 +155,15 @@ def load_anchors_from_merged(
     return anchors, meta
 
 
+def compute_max_retry_per_slot(target_n: int, n_schedule_slots: int) -> int:
+    """
+    Total perturbation attempt budget = 100×target, split evenly across schedule slots.
+    With len(schedule)==target this is 100 retries per slot.
+    """
+    budget = max(int(target_n) * 100, 1)
+    return max(budget // max(int(n_schedule_slots), 1), 1)
+
+
 def build_anchor_schedule(
     n_anchors: int,
     target: int,
@@ -331,7 +340,7 @@ def generate_anchored_candidates(
     seed: int = 42,
     max_rot_deg: float = 8.0,
     max_tip_jitter_mm: float = 3.0,
-    max_retry_per_slot: int = 40,
+    max_retry_per_slot: int | None = None,
     filter_trusted: bool = True,
 ) -> tuple[list[dict], dict[str, Any]]:
     import random_grasp_sampler as rgs
@@ -364,7 +373,16 @@ def generate_anchored_candidates(
 
     rng = np.random.default_rng(seed)
     schedule = build_anchor_schedule(K, target_n, rng)
-    meta["anchor_schedule_len"] = len(schedule)
+    n_slots = len(schedule)
+    retry_per_slot = (
+        int(max_retry_per_slot)
+        if max_retry_per_slot is not None
+        else compute_max_retry_per_slot(target_n, n_slots)
+    )
+    meta["anchor_schedule_len"] = n_slots
+    meta["max_retry_per_slot"] = retry_per_slot
+    meta["retry_attempt_budget"] = retry_per_slot * n_slots
+    meta["retry_budget_rule"] = "100x_target_over_schedule_slots"
     usage: dict[str, int] = {a.name: 0 for a in anchors}
 
     z_min = float(mesh.bounds[0][2])
@@ -379,7 +397,7 @@ def generate_anchored_candidates(
         anchor = anchors[anchor_idx]
         usage[anchor.name] = usage.get(anchor.name, 0) + 1
         slot_added = 0
-        for _ in range(max_retry_per_slot):
+        for _ in range(retry_per_slot):
             n_attempts += 1
             cand, reject = try_strategy_a_candidate(
                 anchor,
@@ -434,9 +452,11 @@ def generate_anchored_candidates(
     if selected:
         print(
             f"  → anchored 选出 {len(selected)} 个 "
-            f"(分数: {selected[0]['score']:.1f} ~ {selected[-1]['score']:.1f}, "
-            f"≥{score_threshold:.0f}分: {n_high}/{target_n})",
+            f"≥{score_threshold:.0f}分: {n_high}/{len(selected)}  "
+            f"score {selected[0]['score']:.1f}~{selected[-1]['score']:.1f}",
         )
+        meta["score_min"] = float(selected[-1]["score"])
+        meta["score_max"] = float(selected[0]["score"])
     elif reject_reasons:
         top = sorted(reject_reasons.items(), key=lambda x: -x[1])[:5]
         print(f"  ⚠️  [anchored] reject reasons (top): {top}")
@@ -449,5 +469,6 @@ __all__ = [
     "is_trusted_grasp",
     "load_anchors_from_merged",
     "build_anchor_schedule",
+    "compute_max_retry_per_slot",
     "generate_anchored_candidates",
 ]
