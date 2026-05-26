@@ -72,7 +72,12 @@ python -m model.inference_v6 \
 # → inf/npz/{obj}.npz  and  inf/png/{obj}.png
 
 python -m model.inference_v6 --checkpoint ... --random 4 --save-dir output/inf_v6
-python -m model.inference_v6 --checkpoint ... --all --split all --save-dir output/inf_v6
+python -m model.inference_v6 --checkpoint ... --split val --save-dir output/inf_v6
+# → inf_v6/png/{obj}.png  and  inf_v6/all_objects_grid.png (montage, default)
+
+python -m model.inference_v6 --compose-grid-only --save-dir output/inf_v6   # grid from existing png/
+python -m model.inference_v6 --checkpoint ... --h5 output/.../affordance_all_soft.h5 --all --save-dir output/inf_v6
+python -m model.inference_v6 --checkpoint ... --split val   # default batch-size 64 objects per GPU forward
 ```
 
 See also: [`prepare_affordance_executed.md`](prepare_affordance_executed.md).
