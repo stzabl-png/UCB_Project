@@ -1009,7 +1009,6 @@ def generate_mixed_candidates(
     require_hp_contact: bool,
     hp_pc,
     hp_labels,
-    anchor_seed: int = 42,
     anchor_max_rot_deg: float = 8.0,
     anchor_max_tip_jitter_mm: float = 3.0,
     anchor_max_retry_per_slot: int | None = None,
@@ -1044,7 +1043,6 @@ def generate_mixed_candidates(
             require_hp_contact=require_hp_contact,
             hp_pc=hp_pc,
             hp_labels=hp_labels,
-            seed=anchor_seed,
             max_rot_deg=anchor_max_rot_deg,
             max_tip_jitter_mm=anchor_max_tip_jitter_mm,
             max_retry_per_slot=anchor_max_retry_per_slot,
@@ -1317,7 +1315,6 @@ def process_one_object(
     structured: bool = False,
     sampling_mode: str = SAMPLING_METHOD_RAYCAST,
     anchor_merged_path: str | None = None,
-    anchor_seed: int = 42,
     anchor_max_rot_deg: float = 8.0,
     anchor_max_tip_jitter_mm: float = 3.0,
     anchor_max_retry_per_slot: int | None = None,
@@ -1427,7 +1424,7 @@ def process_one_object(
         n_a, n_r = split_mixed_targets(target_n)
         print(
             f'  [mixed] merged={anchor_merged_path}  target={target_n}  '
-            f'anchored={n_a} raycast={n_r}  score≥{score_threshold}  seed={anchor_seed}',
+            f'anchored={n_a} raycast={n_r}  score≥{score_threshold}',
         )
         candidates, mix_meta = generate_mixed_candidates(
             mesh,
@@ -1440,7 +1437,6 @@ def process_one_object(
             require_hp_contact=require_hp_contact,
             hp_pc=hp_pc,
             hp_labels=hp_labels,
-            anchor_seed=anchor_seed,
             anchor_max_rot_deg=anchor_max_rot_deg,
             anchor_max_tip_jitter_mm=anchor_max_tip_jitter_mm,
             anchor_max_retry_per_slot=anchor_max_retry_per_slot,
@@ -1462,7 +1458,7 @@ def process_one_object(
 
         print(
             f'  [anchored] merged={anchor_merged_path}  target={target_n}  '
-            f'score≥{score_threshold}  seed={anchor_seed}'
+            f'score≥{score_threshold}'
         )
         candidates, anchor_meta = generate_anchored_candidates(
             mesh,
@@ -1473,7 +1469,6 @@ def process_one_object(
             require_hp_contact=require_hp_contact,
             hp_pc=hp_pc,
             hp_labels=hp_labels,
-            seed=anchor_seed,
             max_rot_deg=anchor_max_rot_deg,
             max_tip_jitter_mm=anchor_max_tip_jitter_mm,
             max_retry_per_slot=anchor_max_retry_per_slot,
@@ -1604,7 +1599,6 @@ def main():
         default=None,
         help='merged {obj}_robot_gt_merged.hdf5 (required for --sampling-mode anchored)',
     )
-    parser.add_argument('--anchor-seed', type=int, default=42)
     parser.add_argument('--anchor-max-rot-deg', type=float, default=8.0)
     parser.add_argument('--anchor-max-tip-jitter-mm', type=float, default=3.0)
     parser.add_argument(
@@ -1739,7 +1733,6 @@ def main():
             structured=args.structured_contacts,
             sampling_mode=eff_mode,
             anchor_merged_path=args.anchor_merged_path,
-            anchor_seed=args.anchor_seed,
             anchor_max_rot_deg=args.anchor_max_rot_deg,
             anchor_max_tip_jitter_mm=args.anchor_max_tip_jitter_mm,
             anchor_max_retry_per_slot=args.anchor_max_retry_per_slot,

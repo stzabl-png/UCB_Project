@@ -337,7 +337,6 @@ def generate_anchored_candidates(
     require_hp_contact: bool,
     hp_pc,
     hp_labels,
-    seed: int = 42,
     max_rot_deg: float = 8.0,
     max_tip_jitter_mm: float = 3.0,
     max_retry_per_slot: int | None = None,
@@ -355,7 +354,6 @@ def generate_anchored_candidates(
         "target_n": target_n,
         "score_threshold": score_threshold,
         "require_hp_contact": require_hp_contact,
-        "seed": seed,
         "perturb": {
             "max_rot_deg": max_rot_deg,
             "max_tip_jitter_mm": max_tip_jitter_mm,
@@ -371,7 +369,7 @@ def generate_anchored_candidates(
 
     meta["hp_contact_required_effective"] = require_hp_contact
 
-    rng = np.random.default_rng(seed)
+    rng = np.random.default_rng()
     schedule = build_anchor_schedule(K, target_n, rng)
     n_slots = len(schedule)
     retry_per_slot = (

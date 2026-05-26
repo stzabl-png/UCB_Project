@@ -71,7 +71,6 @@ class PoolJobConfig:
     convert_usd: bool
     gen_mode: str = "raycast"  # raycast | anchored | mixed
     merged_dir: str = ""
-    anchor_seed: int = 42
     anchor_max_rot_deg: float = 8.0
     anchor_max_tip_jitter_mm: float = 3.0
     anchor_max_retry_per_slot: int | None = None
@@ -230,7 +229,6 @@ def _append_anchor_sampler_args(
     gen_cmd.extend([
         "--sampling-mode", sampling_mode,
         "--anchor-merged-path", merged_path,
-        "--anchor-seed", str(cfg.anchor_seed),
         "--anchor-max-rot-deg", str(cfg.anchor_max_rot_deg),
         "--anchor-max-tip-jitter-mm", str(cfg.anchor_max_tip_jitter_mm),
     ])
@@ -459,7 +457,6 @@ def main():
             "mixed: ~50%% anchored + ~50%% raycast"
         ),
     )
-    parser.add_argument("--anchor-seed", type=int, default=42)
     parser.add_argument("--anchor-max-rot-deg", type=float, default=8.0)
     parser.add_argument("--anchor-max-tip-jitter-mm", type=float, default=3.0)
     parser.add_argument(
@@ -552,7 +549,6 @@ def main():
         convert_usd=args.convert_usd,
         gen_mode=args.gen_mode,
         merged_dir=os.path.abspath(args.merged_dir),
-        anchor_seed=args.anchor_seed,
         anchor_max_rot_deg=args.anchor_max_rot_deg,
         anchor_max_tip_jitter_mm=args.anchor_max_tip_jitter_mm,
         anchor_max_retry_per_slot=args.anchor_max_retry_per_slot,
