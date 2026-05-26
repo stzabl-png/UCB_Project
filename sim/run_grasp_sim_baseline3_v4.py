@@ -982,13 +982,14 @@ def main():
         obj = scene["obj"]
         from omni.isaac.core.utils.types import ArticulationAction
 
-        # Build list of (yaw_deg, suffix) tuples to attempt for this source ep
+        # Build list of (yaw_deg, suffix) tuples to attempt for this source ep.
+        # Apply ALL three yaws (90/180/270) for every source ep — no sampling.
+        # Per-yaw output is saved separately as <name>_yaw{deg}.hdf5 so downstream
+        # training can include/exclude individual yaw variants without re-collecting.
         yaw_attempts = [(0, "")]
         if args.yaw_aug:
-            # deterministic per-ep choice (seed + ep index)
-            _rng = random.Random(args.yaw_aug_seed + i)
-            yaw_deg = _rng.choice([90, 180, 270])
-            yaw_attempts.append((yaw_deg, f"_yaw{yaw_deg}"))
+            for yaw_deg in (90, 180, 270):
+                yaw_attempts.append((yaw_deg, f"_yaw{yaw_deg}"))
 
         # T_obj_grasp is INVARIANT to where we put the object — compute once
         T_G_obj = make_transform(obj_origin_G, obj_quat_G)
