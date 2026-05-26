@@ -81,6 +81,7 @@ STRUCTURED_APPROACH_Z_MAX_COS = 0.3    # 与 sample_approach_dirs 一致：禁�
 STRUCTURED_LOCAL_THICKNESS_MIN = 0.02  # c₁ 切向最大厚度 < 2cm → 跳过
 SAMPLING_METHOD_RAYCAST = 'raycast_scored_v2'
 SAMPLING_METHOD_STRUCTURED = 'hp_contact_pair_v1'
+SAMPLING_METHOD_ANCHORED = 'anchored_contact_v2'
 
 
 def sample_approach_dirs(n: int, z_max_cos: float = 0.3) -> list:
@@ -1114,6 +1115,43 @@ def visualize_candidates(mesh, candidates, obj_id):
     vis.destroy_window()
 
 
+def _load_sampler_mesh(mesh_path: str) -> trimesh.Trimesh:
+    """Load mesh for sampling; tolerate broken PLY visuals / Scene dumps."""
+    last_err: Exception | None = None
+    for kwargs in (
+        {"force": "mesh", "process": False, "skip_materials": True},
+        {"force": "mesh", "process": False},
+        {"process": False},
+    ):
+        try:
+            loaded = trimesh.load(mesh_path, **kwargs)
+            if isinstance(loaded, trimesh.Scene):
+                geoms = [g for g in loaded.dump() if isinstance(g, trimesh.Trimesh)]
+                if not geoms:
+                    raise ValueError("empty scene mesh")
+                loaded = trimesh.util.concatenate(geoms)
+            if not isinstance(loaded, trimesh.Trimesh):
+                raise TypeError(f"expected Trimesh, got {type(loaded)}")
+            return loaded
+        except Exception as e:
+            last_err = e
+    raise RuntimeError(f"mesh load failed: {mesh_path}") from last_err
+
+
+def _safe_mesh_repair(mesh: trimesh.Trimesh, label: str = "mesh") -> None:
+    """Best-effort watertight repair; trimesh can crash on huge/broken topology."""
+    try:
+        if not mesh.is_watertight:
+            trimesh.repair.fill_holes(mesh)
+            trimesh.repair.fix_normals(mesh)
+    except (IndexError, ValueError, MemoryError, RuntimeError) as e:
+        print(f"  ⚠️  skip watertight repair ({label}): {e}")
+        try:
+            trimesh.repair.fix_normals(mesh)
+        except Exception:
+            pass
+
+
 def process_one_object(
     obj_id,
     mesh_path,
@@ -1132,6 +1170,12 @@ def process_one_object(
     require_hp_contact=REQUIRE_HP_CONTACT_DEFAULT,
     use_legacy_assets: bool = False,
     structured: bool = False,
+    sampling_mode: str = SAMPLING_METHOD_RAYCAST,
+    anchor_merged_path: str | None = None,
+    anchor_seed: int = 42,
+    anchor_max_rot_deg: float = 8.0,
+    anchor_max_tip_jitter_mm: float = 3.0,
+    anchor_max_retry_per_slot: int = 15,
 ):
     """
     为单个物体生成 grasp candidates HDF5。
@@ -1149,7 +1193,11 @@ def process_one_object(
     if not os.path.exists(mesh_path):
         return None, 'no_mesh'
 
-    mesh = trimesh.load(mesh_path, force='mesh', process=False)
+    try:
+        mesh = _load_sampler_mesh(mesh_path)
+    except Exception as e:
+        print(f'  ❌ mesh load failed: {e}')
+        return None, 'mesh_load_failed'
     hp_scale_applied = False
     if apply_scale_to_mesh and abs(scale_factor - 1.0) > 1e-8:
         mesh.vertices = mesh.vertices * float(scale_factor)
@@ -1199,9 +1247,7 @@ def process_one_object(
     else:
         print(f'     [no rotation: rotated SAM3D / identity frame]')
 
-    if not mesh.is_watertight:
-        trimesh.repair.fill_holes(mesh)
-        trimesh.repair.fix_normals(mesh)
+    _safe_mesh_repair(mesh, "mesh")
 
     ext = mesh.bounding_box.extents * 100
     print(f'  尺寸: {ext[0]:.1f}×{ext[1]:.1f}×{ext[2]:.1f} cm  ({len(mesh.faces):,} 面)')
@@ -1211,8 +1257,7 @@ def process_one_object(
     if len(mesh.faces) > SIMPLIFY_TARGET * 2:
         t_s = time.time()
         mesh_rc = mesh.simplify_quadric_decimation(face_count=SIMPLIFY_TARGET)
-        if not mesh_rc.is_watertight:
-            trimesh.repair.fix_normals(mesh_rc)
+        _safe_mesh_repair(mesh_rc, "mesh_rc")
         print(f'  → 简化为 {len(mesh_rc.faces):,} 面 (raycast用, {time.time()-t_s:.2f}s)')
 
     if require_hp_contact:
@@ -1223,17 +1268,52 @@ def process_one_object(
             f'({STRUCTURED_N_TANGENT_DIRS} dirs, minW={STRUCTURED_MIN_WIDTH_HARD*100:.0f}cm, '
             f'inward-normal>={STRUCTURED_NORMAL_INWARD_COS})'
         )
-    candidates = generate_candidates_iterative(
-        mesh, hp_name, hp_dir=hp_dir, mesh_rc=mesh_rc,
-        target_n=target_n, score_threshold=score_threshold,
-        require_hp_contact=require_hp_contact,
-        hp_pc=hp_pc, hp_labels=hp_labels,
-        structured=structured,
-    )
 
-    sampling_method = (
-        SAMPLING_METHOD_STRUCTURED if structured else SAMPLING_METHOD_RAYCAST
-    )
+    anchor_meta = None
+    if sampling_mode == SAMPLING_METHOD_ANCHORED:
+        if not anchor_merged_path or not os.path.isfile(anchor_merged_path):
+            print(f'  ❌ anchored mode requires --anchor-merged-path ({anchor_merged_path})')
+            return None, 'no_anchors'
+        from anchor_grasp_gen import generate_anchored_candidates
+
+        print(
+            f'  [anchored] merged={anchor_merged_path}  target={target_n}  '
+            f'score≥{score_threshold}  seed={anchor_seed}'
+        )
+        candidates, anchor_meta = generate_anchored_candidates(
+            mesh,
+            mesh_rc,
+            anchor_merged_path,
+            target_n=target_n,
+            score_threshold=score_threshold,
+            require_hp_contact=require_hp_contact,
+            hp_pc=hp_pc,
+            hp_labels=hp_labels,
+            seed=anchor_seed,
+            max_rot_deg=anchor_max_rot_deg,
+            max_tip_jitter_mm=anchor_max_tip_jitter_mm,
+            max_retry_per_slot=anchor_max_retry_per_slot,
+        )
+        if anchor_meta:
+            print(
+                f'     anchors={anchor_meta.get("n_anchors", 0)}  '
+                f'filter={anchor_meta.get("anchor_filter_used", "?")}  '
+                f'pool={anchor_meta.get("n_pool", "?")}  '
+                f'high≥{score_threshold:.0f}: {anchor_meta.get("n_high_quality", "?")}  '
+                f'selected={anchor_meta.get("n_accepted", 0)}/{target_n}'
+            )
+        sampling_method = SAMPLING_METHOD_ANCHORED
+    else:
+        candidates = generate_candidates_iterative(
+            mesh, hp_name, hp_dir=hp_dir, mesh_rc=mesh_rc,
+            target_n=target_n, score_threshold=score_threshold,
+            require_hp_contact=require_hp_contact,
+            hp_pc=hp_pc, hp_labels=hp_labels,
+            structured=structured,
+        )
+        sampling_method = (
+            SAMPLING_METHOD_STRUCTURED if structured else SAMPLING_METHOD_RAYCAST
+        )
     if candidates:
         path = save_candidates_hdf5(
             candidates, obj_id, mesh_path, output_dir,
@@ -1244,12 +1324,23 @@ def process_one_object(
             hp_path=hp_path,
             sampling_method=sampling_method,
         )
+        if anchor_meta and sampling_method == SAMPLING_METHOD_ANCHORED:
+            try:
+                import json
+                sidecar = path.replace('.hdf5', '_anchor_meta.json')
+                with open(sidecar, 'w') as mf:
+                    json.dump(anchor_meta, mf, indent=2, default=str)
+            except Exception:
+                pass
         print(f'  ✅ → {os.path.basename(path)} ({len(candidates)} 候选)')
         return path, None
 
-    open(skip_path, 'w').write(
-        f'SKIP: {max_sampler_batches(target_n)} sampler batches exhausted, 0 candidates >= {score_threshold}\n'
+    skip_reason = (
+        'anchored: no candidates accepted'
+        if sampling_mode == SAMPLING_METHOD_ANCHORED
+        else f'{max_sampler_batches(target_n)} sampler batches exhausted, 0 candidates >= {score_threshold}'
     )
+    open(skip_path, 'w').write(f'SKIP: {skip_reason}\n')
     print(f'  ⬛ → {obj_id}.skip (难抓物体，已标记)')
     return None, 'no_candidates'
 
@@ -1285,6 +1376,25 @@ def main():
         action='store_true',
         help='HP 表面 c₁ + 切向搜索 c₂（硬约束 antipodal/宽度/弦）再打分；默认 raycast 内部采样',
     )
+    parser.add_argument(
+        '--sampling-mode',
+        choices=(SAMPLING_METHOD_RAYCAST, SAMPLING_METHOD_STRUCTURED, SAMPLING_METHOD_ANCHORED),
+        default=SAMPLING_METHOD_RAYCAST,
+        help=(
+            'raycast_scored_v2: default iterative sampler; '
+            'hp_contact_pair_v1: use with --structured-contacts; '
+            'anchored_contact_v2: perturb merged successful grasps'
+        ),
+    )
+    parser.add_argument(
+        '--anchor-merged-path',
+        default=None,
+        help='merged {obj}_robot_gt_merged.hdf5 (required for --sampling-mode anchored)',
+    )
+    parser.add_argument('--anchor-seed', type=int, default=42)
+    parser.add_argument('--anchor-max-rot-deg', type=float, default=8.0)
+    parser.add_argument('--anchor-max-tip-jitter-mm', type=float, default=3.0)
+    parser.add_argument('--anchor-max-retry-per-slot', type=int, default=15)
     args = parser.parse_args()
 
     # 推理模式：切换目录
@@ -1341,11 +1451,21 @@ def main():
         mode = f'legacy obj_meshes/{args.dataset or "oakink"}'
     else:
         mode = f'rotated_mesh + train_fp_rotated ({args.dataset or "oakink"})'
-    sample_mode = (
-        f'structured HP→c₂ (min {STRUCTURED_MIN_WIDTH_HARD*100:.0f}cm)'
-        if args.structured_contacts
-        else '50%HP + 50%rnd raycast'
-    )
+    if args.sampling_mode == SAMPLING_METHOD_ANCHORED:
+        sample_mode = 'anchored contact perturb (merged successes)'
+    elif args.structured_contacts or args.sampling_mode == SAMPLING_METHOD_STRUCTURED:
+        sample_mode = f'structured HP→c₂ (min {STRUCTURED_MIN_WIDTH_HARD*100:.0f}cm)'
+    else:
+        sample_mode = '50%HP + 50%rnd raycast'
+    if args.structured_contacts and args.sampling_mode == SAMPLING_METHOD_ANCHORED:
+        print('❌ --structured-contacts 与 --sampling-mode anchored 不能同时使用')
+        return
+    if args.sampling_mode == SAMPLING_METHOD_ANCHORED and not args.anchor_merged_path:
+        print('❌ --sampling-mode anchored 需要 --anchor-merged-path')
+        return
+    eff_mode = args.sampling_mode
+    if args.structured_contacts:
+        eff_mode = SAMPLING_METHOD_STRUCTURED
     print('=' * 60)
     print(f'  Grasp Sampler v2 [{mode}] ({sample_mode})')
     print(f'  Target: {args.target} candidates ≥ {args.score_threshold} pts')
@@ -1388,6 +1508,12 @@ def main():
             require_hp_contact=not args.no_hp_contact_required,
             use_legacy_assets=args.legacy_assets,
             structured=args.structured_contacts,
+            sampling_mode=eff_mode,
+            anchor_merged_path=args.anchor_merged_path,
+            anchor_seed=args.anchor_seed,
+            anchor_max_rot_deg=args.anchor_max_rot_deg,
+            anchor_max_tip_jitter_mm=args.anchor_max_tip_jitter_mm,
+            anchor_max_retry_per_slot=args.anchor_max_retry_per_slot,
         )
         if reason == 'skip_marked':
             print(f' ⏭️ [SKIP标记] 已知难抓物体')

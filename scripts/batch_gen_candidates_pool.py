@@ -18,6 +18,12 @@ batch_gen_candidates_pool.py — 为 merged 成功数低于阈值的物体批量
         --target 50 \\
         --sampler-workers 8
 
+    # 锚定 merged 成功 pose（需 --min-merged-success 1）
+    python3 scripts/batch_gen_candidates_pool.py \\
+        --gen-mode anchored \\
+        --min-merged-success 1 \\
+        --success-threshold 20 --target 50
+
     python3 scripts/batch_gen_candidates_pool.py \\
         --merged-dir output/grasp_collect_no_rot/merged \\
         --output-dir output/grasp_collect_no_rot/candidates/pool \\
@@ -58,6 +64,12 @@ class PoolJobConfig:
     resume: bool
     force: bool
     convert_usd: bool
+    gen_mode: str = "raycast"  # raycast | anchored
+    merged_dir: str = ""
+    anchor_seed: int = 42
+    anchor_max_rot_deg: float = 8.0
+    anchor_max_tip_jitter_mm: float = 3.0
+    anchor_max_retry_per_slot: int = 40
 
 
 @dataclass
@@ -212,6 +224,22 @@ def run_pool_gen_job(
         ]
         if cfg.no_rotation:
             gen_cmd.append("--no-rotation")
+        if cfg.gen_mode == "anchored":
+            merged_path = os.path.join(
+                cfg.merged_dir, f"{obj_id}_robot_gt_merged.hdf5",
+            )
+            gen_cmd.extend([
+                "--sampling-mode", "anchored_contact_v2",
+                "--anchor-merged-path", merged_path,
+                "--anchor-seed", str(cfg.anchor_seed),
+                "--anchor-max-rot-deg", str(cfg.anchor_max_rot_deg),
+                "--anchor-max-tip-jitter-mm", str(cfg.anchor_max_tip_jitter_mm),
+                "--anchor-max-retry-per-slot", str(cfg.anchor_max_retry_per_slot),
+            ])
+        elif cfg.gen_mode != "raycast":
+            result.status = "error"
+            result.error = f"unknown gen_mode: {cfg.gen_mode}"
+            return asdict(result)
 
         rc, out = _run_cmd(
             gen_cmd, log_path=os.path.join(log_dir, f"{obj_id}_gen.log"),
@@ -221,8 +249,14 @@ def run_pool_gen_job(
             result.error = (out or "sampler nonzero exit")[:500]
             return asdict(result)
 
+        skip_path = os.path.join(cfg.output_dir, f"{obj_id}.skip")
         if not os.path.isfile(out_path):
-            result.status = "no_output"
+            if os.path.isfile(skip_path):
+                with open(skip_path) as sf:
+                    result.error = sf.read().strip()[:500]
+                result.status = "no_candidates"
+            else:
+                result.status = "no_output"
             return asdict(result)
 
         import h5py
@@ -247,11 +281,15 @@ def _save_manifest(
     success_threshold: int,
     target: int,
     results: list[dict],
+    gen_mode: str = "raycast",
+    min_merged_success: int = 0,
 ):
     payload = {
         "updated_at": datetime.now(timezone.utc).isoformat(),
         "merged_dir": os.path.abspath(merged_dir),
         "output_dir": os.path.abspath(output_dir),
+        "gen_mode": gen_mode,
+        "min_merged_success": min_merged_success,
         "success_threshold": success_threshold,
         "target_per_object": target,
         "n_objects": len(results),
@@ -325,6 +363,16 @@ def main():
         action="store_true",
         help="应用 rotation.json（默认 no-rotation）",
     )
+    parser.add_argument(
+        "--gen-mode",
+        choices=("raycast", "anchored"),
+        default="raycast",
+        help="raycast: 默认 random_grasp_sampler；anchored: 锚定 merged 成功 pose",
+    )
+    parser.add_argument("--anchor-seed", type=int, default=42)
+    parser.add_argument("--anchor-max-rot-deg", type=float, default=8.0)
+    parser.add_argument("--anchor-max-tip-jitter-mm", type=float, default=3.0)
+    parser.add_argument("--anchor-max-retry-per-slot", type=int, default=40)
     parser.add_argument("--python-bin", default=sys.executable)
     parser.add_argument(
         "--obj",
@@ -344,6 +392,12 @@ def main():
     if args.target < 1:
         print("❌ --target 须 >= 1")
         sys.exit(1)
+    if args.gen_mode == "anchored" and args.min_merged_success < 1:
+        print(
+            "⚠️  --gen-mode anchored 建议 --min-merged-success 1；"
+            "已自动设为 1",
+        )
+        args.min_merged_success = 1
     if not os.path.isdir(args.merged_dir):
         print(f"❌ merged dir not found: {args.merged_dir}")
         sys.exit(1)
@@ -391,6 +445,12 @@ def main():
         resume=args.resume,
         force=args.force,
         convert_usd=args.convert_usd,
+        gen_mode=args.gen_mode,
+        merged_dir=os.path.abspath(args.merged_dir),
+        anchor_seed=args.anchor_seed,
+        anchor_max_rot_deg=args.anchor_max_rot_deg,
+        anchor_max_tip_jitter_mm=args.anchor_max_tip_jitter_mm,
+        anchor_max_retry_per_slot=args.anchor_max_retry_per_slot,
     )
     cfg_dict = asdict(cfg)
 
@@ -400,6 +460,7 @@ def main():
         f"Filter: {args.min_merged_success} <= merged success < {args.success_threshold}"
     )
     print(f"Target: {args.target} candidates / object")
+    print(f"Gen mode: {args.gen_mode}")
     print(f"Objects: {len(targets)}")
     print(f"Workers: {args.sampler_workers}")
     print(f"Resume: {args.resume}  Force: {args.force}")
@@ -442,6 +503,8 @@ def main():
         success_threshold=args.success_threshold,
         target=args.target,
         results=sorted(results, key=lambda r: r["obj_id"]),
+        gen_mode=args.gen_mode,
+        min_merged_success=args.min_merged_success,
     )
 
     ok = sum(1 for r in results if r["status"] in ("ok", "skip"))
