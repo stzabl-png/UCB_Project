@@ -13,7 +13,7 @@ merged/, state.json, summary.csv。
     python3 scripts/batch_sim_candidates_pool.py \\
         --outdir output/grasp_collect_no_rot \\
         --resume --max-rounds 5 \\
-        --sim-gpu-ids 0,1 --sim-per-gpu 5 --headless
+        --sim-gpu-ids 0,1 --sim-workers 10 --headless
 
     # 每轮 slot 按 pool 内物体等概率抽取（默认按 success 加权）:
     python3 scripts/batch_sim_candidates_pool.py \\
@@ -29,7 +29,7 @@ merged/, state.json, summary.csv。
 
     # 小规模 smoke:
     python3 scripts/batch_sim_candidates_pool.py \\
-        --slots-per-round 2 --sim-gpu-ids 0 --sim-per-gpu 1 --max-rounds 1
+        --slots-per-round 2 --sim-gpu-ids 0 --sim-workers 1 --max-rounds 1
 """
 from __future__ import annotations
 
@@ -40,6 +40,7 @@ import glob
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -59,10 +60,10 @@ sys.path.insert(0, os.path.join(PROJ, "scripts"))
 
 from grasp_pool_common import (  # noqa: E402
     DEFAULT_SLOTS_PER_ROUND,
+    all_merged_objects_at_success_cap,
     archive_chunk_results_before_reshuffle,
     build_task_queue,
     clear_registry_for_objects,
-    compute_median_success_threshold,
     copy_slots_to_round_hdf5,
     is_queue_complete,
     load_registry,
@@ -86,8 +87,12 @@ SIM_POOL_SCRIPT = os.path.join(PROJ, "sim", "run_grasp_sim_pool.py")
 SAME_GPU_STAGGER_S = 45.0
 ISAAC_STARTUP_SLOTS_PER_GPU = 2
 SIM_INGEST_POLL_S = 5.0
+SIM_WORKER_POLL_S = 2.0
+SIM_SHUTDOWN_GRACE_S = 60.0
 WORKER_CRASH_RETRY_S = 15.0
 WORKER_MAX_RETRIES = 2
+SUCCESS_TIER_STEP = 10
+DEFAULT_POOL_SUCCESS_THRESHOLD = 20
 
 
 @dataclass
@@ -98,10 +103,11 @@ class PoolSimConfig:
     headless: bool
     isaac_python: str
     sim_timeout: int
+    sim_shutdown_grace_s: float
     object_scale: float
     python_bin: str
     sim_gpu_ids: tuple[int, ...]
-    sim_per_gpu: int
+    sim_workers: int
     same_gpu_stagger_s: float
     isaac_startup_slots_per_gpu: int
     merge_deduplicate: bool
@@ -112,7 +118,10 @@ class PoolSimConfig:
     max_success_per_object: Optional[int]
     pool_target: int
     auto_refill: bool
+    pool_success_threshold: int
     score_threshold: float
+    pool_gen_mode: str
+    pool_min_merged_success: int
     no_rotation: bool
     early_stop_on_candidate_success: bool
     worker_start_barrier: bool
@@ -153,6 +162,54 @@ def _load_state(path: str) -> dict:
         return {"round": 0, "objects": {}, "updated_at": None}
     with open(path, "r") as f:
         return json.load(f)
+
+
+def resolve_sim_success_thresholds(
+    *,
+    max_success_cli: Optional[int],
+    pool_success_cli: Optional[int],
+    state: dict,
+    resume: bool,
+) -> tuple[Optional[int], int]:
+    """
+    pool_success_threshold defaults to max_success_per_object when unset.
+    On --resume, restore both values from state.json when present.
+    """
+    max_cap = max_success_cli
+    pool_thr = pool_success_cli
+    if resume:
+        if state.get("max_success_per_object") is not None:
+            max_cap = int(state["max_success_per_object"])
+        if "pool_success_threshold" in state:
+            pool_thr = int(state["pool_success_threshold"])
+    if pool_thr is None:
+        pool_thr = max_cap if max_cap is not None else DEFAULT_POOL_SUCCESS_THRESHOLD
+    return max_cap, pool_thr
+
+
+def maybe_bump_success_tiers(
+    cfg: PoolSimConfig,
+    state: dict,
+    state_path: str,
+) -> bool:
+    """If every merged object reached the current cap, raise success/refill tiers by +10."""
+    cap = cfg.max_success_per_object
+    if cap is None:
+        return False
+    if not all_merged_objects_at_success_cap(cfg.merged_dir, cap):
+        return False
+    cfg.max_success_per_object = cap + SUCCESS_TIER_STEP
+    cfg.pool_success_threshold += SUCCESS_TIER_STEP
+    state["max_success_per_object"] = cfg.max_success_per_object
+    state["pool_success_threshold"] = cfg.pool_success_threshold
+    _save_state(state_path, state)
+    print(
+        f"\n📈 All merged objects reached success cap {cap}; "
+        f"next round: max_success={cfg.max_success_per_object}  "
+        f"pool_refill_threshold={cfg.pool_success_threshold}",
+        flush=True,
+    )
+    return True
 
 
 def _save_state(path: str, state: dict) -> None:
@@ -298,8 +355,112 @@ def _load_chunk_results(chunk_path: str) -> list[dict]:
 
 
 def _chunk_run_complete(chunk_path: str) -> bool:
+    _, progress_path = _chunk_sidecar_paths(chunk_path)
+    try:
+        if os.path.isfile(progress_path):
+            with open(progress_path, "r") as f:
+                prog = json.load(f)
+            total = int(prog.get("total", 0))
+            done = int(prog.get("completed", 0))
+            if total > 0 and done >= total:
+                return True
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        pass
     done, total, _ = _read_chunk_progress(chunk_path)
     return total > 0 and done >= total
+
+
+def _terminate_process_group(
+    proc: subprocess.Popen,
+    *,
+    grace_s: float = 5.0,
+) -> None:
+    """SIGTERM then SIGKILL the Isaac worker process group."""
+    if proc.poll() is not None:
+        return
+
+    def _signal(sig: signal.Signals) -> None:
+        try:
+            os.killpg(os.getpgid(proc.pid), sig)
+        except ProcessLookupError:
+            pass
+        except (PermissionError, OSError):
+            try:
+                proc.send_signal(sig)
+            except ProcessLookupError:
+                pass
+
+    _signal(signal.SIGTERM)
+    deadline = time.time() + grace_s
+    while time.time() < deadline:
+        if proc.poll() is not None:
+            return
+        time.sleep(0.2)
+    _signal(signal.SIGKILL)
+    try:
+        proc.wait(timeout=10.0)
+    except subprocess.TimeoutExpired:
+        pass
+
+
+def _run_isaac_chunk_subprocess(
+    cmd: list[str],
+    *,
+    chunk_path: str,
+    log_path: str,
+    env: dict,
+    timeout: int,
+    shutdown_grace_s: float,
+    poll_s: float = SIM_WORKER_POLL_S,
+) -> tuple[int, str, bool]:
+    """
+    Run Isaac worker while polling chunk sidecars.
+
+    Once every task is written to disk, wait for a clean Isaac exit. If shutdown
+    hangs past ``shutdown_grace_s``, terminate the process group and still treat
+    the chunk as recoverable from sidecars.
+    """
+    log_f = open(log_path, "w")
+    proc = subprocess.Popen(
+        cmd,
+        cwd=PROJ,
+        env=env,
+        stdout=log_f,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+        text=True,
+    )
+    deadline = time.time() + timeout if timeout and timeout > 0 else None
+    complete_since: Optional[float] = None
+    terminated_after_complete = False
+
+    try:
+        while proc.poll() is None:
+            now = time.time()
+            if deadline is not None and now >= deadline:
+                _terminate_process_group(proc)
+                return -9, "timeout", False
+
+            if _chunk_run_complete(chunk_path):
+                if complete_since is None:
+                    complete_since = now
+                elif now - complete_since >= shutdown_grace_s:
+                    _terminate_process_group(proc)
+                    terminated_after_complete = True
+                    rc = proc.wait()
+                    return (
+                        rc,
+                        "chunk complete on disk; terminated hung Isaac shutdown",
+                        True,
+                    )
+            else:
+                complete_since = None
+
+            time.sleep(poll_s)
+
+        return proc.wait(), "", terminated_after_complete
+    finally:
+        log_f.close()
 
 
 def _read_chunk_progress(chunk_path: str) -> tuple[int, int, int]:
@@ -576,7 +737,14 @@ def run_sim_worker(
         isaac_startup_slots_per_gpu=cfg.isaac_startup_slots_per_gpu,
         strict_gpu_mask=cfg.strict_gpu_mask,
     )
-    rc, out = _run_cmd(sim_cmd, timeout=cfg.sim_timeout, log_path=log_path, env=env)
+    rc, out, terminated_after_complete = _run_isaac_chunk_subprocess(
+        sim_cmd,
+        chunk_path=chunk_path,
+        log_path=log_path,
+        env=env,
+        timeout=cfg.sim_timeout,
+        shutdown_grace_s=cfg.sim_shutdown_grace_s,
+    )
 
     results_path = chunk_path.replace(".json", "_results.json")
     if results_path == chunk_path:
@@ -606,23 +774,30 @@ def run_sim_worker(
 
     payload["elapsed_s"] = round(time.time() - t0, 1)
     payload["gpu_id"] = gpu_id
+    payload["terminated_after_complete"] = terminated_after_complete
     return payload
 
 
+def _worker_counts_by_gpu(total_workers: int, gpu_ids: tuple[int, ...]) -> dict[int, int]:
+    """Distribute total workers across GPUs; lower-indexed GPUs receive the remainder."""
+    gpus = list(gpu_ids)
+    if total_workers < 1:
+        raise ValueError("total_workers must be >= 1")
+    if not gpus:
+        raise ValueError("gpu_ids must not be empty")
+    base, rem = divmod(total_workers, len(gpus))
+    return {gpu: base + (1 if gi < rem else 0) for gi, gpu in enumerate(gpus)}
+
+
 def _assign_chunks_to_gpus(n_chunks: int, gpu_ids: tuple[int, ...]) -> list[int]:
-    """chunk index -> gpu_id (contiguous blocks per GPU)."""
+    """chunk index -> gpu_id (contiguous blocks; lower GPU IDs receive remainder)."""
     if n_chunks <= 0:
         return []
-    gpus = list(gpu_ids)
+    worker_counts = _worker_counts_by_gpu(n_chunks, gpu_ids)
     mapping: list[int] = []
-    base, rem = divmod(n_chunks, len(gpus))
-    idx = 0
-    for gi, gpu in enumerate(gpus):
-        count = base + (1 if gi < rem else 0)
+    for gpu in gpu_ids:
+        count = worker_counts[gpu]
         mapping.extend([gpu] * count)
-        idx += count
-    while len(mapping) < n_chunks:
-        mapping.append(gpus[len(mapping) % len(gpus)])
     return mapping[:n_chunks]
 
 
@@ -739,7 +914,7 @@ def run_sim_phase(
     if cfg.worker_start_barrier:
         _reset_worker_start_barrier(cfg.outdir, round_idx)
 
-    n_workers = len(cfg.sim_gpu_ids) * cfg.sim_per_gpu
+    n_workers = cfg.sim_workers
     chunks = split_tasks_into_chunks(tasks, n_workers)
     chunk_dir = os.path.join(cfg.outdir, "sim_logs", round_tag(round_idx), "chunks")
     os.makedirs(chunk_dir, exist_ok=True)
@@ -773,12 +948,15 @@ def run_sim_phase(
         chunk_paths.append(cpath)
 
     gpu_for_chunk = _assign_chunks_to_gpus(len(chunk_paths), cfg.sim_gpu_ids)
+    worker_counts = _worker_counts_by_gpu(len(chunk_paths), cfg.sim_gpu_ids)
     stagger_s = cfg.same_gpu_stagger_s
     cfg_dict = asdict(cfg)
 
     print(
         f"  Sim: {batch_total} tasks → {len(chunk_paths)} chunks "
-        f"({len(cfg.sim_gpu_ids)} GPU × {cfg.sim_per_gpu} workers)"
+        f"({cfg.sim_workers} total workers; "
+        + ", ".join(f"GPU{gpu}:{worker_counts[gpu]}" for gpu in cfg.sim_gpu_ids)
+        + ")"
         + (
             "; early-stop on candidate success"
             if cfg.early_stop_on_candidate_success
@@ -788,7 +966,7 @@ def run_sim_phase(
     if stagger_s > 0:
         print(
             f"  Same-GPU stagger: {stagger_s:.0f}s between Isaac launches on one GPU "
-            f"(per-GPU process pools + isolated kit cache)",
+            f"(per-GPU worker caps + isolated kit cache)",
             flush=True,
         )
     if cfg.isaac_startup_slots_per_gpu > 0:
@@ -837,8 +1015,9 @@ def run_sim_phase(
     executors: dict[int, ProcessPoolExecutor] = {}
     try:
         executors = {
-            gpu: ProcessPoolExecutor(max_workers=cfg.sim_per_gpu)
+            gpu: ProcessPoolExecutor(max_workers=worker_counts[gpu])
             for gpu in cfg.sim_gpu_ids
+            if worker_counts[gpu] > 0
         }
         futures: dict = {}
         chunk_attempts = [0] * len(chunk_paths)
@@ -1015,13 +1194,16 @@ def auto_refill_pool(
     *,
     sim_complete: bool,
 ) -> bool:
-    threshold = compute_median_success_threshold(cfg.merged_dir)
+    threshold = cfg.pool_success_threshold
     refill_targets = [
         obj_id
         for obj_id, _, _ in select_target_objects(cfg.merged_dir, threshold)
     ]
-    print(f"\n🔄 Pool exhausted — auto refill (success_threshold=median={threshold})")
-    print(f"   refill {len(refill_targets)} object(s) → {cfg.pool_dir}")
+    print(f"\n🔄 Pool exhausted — auto refill (success_threshold={threshold})")
+    print(
+        f"   refill {len(refill_targets)} object(s) → {cfg.pool_dir}  "
+        f"gen_mode={cfg.pool_gen_mode}  target={cfg.pool_target}",
+    )
     cmd = [
         cfg.python_bin, GEN_POOL_SCRIPT,
         "--merged-dir", cfg.merged_dir,
@@ -1030,7 +1212,10 @@ def auto_refill_pool(
         "--target", str(cfg.pool_target),
         "--force",
         "--score-threshold", str(cfg.score_threshold),
+        "--gen-mode", cfg.pool_gen_mode,
     ]
+    if cfg.pool_gen_mode in ("anchored", "mixed"):
+        cmd.extend(["--min-merged-success", str(cfg.pool_min_merged_success)])
     if cfg.no_rotation:
         pass  # default no-rotation in gen script
     else:
@@ -1240,7 +1425,22 @@ def main():
     parser.add_argument("--max-rounds", type=int, default=1, help="本次最多跑几轮")
     parser.add_argument("--resume", action="store_true", help="从 state.json 的 round 续跑")
     parser.add_argument("--sim-gpu-ids", default="0")
-    parser.add_argument("--sim-per-gpu", type=int, default=1)
+    parser.add_argument(
+        "--sim-workers",
+        type=int,
+        default=None,
+        help=(
+            "总 Isaac worker 数；按 --sim-gpu-ids 顺序尽量平分，余数给前面的 GPU "
+            "(例如 15 workers on 0,1 => GPU0:8 GPU1:7)"
+        ),
+    )
+    parser.add_argument(
+        "--sim-per-gpu",
+        dest="sim_workers_legacy",
+        type=int,
+        default=None,
+        help="兼容旧参数名；现在表示总 worker 数，建议改用 --sim-workers",
+    )
     parser.add_argument(
         "--same-gpu-stagger-s",
         type=float,
@@ -1277,6 +1477,12 @@ def main():
         help="--worker-start-barrier 等待所有 worker ready 的超时秒数 (默认 600)",
     )
     parser.add_argument("--sim-timeout", type=int, default=7200, help="单个 worker chunk 超时秒")
+    parser.add_argument(
+        "--sim-shutdown-grace-s",
+        type=float,
+        default=SIM_SHUTDOWN_GRACE_S,
+        help="chunk 全部写盘后，等待 Isaac 正常退出的秒数；超时则 kill 进程组 (默认 60)",
+    )
     parser.add_argument("--headless", action="store_true", default=True)
     parser.add_argument("--object-scale", type=float, default=1.0)
     parser.add_argument("--plan-seed", type=int, default=None)
@@ -1293,7 +1499,25 @@ def main():
         help="merged 内成功数 ≥ N 的物体本轮规划 prob=0（读 merged n_successful；默认不限制）",
     )
     parser.add_argument("--pool-target", type=int, default=50, help="auto-refill 时每物体 target")
+    parser.add_argument(
+        "--pool-success-threshold",
+        type=int,
+        default=None,
+        help="auto-refill 时 batch_gen 的 --success-threshold（默认=--max-success-per-object，否则 20）",
+    )
     parser.add_argument("--score-threshold", type=float, default=70.0)
+    parser.add_argument(
+        "--pool-gen-mode",
+        choices=("raycast", "anchored", "mixed"),
+        default="raycast",
+        help="auto-refill 时调用 batch_gen_candidates_pool 的 --gen-mode",
+    )
+    parser.add_argument(
+        "--pool-min-merged-success",
+        type=int,
+        default=1,
+        help="auto-refill 且 --pool-gen-mode anchored/mixed 时传给 batch_gen 的 --min-merged-success",
+    )
     parser.add_argument("--no-auto-refill", action="store_true")
     parser.add_argument("--rotation", action="store_true")
     parser.add_argument(
@@ -1327,8 +1551,13 @@ def main():
     if not sim_gpu_ids:
         print("❌ --sim-gpu-ids 为空")
         sys.exit(1)
-    if args.sim_per_gpu < 1:
-        print("❌ --sim-per-gpu 须 >= 1")
+    sim_workers = args.sim_workers
+    if sim_workers is None:
+        sim_workers = args.sim_workers_legacy
+    if sim_workers is None:
+        sim_workers = len(sim_gpu_ids)
+    if sim_workers < 1:
+        print("❌ --sim-workers 须 >= 1")
         sys.exit(1)
     if args.isaac_startup_slots_per_gpu < 0:
         print("❌ --isaac-startup-slots-per-gpu 须 >= 0")
@@ -1353,6 +1582,26 @@ def main():
     if args.max_success_per_object is not None and args.max_success_per_object < 0:
         print("❌ --max-success-per-object 须 >= 0")
         sys.exit(1)
+    if args.pool_success_threshold is not None and args.pool_success_threshold < 0:
+        print("❌ --pool-success-threshold 须 >= 0")
+        sys.exit(1)
+    if args.pool_min_merged_success < 0:
+        print("❌ --pool-min-merged-success 须 >= 0")
+        sys.exit(1)
+    if args.sim_shutdown_grace_s < 0:
+        print("❌ --sim-shutdown-grace-s 须 >= 0")
+        sys.exit(1)
+
+    state_path = os.path.join(outdir, "state.json")
+    state = _load_state(state_path) if args.resume else {"round": 0, "objects": {}}
+    max_success_per_object, pool_success_threshold = resolve_sim_success_thresholds(
+        max_success_cli=args.max_success_per_object,
+        pool_success_cli=args.pool_success_threshold,
+        state=state,
+        resume=args.resume,
+    )
+    state["max_success_per_object"] = max_success_per_object
+    state["pool_success_threshold"] = pool_success_threshold
 
     cfg = PoolSimConfig(
         outdir=outdir,
@@ -1361,10 +1610,11 @@ def main():
         headless=args.headless,
         isaac_python=isaac_py,
         sim_timeout=args.sim_timeout,
+        sim_shutdown_grace_s=args.sim_shutdown_grace_s,
         object_scale=args.object_scale,
         python_bin=args.python_bin,
         sim_gpu_ids=sim_gpu_ids,
-        sim_per_gpu=args.sim_per_gpu,
+        sim_workers=sim_workers,
         same_gpu_stagger_s=args.same_gpu_stagger_s,
         isaac_startup_slots_per_gpu=args.isaac_startup_slots_per_gpu,
         merge_deduplicate=args.merge_deduplicate,
@@ -1372,19 +1622,19 @@ def main():
         slots_per_round=args.slots_per_round,
         plan_seed=args.plan_seed,
         equal_object_prob=args.equal_object_prob,
-        max_success_per_object=args.max_success_per_object,
+        max_success_per_object=max_success_per_object,
         pool_target=args.pool_target,
         auto_refill=not args.no_auto_refill,
+        pool_success_threshold=pool_success_threshold,
         score_threshold=args.score_threshold,
+        pool_gen_mode=args.pool_gen_mode,
+        pool_min_merged_success=args.pool_min_merged_success,
         no_rotation=not args.rotation,
         early_stop_on_candidate_success=not args.no_early_stop_yaw_on_success,
         worker_start_barrier=args.worker_start_barrier,
         startup_ready_timeout_s=args.startup_ready_timeout_s,
         strict_gpu_mask=args.strict_gpu_mask,
     )
-
-    state_path = os.path.join(outdir, "state.json")
-    state = _load_state(state_path) if args.resume else {"round": 0, "objects": {}}
 
     print(f"Out: {outdir}")
     print(f"Pool: {pool_dir}")
@@ -1396,14 +1646,22 @@ def main():
     print(
         f"Object sampling: {'equal' if args.equal_object_prob else 'weighted (1/(success+1))'}"
         + (
-            f"  max_success_per_object={args.max_success_per_object}"
-            if args.max_success_per_object is not None
+            f"  max_success_per_object={cfg.max_success_per_object}"
+            if cfg.max_success_per_object is not None
             else ""
         ),
     )
     print(
-        f"Sim: {len(sim_gpu_ids)} GPU × {args.sim_per_gpu}/GPU = "
-        f"{len(sim_gpu_ids) * args.sim_per_gpu} workers",
+        f"Auto-refill: {'on' if cfg.auto_refill else 'off'}  "
+        f"pool_success_threshold={cfg.pool_success_threshold}  "
+        f"pool_target={cfg.pool_target}  pool_gen_mode={cfg.pool_gen_mode}",
+    )
+    print(
+        f"Sim: {sim_workers} total workers across {len(sim_gpu_ids)} GPU(s): "
+        + ", ".join(
+            f"GPU{gpu}:{count}"
+            for gpu, count in _worker_counts_by_gpu(sim_workers, sim_gpu_ids).items()
+        ),
     )
     if cfg.strict_gpu_mask:
         print(
@@ -1419,8 +1677,11 @@ def main():
         meta = run_one_round(cfg, r, resume=args.resume)
         if meta.get("sync_ok", False):
             state["round"] = r + 1
+            state["max_success_per_object"] = cfg.max_success_per_object
+            state["pool_success_threshold"] = cfg.pool_success_threshold
             _save_state(state_path, state)
             rounds_advanced += 1
+            maybe_bump_success_tiers(cfg, state, state_path)
         else:
             state["round"] = r
             _save_state(state_path, state)
@@ -1438,8 +1699,9 @@ def main():
                 flush=True,
             )
 
+        refill_ok = False
         if meta["pool_exhausted"] and cfg.auto_refill:
-            auto_refill_pool(
+            refill_ok = auto_refill_pool(
                 cfg,
                 r,
                 sim_complete=bool(meta.get("sim_complete", False)),
@@ -1448,6 +1710,13 @@ def main():
             print("⚠️  Pool exhausted (--no-auto-refill); stop after this round")
 
         if meta["slots_planned"] == 0:
+            if refill_ok and rounds_advanced < args.max_rounds:
+                print(
+                    "   No slots were planned, but auto-refill succeeded; "
+                    "continuing to next round with the refreshed pool",
+                    flush=True,
+                )
+                continue
             print("⚠️  No slots planned (no eligible candidates); stopping")
             break
 

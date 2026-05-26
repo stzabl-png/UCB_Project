@@ -81,6 +81,9 @@ STRUCTURED_APPROACH_Z_MAX_COS = 0.3    # 与 sample_approach_dirs 一致：禁�
 STRUCTURED_LOCAL_THICKNESS_MIN = 0.02  # c₁ 切向最大厚度 < 2cm → 跳过
 SAMPLING_METHOD_RAYCAST = 'raycast_scored_v2'
 SAMPLING_METHOD_STRUCTURED = 'hp_contact_pair_v1'
+SAMPLING_METHOD_ANCHORED = 'anchored_contact_v2'
+SAMPLING_METHOD_MIXED = 'mixed_anchored_raycast_v1'
+MIXED_ANCHORED_FRACTION = 0.5
 
 
 def sample_approach_dirs(n: int, z_max_cos: float = 0.3) -> list:
@@ -977,6 +980,142 @@ def generate_candidates_iterative(
     return selected
 
 
+def split_mixed_targets(
+    target_n: int,
+    anchored_fraction: float = MIXED_ANCHORED_FRACTION,
+) -> tuple[int, int]:
+    """Split pool target into (n_anchored, n_raycast), ~50/50 for exploration."""
+    if target_n <= 0:
+        return 0, 0
+    n_anchor = int(round(target_n * anchored_fraction))
+    n_anchor = max(0, min(target_n, n_anchor))
+    if target_n >= 2:
+        if n_anchor == 0:
+            n_anchor = 1
+        if n_anchor >= target_n:
+            n_anchor = target_n - 1
+    return n_anchor, target_n - n_anchor
+
+
+def generate_mixed_candidates(
+    mesh,
+    mesh_rc,
+    hp_name,
+    hp_dir,
+    *,
+    anchor_merged_path: str,
+    target_n: int,
+    score_threshold: float,
+    require_hp_contact: bool,
+    hp_pc,
+    hp_labels,
+    anchor_seed: int | None = None,
+    anchor_max_rot_deg: float = 15.0,
+    anchor_max_tip_jitter_mm: float = 8.0,
+    anchor_max_approach_jitter_mm: float = 1.0,
+    anchor_max_retry_per_slot: int | None = None,
+    structured: bool = False,
+    anchored_fraction: float = MIXED_ANCHORED_FRACTION,
+) -> tuple[list[dict], dict]:
+    """
+    Per-object pool: ~50% anchored (merged successes) + ~50% raycast for diversity.
+    If anchored is short, raycast target is increased to fill the pool.
+    """
+    from anchor_grasp_gen import generate_anchored_candidates
+
+    n_anchor_target, n_raycast_target = split_mixed_targets(target_n, anchored_fraction)
+    meta: dict = {
+        "sampling_method": SAMPLING_METHOD_MIXED,
+        "target_n": target_n,
+        "anchored_fraction": anchored_fraction,
+        "n_anchored_target": n_anchor_target,
+        "n_raycast_target": n_raycast_target,
+        "score_threshold": score_threshold,
+    }
+
+    anchored: list[dict] = []
+    anchor_meta: dict = {}
+    if n_anchor_target > 0 and anchor_merged_path and os.path.isfile(anchor_merged_path):
+        anchored, anchor_meta = generate_anchored_candidates(
+            mesh,
+            mesh_rc,
+            anchor_merged_path,
+            target_n=n_anchor_target,
+            score_threshold=score_threshold,
+            require_hp_contact=require_hp_contact,
+            hp_pc=hp_pc,
+            hp_labels=hp_labels,
+            seed=anchor_seed,
+            max_rot_deg=anchor_max_rot_deg,
+            max_tip_jitter_mm=anchor_max_tip_jitter_mm,
+            max_approach_jitter_mm=anchor_max_approach_jitter_mm,
+            max_retry_per_slot=anchor_max_retry_per_slot,
+        )
+        meta["anchor_gen"] = anchor_meta
+    elif n_anchor_target > 0:
+        meta["anchor_gen"] = {"error": "missing_anchor_merged_path"}
+
+    short_anchor = max(0, n_anchor_target - len(anchored))
+    n_raycast_run = n_raycast_target + short_anchor
+
+    raycast: list[dict] = []
+    if n_raycast_run > 0:
+        if structured:
+            raise ValueError("mixed mode does not support structured contacts")
+        raycast = generate_candidates_iterative(
+            mesh,
+            hp_name,
+            hp_dir=hp_dir,
+            mesh_rc=mesh_rc,
+            target_n=n_raycast_run,
+            score_threshold=score_threshold,
+            require_hp_contact=require_hp_contact,
+            hp_pc=hp_pc,
+            hp_labels=hp_labels,
+            structured=False,
+        )
+
+    for c in anchored:
+        c["pool_source"] = "anchored"
+        base = c.get("name", "c")
+        c["name"] = f"mixed_a_{base}"
+    for c in raycast:
+        c["pool_source"] = "raycast"
+        base = c.get("name", "c")
+        c["name"] = f"mixed_r_{base}"
+
+    selected_a = sorted(anchored, key=lambda x: x["score"], reverse=True)[:n_anchor_target]
+    raycast_sorted = sorted(raycast, key=lambda x: x["score"], reverse=True)
+    merged = list(selected_a)
+    raycast_slots = target_n - len(merged)
+    n_raycast_taken = 0
+    if raycast_slots > 0:
+        take_r = raycast_sorted[:raycast_slots]
+        n_raycast_taken = len(take_r)
+        merged.extend(take_r)
+    if len(merged) < target_n:
+        overflow = sorted(
+            anchored[n_anchor_target:] + raycast_sorted[n_raycast_taken:],
+            key=lambda x: x["score"],
+            reverse=True,
+        )
+        merged.extend(overflow[: target_n - len(merged)])
+    merged.sort(key=lambda x: x["score"], reverse=True)
+    merged = merged[:target_n]
+
+    meta.update({
+        "n_anchored_selected": len(selected_a),
+        "n_raycast_selected": n_raycast_taken,
+        "n_anchored_in_pool": sum(1 for c in merged if c.get("pool_source") == "anchored"),
+        "n_raycast_in_pool": sum(1 for c in merged if c.get("pool_source") == "raycast"),
+        "n_pool": len(merged),
+    })
+    if merged:
+        meta["score_min"] = float(min(c["score"] for c in merged))
+        meta["score_max"] = float(max(c["score"] for c in merged))
+    return merged, meta
+
+
 def save_candidates_hdf5(
     candidates,
     obj_id,
@@ -990,6 +1129,7 @@ def save_candidates_hdf5(
     hp_scale_applied: bool = False,
     hp_path: str | None = None,
     sampling_method: str = SAMPLING_METHOD_RAYCAST,
+    extra_metadata: dict | None = None,
 ):
     os.makedirs(output_dir, exist_ok=True)
     path = os.path.join(output_dir, f'{obj_id}_grasp.hdf5')
@@ -1022,6 +1162,12 @@ def save_candidates_hdf5(
         m.attrs['coordinate_frame'] = 'metric_scaled' if apply_scale_to_mesh else 'raw_unscaled'
         if hp_path:
             m.attrs['hp_path'] = os.path.abspath(hp_path)
+        if extra_metadata:
+            for key, val in extra_metadata.items():
+                if isinstance(val, (str, int, float, bool)):
+                    m.attrs[key] = val
+                elif val is not None:
+                    m.attrs[key] = str(val)
         cg = f.create_group('candidates')
         cg.attrs['n_candidates'] = len(candidates)
         for i, c in enumerate(candidates):
@@ -1034,6 +1180,8 @@ def save_candidates_hdf5(
             ci.attrs['gripper_width'] = c['gripper_width']
             ci.attrs['cross_section_width'] = c.get('cross_section_width', 0)
             ci.attrs['d_near'] = c.get('d_near', -1.0)
+            if c.get('pool_source'):
+                ci.attrs['pool_source'] = c['pool_source']
             write_mesh_prerotation_hdf5(ci, c.get('mesh_prerotation', _prerot))
 
         if candidates:
@@ -1114,6 +1262,43 @@ def visualize_candidates(mesh, candidates, obj_id):
     vis.destroy_window()
 
 
+def _load_sampler_mesh(mesh_path: str) -> trimesh.Trimesh:
+    """Load mesh for sampling; tolerate broken PLY visuals / Scene dumps."""
+    last_err: Exception | None = None
+    for kwargs in (
+        {"force": "mesh", "process": False, "skip_materials": True},
+        {"force": "mesh", "process": False},
+        {"process": False},
+    ):
+        try:
+            loaded = trimesh.load(mesh_path, **kwargs)
+            if isinstance(loaded, trimesh.Scene):
+                geoms = [g for g in loaded.dump() if isinstance(g, trimesh.Trimesh)]
+                if not geoms:
+                    raise ValueError("empty scene mesh")
+                loaded = trimesh.util.concatenate(geoms)
+            if not isinstance(loaded, trimesh.Trimesh):
+                raise TypeError(f"expected Trimesh, got {type(loaded)}")
+            return loaded
+        except Exception as e:
+            last_err = e
+    raise RuntimeError(f"mesh load failed: {mesh_path}") from last_err
+
+
+def _safe_mesh_repair(mesh: trimesh.Trimesh, label: str = "mesh") -> None:
+    """Best-effort watertight repair; trimesh can crash on huge/broken topology."""
+    try:
+        if not mesh.is_watertight:
+            trimesh.repair.fill_holes(mesh)
+            trimesh.repair.fix_normals(mesh)
+    except (IndexError, ValueError, MemoryError, RuntimeError) as e:
+        print(f"  ⚠️  skip watertight repair ({label}): {e}")
+        try:
+            trimesh.repair.fix_normals(mesh)
+        except Exception:
+            pass
+
+
 def process_one_object(
     obj_id,
     mesh_path,
@@ -1132,6 +1317,14 @@ def process_one_object(
     require_hp_contact=REQUIRE_HP_CONTACT_DEFAULT,
     use_legacy_assets: bool = False,
     structured: bool = False,
+    sampling_mode: str = SAMPLING_METHOD_RAYCAST,
+    anchor_merged_path: str | None = None,
+    anchor_seed: int | None = None,
+    anchor_max_rot_deg: float = 15.0,
+    anchor_max_tip_jitter_mm: float = 8.0,
+    anchor_max_approach_jitter_mm: float = 1.0,
+    anchor_max_retry_per_slot: int | None = None,
+    write_anchor_meta: bool = False,
 ):
     """
     为单个物体生成 grasp candidates HDF5。
@@ -1149,7 +1342,11 @@ def process_one_object(
     if not os.path.exists(mesh_path):
         return None, 'no_mesh'
 
-    mesh = trimesh.load(mesh_path, force='mesh', process=False)
+    try:
+        mesh = _load_sampler_mesh(mesh_path)
+    except Exception as e:
+        print(f'  ❌ mesh load failed: {e}')
+        return None, 'mesh_load_failed'
     hp_scale_applied = False
     if apply_scale_to_mesh and abs(scale_factor - 1.0) > 1e-8:
         mesh.vertices = mesh.vertices * float(scale_factor)
@@ -1199,9 +1396,7 @@ def process_one_object(
     else:
         print(f'     [no rotation: rotated SAM3D / identity frame]')
 
-    if not mesh.is_watertight:
-        trimesh.repair.fill_holes(mesh)
-        trimesh.repair.fix_normals(mesh)
+    _safe_mesh_repair(mesh, "mesh")
 
     ext = mesh.bounding_box.extents * 100
     print(f'  尺寸: {ext[0]:.1f}×{ext[1]:.1f}×{ext[2]:.1f} cm  ({len(mesh.faces):,} 面)')
@@ -1211,8 +1406,7 @@ def process_one_object(
     if len(mesh.faces) > SIMPLIFY_TARGET * 2:
         t_s = time.time()
         mesh_rc = mesh.simplify_quadric_decimation(face_count=SIMPLIFY_TARGET)
-        if not mesh_rc.is_watertight:
-            trimesh.repair.fix_normals(mesh_rc)
+        _safe_mesh_repair(mesh_rc, "mesh_rc")
         print(f'  → 简化为 {len(mesh_rc.faces):,} 面 (raycast用, {time.time()-t_s:.2f}s)')
 
     if require_hp_contact:
@@ -1223,18 +1417,102 @@ def process_one_object(
             f'({STRUCTURED_N_TANGENT_DIRS} dirs, minW={STRUCTURED_MIN_WIDTH_HARD*100:.0f}cm, '
             f'inward-normal>={STRUCTURED_NORMAL_INWARD_COS})'
         )
-    candidates = generate_candidates_iterative(
-        mesh, hp_name, hp_dir=hp_dir, mesh_rc=mesh_rc,
-        target_n=target_n, score_threshold=score_threshold,
-        require_hp_contact=require_hp_contact,
-        hp_pc=hp_pc, hp_labels=hp_labels,
-        structured=structured,
-    )
 
-    sampling_method = (
-        SAMPLING_METHOD_STRUCTURED if structured else SAMPLING_METHOD_RAYCAST
-    )
+    anchor_meta = None
+    mix_meta = None
+    if sampling_mode == SAMPLING_METHOD_MIXED:
+        if not anchor_merged_path or not os.path.isfile(anchor_merged_path):
+            print(f'  ❌ mixed mode requires --anchor-merged-path ({anchor_merged_path})')
+            return None, 'no_anchors'
+        if structured:
+            print('  ❌ mixed mode does not support --structured-contacts')
+            return None, 'bad_args'
+        n_a, n_r = split_mixed_targets(target_n)
+        print(
+            f'  [mixed] merged={anchor_merged_path}  target={target_n}  '
+            f'anchored={n_a} raycast={n_r}  score≥{score_threshold}  seed={anchor_seed}',
+        )
+        candidates, mix_meta = generate_mixed_candidates(
+            mesh,
+            mesh_rc,
+            hp_name,
+            hp_dir,
+            anchor_merged_path=anchor_merged_path,
+            target_n=target_n,
+            score_threshold=score_threshold,
+            require_hp_contact=require_hp_contact,
+            hp_pc=hp_pc,
+            hp_labels=hp_labels,
+            anchor_seed=anchor_seed,
+            anchor_max_rot_deg=anchor_max_rot_deg,
+            anchor_max_tip_jitter_mm=anchor_max_tip_jitter_mm,
+            anchor_max_approach_jitter_mm=anchor_max_approach_jitter_mm,
+            anchor_max_retry_per_slot=anchor_max_retry_per_slot,
+            structured=structured,
+        )
+        if mix_meta:
+            print(
+                f'     in_pool anchored={mix_meta.get("n_anchored_in_pool", "?")}  '
+                f'raycast={mix_meta.get("n_raycast_in_pool", "?")}  '
+                f'score {mix_meta.get("score_max", "?")}~{mix_meta.get("score_min", "?")}',
+            )
+        sampling_method = SAMPLING_METHOD_MIXED
+        anchor_meta = mix_meta
+    elif sampling_mode == SAMPLING_METHOD_ANCHORED:
+        if not anchor_merged_path or not os.path.isfile(anchor_merged_path):
+            print(f'  ❌ anchored mode requires --anchor-merged-path ({anchor_merged_path})')
+            return None, 'no_anchors'
+        from anchor_grasp_gen import generate_anchored_candidates
+
+        print(
+            f'  [anchored] merged={anchor_merged_path}  target={target_n}  '
+            f'score≥{score_threshold}  seed={anchor_seed}'
+        )
+        candidates, anchor_meta = generate_anchored_candidates(
+            mesh,
+            mesh_rc,
+            anchor_merged_path,
+            target_n=target_n,
+            score_threshold=score_threshold,
+            require_hp_contact=require_hp_contact,
+            hp_pc=hp_pc,
+            hp_labels=hp_labels,
+            seed=anchor_seed,
+            max_rot_deg=anchor_max_rot_deg,
+            max_tip_jitter_mm=anchor_max_tip_jitter_mm,
+            max_approach_jitter_mm=anchor_max_approach_jitter_mm,
+            max_retry_per_slot=anchor_max_retry_per_slot,
+        )
+        if anchor_meta:
+            print(
+                f'     anchors={anchor_meta.get("n_anchors", 0)}  '
+                f'filter={anchor_meta.get("anchor_filter_used", "?")}  '
+                f'retry/slot={anchor_meta.get("max_retry_per_slot", "?")}  '
+                f'pool={anchor_meta.get("n_pool", "?")}  '
+                f'≥{score_threshold:.0f}:{anchor_meta.get("n_high_quality", "?")}/'
+                f'{anchor_meta.get("n_accepted", 0)}  '
+                f'score {anchor_meta.get("score_max", "?")}~{anchor_meta.get("score_min", "?")}'
+            )
+        sampling_method = SAMPLING_METHOD_ANCHORED
+    else:
+        candidates = generate_candidates_iterative(
+            mesh, hp_name, hp_dir=hp_dir, mesh_rc=mesh_rc,
+            target_n=target_n, score_threshold=score_threshold,
+            require_hp_contact=require_hp_contact,
+            hp_pc=hp_pc, hp_labels=hp_labels,
+            structured=structured,
+        )
+        sampling_method = (
+            SAMPLING_METHOD_STRUCTURED if structured else SAMPLING_METHOD_RAYCAST
+        )
     if candidates:
+        extra_md = None
+        if sampling_method == SAMPLING_METHOD_MIXED and mix_meta:
+            extra_md = {
+                "mixed_anchored_fraction": mix_meta.get("anchored_fraction", MIXED_ANCHORED_FRACTION),
+                "n_anchored_in_pool": mix_meta.get("n_anchored_in_pool", 0),
+                "n_raycast_in_pool": mix_meta.get("n_raycast_in_pool", 0),
+            }
         path = save_candidates_hdf5(
             candidates, obj_id, mesh_path, output_dir,
             no_rotation=force_no_rot, dataset=dataset,
@@ -1243,13 +1521,38 @@ def process_one_object(
             hp_scale_applied=hp_scale_applied,
             hp_path=hp_path,
             sampling_method=sampling_method,
+            extra_metadata=extra_md,
         )
-        print(f'  ✅ → {os.path.basename(path)} ({len(candidates)} 候选)')
+        if write_anchor_meta and anchor_meta and sampling_method in (
+            SAMPLING_METHOD_ANCHORED,
+            SAMPLING_METHOD_MIXED,
+        ):
+            try:
+                import json
+                sidecar = path.replace('.hdf5', '_anchor_meta.json')
+                with open(sidecar, 'w') as mf:
+                    json.dump(anchor_meta, mf, indent=2, default=str)
+            except Exception:
+                pass
+        n_hi = sum(1 for c in candidates if c["score"] >= score_threshold)
+        smin = min(c["score"] for c in candidates)
+        smax = max(c["score"] for c in candidates)
+        print(
+            f'  ✅ → {os.path.basename(path)} ({len(candidates)} 候选)  '
+            f'≥{score_threshold:.0f}:{n_hi}  score {smax:.1f}~{smin:.1f}',
+        )
         return path, None
 
-    open(skip_path, 'w').write(
-        f'SKIP: {max_sampler_batches(target_n)} sampler batches exhausted, 0 candidates >= {score_threshold}\n'
-    )
+    if sampling_mode == SAMPLING_METHOD_ANCHORED:
+        skip_reason = 'anchored: no candidates accepted'
+    elif sampling_mode == SAMPLING_METHOD_MIXED:
+        skip_reason = 'mixed: no candidates accepted'
+    else:
+        skip_reason = (
+            f'{max_sampler_batches(target_n)} sampler batches exhausted, '
+            f'0 candidates >= {score_threshold}'
+        )
+    open(skip_path, 'w').write(f'SKIP: {skip_reason}\n')
     print(f'  ⬛ → {obj_id}.skip (难抓物体，已标记)')
     return None, 'no_candidates'
 
@@ -1284,6 +1587,52 @@ def main():
         '--structured-contacts',
         action='store_true',
         help='HP 表面 c₁ + 切向搜索 c₂（硬约束 antipodal/宽度/弦）再打分；默认 raycast 内部采样',
+    )
+    parser.add_argument(
+        '--sampling-mode',
+        choices=(
+            SAMPLING_METHOD_RAYCAST,
+            SAMPLING_METHOD_STRUCTURED,
+            SAMPLING_METHOD_ANCHORED,
+            SAMPLING_METHOD_MIXED,
+        ),
+        default=SAMPLING_METHOD_RAYCAST,
+        help=(
+            'raycast_scored_v2: default iterative sampler; '
+            'hp_contact_pair_v1: use with --structured-contacts; '
+            'anchored_contact_v2: perturb merged successful grasps; '
+            'mixed_anchored_raycast_v1: ~50%% anchored + ~50%% raycast'
+        ),
+    )
+    parser.add_argument(
+        '--anchor-merged-path',
+        default=None,
+        help='merged {obj}_robot_gt_merged.hdf5 (required for --sampling-mode anchored)',
+    )
+    parser.add_argument(
+        '--anchor-seed',
+        type=int,
+        default=None,
+        help='anchored/mixed 扰动随机种子；默认不固定，每次调用使用系统熵',
+    )
+    parser.add_argument('--anchor-max-rot-deg', type=float, default=15.0)
+    parser.add_argument('--anchor-max-tip-jitter-mm', type=float, default=8.0)
+    parser.add_argument(
+        '--anchor-max-approach-jitter-mm',
+        type=float,
+        default=1.0,
+        help='沿 approach 方向扰动 grasp_point 的最大距离；默认 1mm',
+    )
+    parser.add_argument(
+        '--anchor-max-retry-per-slot',
+        type=int,
+        default=None,
+        help='每工位 retry 上限；默认 (100×target)/工位数（通常每工位 100 次）',
+    )
+    parser.add_argument(
+        '--write-anchor-meta',
+        action='store_true',
+        help='写入 {obj}_grasp_anchor_meta.json（调试用；sim 不读）',
     )
     args = parser.parse_args()
 
@@ -1341,11 +1690,27 @@ def main():
         mode = f'legacy obj_meshes/{args.dataset or "oakink"}'
     else:
         mode = f'rotated_mesh + train_fp_rotated ({args.dataset or "oakink"})'
-    sample_mode = (
-        f'structured HP→c₂ (min {STRUCTURED_MIN_WIDTH_HARD*100:.0f}cm)'
-        if args.structured_contacts
-        else '50%HP + 50%rnd raycast'
-    )
+    if args.sampling_mode == SAMPLING_METHOD_ANCHORED:
+        sample_mode = 'anchored contact perturb (merged successes)'
+    elif args.sampling_mode == SAMPLING_METHOD_MIXED:
+        sample_mode = 'mixed ~50% anchored + ~50% raycast'
+    elif args.structured_contacts or args.sampling_mode == SAMPLING_METHOD_STRUCTURED:
+        sample_mode = f'structured HP→c₂ (min {STRUCTURED_MIN_WIDTH_HARD*100:.0f}cm)'
+    else:
+        sample_mode = '50%HP + 50%rnd raycast'
+    if args.structured_contacts and args.sampling_mode in (
+        SAMPLING_METHOD_ANCHORED,
+        SAMPLING_METHOD_MIXED,
+    ):
+        print('❌ --structured-contacts 与 anchored/mixed 不能同时使用')
+        return
+    if args.sampling_mode in (SAMPLING_METHOD_ANCHORED, SAMPLING_METHOD_MIXED):
+        if not args.anchor_merged_path:
+            print('❌ --sampling-mode anchored/mixed 需要 --anchor-merged-path')
+            return
+    eff_mode = args.sampling_mode
+    if args.structured_contacts:
+        eff_mode = SAMPLING_METHOD_STRUCTURED
     print('=' * 60)
     print(f'  Grasp Sampler v2 [{mode}] ({sample_mode})')
     print(f'  Target: {args.target} candidates ≥ {args.score_threshold} pts')
@@ -1388,6 +1753,14 @@ def main():
             require_hp_contact=not args.no_hp_contact_required,
             use_legacy_assets=args.legacy_assets,
             structured=args.structured_contacts,
+            sampling_mode=eff_mode,
+            anchor_merged_path=args.anchor_merged_path,
+            anchor_seed=args.anchor_seed,
+            anchor_max_rot_deg=args.anchor_max_rot_deg,
+            anchor_max_tip_jitter_mm=args.anchor_max_tip_jitter_mm,
+            anchor_max_approach_jitter_mm=args.anchor_max_approach_jitter_mm,
+            anchor_max_retry_per_slot=args.anchor_max_retry_per_slot,
+            write_anchor_meta=args.write_anchor_meta,
         )
         if reason == 'skip_marked':
             print(f' ⏭️ [SKIP标记] 已知难抓物体')
