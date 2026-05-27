@@ -201,6 +201,55 @@ def save_one(path: str, args: argparse.Namespace) -> str:
     return out_path
 
 
+def render_one_image(path: str, args: argparse.Namespace):
+    """Render one object overlay and return (obj_id, figure)."""
+
+    obj_id = obj_id_from_hdf5(path)
+    cands = load_candidates(path, top=args.top)
+    if not cands:
+        raise RuntimeError(f"no candidates in {path}")
+    pts = load_object_points(
+        obj_id,
+        condition_h5=args.condition_h5,
+        n_points=args.bg_points,
+        mesh_root=args.mesh_root,
+    )
+    if len(pts) > args.bg_points:
+        pts = _resample_rows(pts, args.bg_points)
+
+    fig = plt.figure(figsize=(8, 8), facecolor="#1a1a2e")
+    ax = fig.add_subplot(111, projection="3d", facecolor="#1a1a2e")
+    ax.scatter(
+        pts[:, 0],
+        pts[:, 1],
+        pts[:, 2],
+        c="#5ab4d4",
+        s=2.0,
+        alpha=0.35,
+        linewidths=0,
+        depthshade=False,
+    )
+    cmap = plt.get_cmap("hsv")
+    for i, cand in enumerate(cands):
+        draw_gripper(ax, cand, cmap(i / max(len(cands), 1))[:3], width_scale=args.width_scale)
+    _axis_equal(ax, pts)
+    ax.view_init(elev=args.elev, azim=args.azim)
+    ax.set_title(
+        f"{obj_id}  PDM candidates: {len(cands)}\n"
+        f"source={os.path.relpath(path, PROJ)}",
+        color="#ddd",
+        fontsize=10,
+    )
+    return obj_id, fig
+
+
+def save_fig_to_path(fig, out_path: str) -> str:
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+    fig.savefig(out_path, dpi=140, bbox_inches="tight", facecolor="#1a1a2e")
+    plt.close(fig)
+    return out_path
+
+
 def make_overview(image_paths: list[str], out_path: str, cols: int = 5) -> None:
     if not image_paths:
         return
@@ -238,11 +287,66 @@ def make_overview(image_paths: list[str], out_path: str, cols: int = 5) -> None:
     canvas.save(out_path)
 
 
+def make_overview_direct(files: list[str], args: argparse.Namespace, out_path: str) -> None:
+    """Render overview directly without writing per-object PNGs."""
+
+    if not files:
+        return
+    from PIL import Image, ImageDraw
+
+    tiles = []
+    tmp_dir = os.path.join(args.outdir, ".overview_tmp")
+    os.makedirs(tmp_dir, exist_ok=True)
+    try:
+        for path in files:
+            try:
+                obj_id, fig = render_one_image(path, args)
+                tmp_path = os.path.join(tmp_dir, f"{obj_id}.png")
+                fig.savefig(tmp_path, dpi=args.dpi, bbox_inches="tight", facecolor="#1a1a2e")
+                plt.close(fig)
+                img = Image.open(tmp_path).convert("RGB")
+                tiles.append((obj_id, img))
+            except Exception as exc:
+                print(f"  overview skip {path}: {type(exc).__name__}: {exc}")
+        if not tiles:
+            return
+        target_w = min(img.size[0] for _, img in tiles)
+        target_h = min(img.size[1] for _, img in tiles)
+        resized = []
+        for obj_id, img in tiles:
+            tile = img.resize((target_w, target_h))
+            draw = ImageDraw.Draw(tile)
+            draw.rectangle((0, 0, min(target_w, 260), 24), fill=(26, 26, 46))
+            draw.text((6, 5), obj_id, fill=(235, 235, 235))
+            resized.append(tile)
+        cols = max(1, int(args.overview_cols))
+        rows = (len(resized) + cols - 1) // cols
+        canvas = Image.new("RGB", (target_w * cols, target_h * rows), (26, 26, 46))
+        for i, img in enumerate(resized):
+            r, c = divmod(i, cols)
+            canvas.paste(img, (c * target_w, r * target_h))
+        os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+        canvas.save(out_path)
+    finally:
+        try:
+            for name in os.listdir(tmp_dir):
+                os.remove(os.path.join(tmp_dir, name))
+            os.rmdir(tmp_dir)
+        except OSError:
+            pass
+
+
 def visualize(args: argparse.Namespace) -> None:
     files = resolve_files(args)
     if not files:
         raise RuntimeError("no candidate files selected")
     print(f"Visualizing {len(files)} object(s)")
+    overview_path = os.path.join(args.outdir, args.overview_name)
+    if args.overview_only:
+        make_overview_direct(files, args, overview_path)
+        print(f"overview -> {overview_path}")
+        return
+
     outputs = []
     for i, path in enumerate(files, 1):
         try:
@@ -276,10 +380,25 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--overview", action="store_true", default=True)
     parser.add_argument("--no-overview", dest="overview", action="store_false")
+    parser.add_argument(
+        "--overview-only",
+        action="store_true",
+        default=None,
+        help="Only write overview.png, no per-object images. Defaults to true with --all.",
+    )
+    parser.add_argument(
+        "--write-individual",
+        dest="overview_only",
+        action="store_false",
+        help="Write per-object images as well as overview.",
+    )
     parser.add_argument("--overview-name", default="overview.png")
     parser.add_argument("--overview-cols", type=int, default=5)
-    return parser
+    args = parser.parse_args()
+    if args.overview_only is None:
+        args.overview_only = bool(args.all and not args.obj and not args.hdf5 and not args.random)
+    return args
 
 
 if __name__ == "__main__":
-    visualize(build_parser().parse_args())
+    visualize(build_parser())
