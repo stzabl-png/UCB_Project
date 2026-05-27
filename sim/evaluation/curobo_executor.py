@@ -45,6 +45,12 @@ PRE_GRASP_OFFSET = 0.15
 _CUROBO_MG = None
 
 
+def reset_motion_gen() -> None:
+    """Force cuRobo MotionGen rebuild after object/yaw/world changes."""
+    global _CUROBO_MG
+    _CUROBO_MG = None
+
+
 def make_transform(pos, quat_wxyz) -> np.ndarray:
     T = np.eye(4)
     r = Rotation.from_quat([quat_wxyz[1], quat_wxyz[2], quat_wxyz[3], quat_wxyz[0]])
@@ -487,6 +493,8 @@ def write_robot_gt_hdf5(
         f.attrs["executed_pose_frame"] = "object_mesh"
         f.attrs["executed_ee_frame"] = "panda_hand"
         f.attrs["sim_z_yaw_deg"] = scene.sim_z_yaw_deg
+        if execution.video_path:
+            f.attrs["video_path"] = execution.video_path
 
         cg = f.create_group("candidate_results")
         ci = cg.create_group("candidate_0")

@@ -20,8 +20,9 @@ def build_episode_record(
     policy_name: str,
     policy_output: PolicyOutput,
     execution: ExecutionResult,
+    video_path: str | None = None,
 ) -> dict[str, Any]:
-    return {
+    record = {
         "schema_version": 1,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "episode_id": scene.episode_id,
@@ -34,6 +35,11 @@ def build_episode_record(
         "policy_output": policy_output.to_dict(),
         "execution": execution.to_dict(),
     }
+    if video_path:
+        record["video_path"] = video_path
+    elif execution.video_path:
+        record["video_path"] = execution.video_path
+    return record
 
 
 def write_episode_json(record: dict[str, Any], result_dir: str) -> str:

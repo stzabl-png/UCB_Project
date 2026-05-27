@@ -59,6 +59,7 @@ from tools.infer_mesh_v6 import (  # noqa: E402
     load_triangle_mesh,
     obj_id_from_path,
     rescale_mesh_with_optional_json,
+    rescale_mesh_for_v6,
     sample_mesh_points,
 )
 
@@ -108,6 +109,9 @@ def output_hdf5_name(obj_id: str, z_yaw_deg: float | None) -> str:
 def prepare_mesh_item(
     mpath: Path,
     *,
+    obj_id_override: str | None,
+    dataset: str | None,
+    sam3d_rotated_mesh: bool,
     no_pre_rotate_x: bool,
     pre_rotate_x_deg: float,
     scale_mode: str,
@@ -121,23 +125,49 @@ def prepare_mesh_item(
     seed: int,
     index: int,
 ) -> dict:
-    oid = obj_id_from_path(mpath)
+    oid = obj_id_override or obj_id_from_path(mpath)
     mesh = load_triangle_mesh(mpath)
     pre_rot_R = None
+    if sam3d_rotated_mesh:
+        no_pre_rotate_x = True
+        scale_mode = "never"
+        no_center = True
+        try:
+            from tools import random_grasp_sampler as rgs
+
+            ds = dataset or None
+            sf = rgs.read_scale_factor(oid, ds)
+            if rgs.apply_metric_scale_to_mesh(oid, ds) and abs(sf - 1.0) > 1e-8:
+                mesh.vertices = (np.asarray(mesh.vertices, dtype=np.float64) * float(sf)).astype(np.float64)
+        except Exception as exc:
+            print(f"  WARNING: rotated SAM3D scale lookup failed for {oid}: {exc}")
+
     if not no_pre_rotate_x:
         pre_rot_R = apply_pre_rotation_x(mesh, pre_rotate_x_deg)
 
-    mesh, srep = rescale_mesh_with_optional_json(
-        mesh,
-        mpath,
-        scale_mode=scale_mode,
-        target_max_extent=target_max_extent,
-        extent_lo=auto_extent_lo,
-        extent_hi=auto_extent_hi,
-        min_scale_factor=min_scale_factor,
-        center_mesh=not no_center,
-        prefer_scale_json=not ignore_scale_json,
-    )
+    if sam3d_rotated_mesh:
+        mesh, srep = rescale_mesh_for_v6(
+            mesh,
+            target_max_extent=target_max_extent,
+            scale_mode="never",
+            extent_lo=auto_extent_lo,
+            extent_hi=auto_extent_hi,
+            min_scale_factor=min_scale_factor,
+            center_mesh=False,
+        )
+        srep.mode = "sam3d_rotated_metric"
+    else:
+        mesh, srep = rescale_mesh_with_optional_json(
+            mesh,
+            mpath,
+            scale_mode=scale_mode,
+            target_max_extent=target_max_extent,
+            extent_lo=auto_extent_lo,
+            extent_hi=auto_extent_hi,
+            min_scale_factor=min_scale_factor,
+            center_mesh=not no_center,
+            prefer_scale_json=not ignore_scale_json,
+        )
     srep.obj_id = oid
     pts, nrm = sample_mesh_points(mesh, num_points, seed + index)
     return {
@@ -199,6 +229,7 @@ def main() -> None:
   # meshes
     p.add_argument("--mesh-dir", type=Path, default=DEFAULT_MESH_DIR)
     p.add_argument("--mesh", type=Path, action="append", default=None)
+    p.add_argument("--obj-id", default=None, help="Override obj_id for a single --mesh input")
     p.add_argument("--glob", default="*.glb")
     p.add_argument("--output-dir", type=Path, default=DEFAULT_OUT_DIR)
     p.add_argument("--dataset", default="real_machine", help="metadata.dataset in HDF5")
@@ -211,7 +242,12 @@ def main() -> None:
     p.add_argument("--n-samples", type=int, default=50, help="PDM poses per mesh")
     p.add_argument("--ddim-steps", type=int, default=50)
     p.add_argument("--num-points", type=int, default=4096)
-    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--seed", type=int, default=None, help="Fixed RNG seed (omit with --random-seed)")
+    p.add_argument(
+        "--random-seed",
+        action="store_true",
+        help="Use a fresh nondeterministic seed for mesh sampling / PDM",
+    )
     p.add_argument("--aff-batch-size", type=int, default=8, help="Affordance forward batch size")
     p.add_argument("--threshold", type=float, default=None, help="Affordance viz threshold only")
     p.add_argument("--gripper-width", type=float, default=0.06)
@@ -233,6 +269,11 @@ def main() -> None:
     p.add_argument("--no-center", action="store_true")
     p.add_argument("--no-pre-rotate-x", action="store_true")
     p.add_argument("--pre-rotate-x-deg", type=float, default=90.0)
+    p.add_argument(
+        "--sam3d-rotated-mesh",
+        action="store_true",
+        help="Input mesh is data_hub/meshes/SAM3DMesh/rotated_mesh/{dataset}/{obj}/mesh.ply; skip +X rotation, preserve frame, apply metric scale.",
+    )
   # extras
     p.add_argument("--save-affordance-npz", action="store_true", help="Also write affordance npz per object")
     p.add_argument("--affordance-npz-dir", type=Path, default=None)
@@ -254,6 +295,13 @@ def main() -> None:
     p.add_argument("--cpu", action="store_true")
     args = p.parse_args()
 
+    def _run_seed(index: int) -> int:
+        if args.random_seed or args.seed is None:
+            import secrets
+
+            return secrets.randbelow(2**31 - 1) + index
+        return int(args.seed) + index
+
     if args.mesh:
         mesh_paths = [Path(m).expanduser().resolve() for m in args.mesh]
     else:
@@ -263,6 +311,8 @@ def main() -> None:
         mesh_paths = discover_meshes(mesh_dir, (args.glob,))
     if not mesh_paths:
         raise SystemExit("No mesh files found")
+    if args.obj_id and len(mesh_paths) != 1:
+        raise SystemExit("--obj-id can only be used with exactly one --mesh")
 
     aff_ckpt = args.affordance_checkpoint.expanduser().resolve()
     pdm_ckpt = args.pdm_checkpoint.expanduser().resolve()
@@ -321,6 +371,9 @@ def main() -> None:
         print(f"\n[{i + 1}/{len(mesh_paths)}] prepare {oid}  ←  {mpath.name}")
         item = prepare_mesh_item(
             mpath,
+            obj_id_override=args.obj_id if len(mesh_paths) == 1 else None,
+            dataset=args.dataset,
+            sam3d_rotated_mesh=args.sam3d_rotated_mesh,
             no_pre_rotate_x=args.no_pre_rotate_x,
             pre_rotate_x_deg=args.pre_rotate_x_deg,
             scale_mode=args.scale_mode,
@@ -331,7 +384,7 @@ def main() -> None:
             min_scale_factor=args.min_scale_factor,
             no_center=args.no_center,
             num_points=args.num_points,
-            seed=args.seed,
+            seed=_run_seed(i),
             index=i,
         )
         srep = item["scale_report"]

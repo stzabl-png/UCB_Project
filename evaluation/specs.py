@@ -103,6 +103,8 @@ class ExecutionResult:
     executed_at_close: dict[str, Any] | None = None
     executed_post_lift: dict[str, Any] | None = None
     planning: dict[str, Any] = field(default_factory=dict)
+    video_path: str | None = None
+    video_n_frames: int | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:

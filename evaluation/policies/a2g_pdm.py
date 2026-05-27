@@ -32,7 +32,7 @@ class A2GPDMPolicyConfig:
     candidate_hdf5: str
     selection: SelectionMode = "top"
     candidate_index: int = 0
-    seed: int = 0
+    seed: int | None = None
 
 
 class A2GPDMPolicy(EvaluationPolicy):
@@ -204,7 +204,7 @@ def select_candidate(
     *,
     mode: SelectionMode,
     index: int,
-    seed: int,
+    seed: int | None,
 ) -> dict:
     if mode == "top":
         return candidates[0]
@@ -218,7 +218,9 @@ def select_candidate(
             probs = np.full(len(candidates), 1.0 / len(candidates), dtype=np.float64)
         else:
             probs = scores / scores.sum()
-        rng = np.random.default_rng(seed)
+        from evaluation.randomness import fresh_rng
+
+        rng = fresh_rng() if seed is None else np.random.default_rng(seed)
         return candidates[int(rng.choice(len(candidates), p=probs))]
     raise ValueError(f"unknown selection mode: {mode}")
 
