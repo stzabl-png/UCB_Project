@@ -157,6 +157,95 @@ def draw_gripper(ax, cand: dict, color, width_scale: float = 1.0) -> None:
     ax.quiver(*pos, *app, length=0.025, color=color, linewidth=1.2, arrow_length_ratio=0.35)
 
 
+def _scatter_object_points(
+    ax,
+    pts: np.ndarray,
+    affordance: np.ndarray | None = None,
+) -> None:
+    """Background point cloud for overlays (same frame as PDM candidates)."""
+    if affordance is not None and affordance.shape[0] == pts.shape[0]:
+        aff = np.asarray(affordance, dtype=np.float64).reshape(-1)
+        ax.scatter(
+            pts[:, 0],
+            pts[:, 1],
+            pts[:, 2],
+            c=aff,
+            cmap="hot",
+            vmin=0.0,
+            vmax=max(float(aff.max()), 0.05),
+            s=3.0,
+            alpha=0.55,
+            linewidths=0,
+            depthshade=False,
+        )
+    else:
+        ax.scatter(
+            pts[:, 0],
+            pts[:, 1],
+            pts[:, 2],
+            c="#5ab4d4",
+            s=2.0,
+            alpha=0.35,
+            linewidths=0,
+            depthshade=False,
+        )
+
+
+def save_candidate_overlay(
+    hdf5_path: str,
+    points: np.ndarray,
+    out_path: str,
+    *,
+    top: int = 20,
+    affordance: np.ndarray | None = None,
+    bg_points: int = 8000,
+    width_scale: float = 1.0,
+    elev: float = 22.0,
+    azim: float = 132.0,
+    dpi: int = 140,
+    title_suffix: str = "",
+) -> str:
+    """Overlay PDM grippers on a precomputed object point cloud (e.g. from glb_to_pdm_grasp)."""
+
+    obj_id = obj_id_from_hdf5(hdf5_path)
+    cands = load_candidates(hdf5_path, top=top)
+    if not cands:
+        raise RuntimeError(f"no candidates in {hdf5_path}")
+    pts_full = np.asarray(points, dtype=np.float64)
+    aff_full = None if affordance is None else np.asarray(affordance, dtype=np.float64).reshape(-1)
+    if aff_full is not None and aff_full.shape[0] != pts_full.shape[0]:
+        aff_full = None
+    if pts_full.shape[0] > bg_points:
+        replace = pts_full.shape[0] < bg_points
+        idx = np.random.choice(pts_full.shape[0], bg_points, replace=replace)
+        pts = pts_full[idx]
+        if aff_full is not None:
+            aff_full = aff_full[idx]
+    else:
+        pts = pts_full
+    affordance = aff_full
+
+    fig = plt.figure(figsize=(8, 8), facecolor="#1a1a2e")
+    ax = fig.add_subplot(111, projection="3d", facecolor="#1a1a2e")
+    _scatter_object_points(ax, pts, affordance=affordance)
+    cmap = plt.get_cmap("hsv")
+    for i, cand in enumerate(cands):
+        draw_gripper(ax, cand, cmap(i / max(len(cands), 1))[:3], width_scale=width_scale)
+    _axis_equal(ax, pts)
+    ax.view_init(elev=elev, azim=azim)
+    yaw_note = f"  {title_suffix}" if title_suffix else ""
+    ax.set_title(
+        f"{obj_id}  PDM candidates: {len(cands)}{yaw_note}\n"
+        f"source={os.path.relpath(hdf5_path, PROJ)}",
+        color="#ddd",
+        fontsize=10,
+    )
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+    fig.savefig(out_path, dpi=dpi, bbox_inches="tight", facecolor="#1a1a2e")
+    plt.close(fig)
+    return out_path
+
+
 def save_one(path: str, args: argparse.Namespace) -> str:
     obj_id = obj_id_from_hdf5(path)
     cands = load_candidates(path, top=args.top)
@@ -171,34 +260,19 @@ def save_one(path: str, args: argparse.Namespace) -> str:
     if len(pts) > args.bg_points:
         pts = _resample_rows(pts, args.bg_points)
 
-    fig = plt.figure(figsize=(8, 8), facecolor="#1a1a2e")
-    ax = fig.add_subplot(111, projection="3d", facecolor="#1a1a2e")
-    ax.scatter(
-        pts[:, 0],
-        pts[:, 1],
-        pts[:, 2],
-        c="#5ab4d4",
-        s=2.0,
-        alpha=0.35,
-        linewidths=0,
-        depthshade=False,
-    )
-    cmap = plt.get_cmap("hsv")
-    for i, cand in enumerate(cands):
-        draw_gripper(ax, cand, cmap(i / max(len(cands), 1))[:3], width_scale=args.width_scale)
-    _axis_equal(ax, pts)
-    ax.view_init(elev=args.elev, azim=args.azim)
-    ax.set_title(
-        f"{obj_id}  PDM candidates: {len(cands)}\n"
-        f"source={os.path.relpath(path, PROJ)}",
-        color="#ddd",
-        fontsize=10,
-    )
     os.makedirs(args.outdir, exist_ok=True)
     out_path = os.path.join(args.outdir, f"{obj_id}_pdm_overlay_top{len(cands)}.png")
-    fig.savefig(out_path, dpi=args.dpi, bbox_inches="tight", facecolor="#1a1a2e")
-    plt.close(fig)
-    return out_path
+    return save_candidate_overlay(
+        path,
+        pts[:, :3] if pts.shape[1] > 3 else pts,
+        out_path,
+        top=args.top,
+        bg_points=args.bg_points,
+        width_scale=args.width_scale,
+        elev=args.elev,
+        azim=args.azim,
+        dpi=args.dpi,
+    )
 
 
 def render_one_image(path: str, args: argparse.Namespace):
