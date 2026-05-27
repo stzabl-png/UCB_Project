@@ -119,6 +119,31 @@ Compatible with existing grasp sim / pool tooling:
 
 Run Isaac validation the same way as raycast candidates, e.g. point `run_grasp_sim.py` at `output/pdm/candidates/{obj}_grasp.hdf5` (see [`pool_grasp_sim_pipeline.md`](pool_grasp_sim_pipeline.md) for batch patterns).
 
+### Isaac evaluation runner
+
+Modular eval (batch, z-yaw, optional video) is documented in [`evaluation.md`](evaluation.md).
+
+```bash
+# Pool candidate → single sim episode
+$ISAAC_SIM_PATH/python.sh evaluation/eval_single.py \
+  --obj-id C22001 \
+  --candidate-hdf5 output/grasp_collect_no_rot/candidates/pool/C22001_grasp.hdf5 \
+  --selection sample --headless --save-hdf5
+
+# GLB → PDM → sim（real machine）
+$ISAAC_SIM_PATH/python.sh evaluation/eval_single.py \
+  --obj-id IMG_4477 \
+  --mesh data_hub/real_machine/sam3d_glb/IMG_4477.glb \
+  --generate-candidate --z-yaw-deg 0 --headless
+
+# Yaw-conditioned ckpt (checkpoints_yaw): match sim and PDM
+python tools/glb_to_pdm_grasp.py --mesh ... --z-yaw-deg 90 ...
+$ISAAC_SIM_PATH/python.sh evaluation/eval_single.py \
+  --obj-id ... --z-yaw-deg 90 --generate-candidate --mesh ...
+```
+
+`eval_single` / `eval_batch` 调用 `glb_to_pdm_grasp` 时会加 `--random-seed`，便于多次 trial 得到不同扩散样本。训练 yaw 条件见 `model/pdm/train.py --use-yaw-condition`。
+
 ---
 
 ## CLI reference
@@ -195,4 +220,5 @@ model/pdm/
 - **GPU:** Training and sampling use CUDA when available (`--cpu` to force CPU).
 - **Empty dataset:** Usually means no merged files, no `executed_panda_hand_at_close`, or all rows filtered (untrusted tips / outliers). Re-run train with `--allow-untrusted-tips` or inspect `skipped` counts printed at startup.
 - **Affordance alignment:** For best geometry, pass the same `affordance_all_soft.h5` used for v6 training when building the condition cache.
-- **Reproducibility:** Training split uses `--seed` (default `42`). Sampling supports `--seed` for object subset shuffling only; diffusion noise is not fixed unless you add seeding in code.
+- **Reproducibility:** Training split uses `--seed` (default `42`). Diffusion sampling uses an unseeded RNG by default. `glb_to_pdm_grasp` supports `--random-seed` (used by eval) or fixed `--seed`.
+- **Sim z-yaw:** Yaw-conditioned models need the same `--z-yaw-deg` at sample time as in Isaac eval (`evaluation.md`).

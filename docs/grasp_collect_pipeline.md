@@ -10,7 +10,8 @@
 | **Legacy** | `batch_grasp_collect.py` | 每轮对所有物体重新 sampler + 每物体一个 `run_grasp_sim` |
 
 Pool 路线详见 **第 5 节**；Legacy 见 **第 4 节**。  
-**Pool sim 部署、HF 下载/上传、续跑：** [`pool_grasp_sim_pipeline.md`](pool_grasp_sim_pipeline.md)（唯一入口文档）。
+**Pool sim 部署、HF 下载/上传、续跑：** [`pool_grasp_sim_pipeline.md`](pool_grasp_sim_pipeline.md)（唯一入口文档）。  
+**已有 candidate 的模块化 eval（批量 / z-yaw / 录像）：** [`evaluation.md`](evaluation.md)（`evaluation/eval_single.py`、`eval_batch.py`）。
 
 ## 输出目录约定
 
