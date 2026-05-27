@@ -28,9 +28,9 @@ SAM3D_ROTATED_MESH_DIR = os.path.join(PROJ, 'data_hub', 'meshes', 'SAM3DMesh', '
 OBJ_USD_DIR = os.path.join(PROJ, 'output', 'obj_usd')
 CANONICAL_ROT_JSON = os.path.join(PROJ, 'sim', 'canonical_rotation.json')
 
-DATASETS = ['oakink', 'ycb', 'arctic', 'dexycb', 'egocentric', 'ho3d_v3']
+DATASETS = ['oakink', 'ycb', 'egodex', 'arctic', 'dexycb', 'egocentric', 'ho3d_v3']
 # 当前 rotated_mesh + scale.json 就绪的数据集
-ROTATED_MESH_DATASETS = ['oakink', 'ycb']
+ROTATED_MESH_DATASETS = ['oakink', 'ycb', 'egodex']
 
 
 def infer_obj_dataset(obj_id: str, dataset: str | None = None) -> str:
@@ -40,6 +40,8 @@ def infer_obj_dataset(obj_id: str, dataset: str | None = None) -> str:
         return 'dexycb'
     if obj_id.startswith('arctic_'):
         return 'arctic'
+    if os.path.isfile(os.path.join(OBJ_MESHES_DIR, 'egodex', obj_id, 'scale.json')):
+        return 'egodex'
     return 'oakink'
 
 

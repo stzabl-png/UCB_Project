@@ -306,7 +306,7 @@ def setup_scene(obj_id, object_scale):
     # 加载物体 USD — 搜索顺序: output/obj_usd/{dataset}/ → sim/assets/
     a2g_root = os.path.dirname(SIM_DIR)
     obj_usd_root = os.path.join(a2g_root, 'output', 'obj_usd')
-    datasets_order = ['oakink', 'ycb', 'arctic', 'dexycb', 'egocentric', 'ho3d_v3']
+    datasets_order = ['oakink', 'ycb', 'egodex', 'arctic', 'dexycb', 'egocentric', 'ho3d_v3']
     usd_search_paths = (
         [os.path.join(obj_usd_root, ds, f'{obj_id}.usd') for ds in datasets_order]
         + [os.path.join(SIM_DIR, 'assets', f'{obj_id}.usd')]

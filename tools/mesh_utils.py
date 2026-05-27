@@ -63,8 +63,14 @@ def infer_dataset(obj_id: str, dataset: str | None = None) -> str:
     """根据 obj_id / 显式参数推断 obj_meshes 子目录名。"""
     if dataset:
         return dataset
-    if obj_id.startswith("ycb_"):
+    if obj_id.startswith("ycb_dex_") or obj_id.startswith("ycb_"):
         return "dexycb"
+    _obj_meshes = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "data_hub", "ProcessedData", "obj_meshes",
+    )
+    if os.path.isfile(os.path.join(_obj_meshes, "egodex", obj_id, "scale.json")):
+        return "egodex"
     return "oakink"
 
 

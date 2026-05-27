@@ -35,7 +35,8 @@ OBJ_MESHES_DIR  = os.path.join(PROJ, 'data_hub', 'ProcessedData', 'obj_meshes')
 OBJ_MESHES_DATASETS = ['oakink', 'ycb', 'arctic', 'dexycb', 'egocentric', 'ho3d_v3']
 TRAINING_FP_DIR = os.path.join(PROJ, 'data_hub', 'ProcessedData', 'training_fp')
 SAM3D_ROTATED_MESH_DIR = os.path.join(PROJ, 'data_hub', 'meshes', 'SAM3DMesh', 'rotated_mesh')
-HP_FP_SUBDIRS = ('oakink', 'dexycb', 'ycb', 'arctic', 'ho3d_v3')
+HP_FP_SUBDIRS = ('oakink', 'dexycb', 'ycb', 'arctic', 'egodex', 'ho3d_v3')
+SAMPLER_DATASET_ORDER = ('egodex', 'oakink', 'ycb')
 # Canonical rotation file (用于 SAM3D mesh 朝向修正)
 CANONICAL_ROT_JSON = os.path.join(PROJ, 'sim', 'canonical_rotation.json')
 
@@ -115,6 +116,18 @@ def load_canonical_rotations():
     return {}
 
 
+def _has_sampler_assets(obj_id: str, dataset: str) -> bool:
+    """rotated_mesh + train_fp_rotated + scale.json（与 list_dataset_objs 一致）。"""
+    sam_ds = 'ycb' if dataset == 'dexycb' else dataset
+    sam_path = os.path.join(SAM3D_ROTATED_MESH_DIR, sam_ds, obj_id, 'mesh.ply')
+    hp_path = os.path.join(TRAINING_FP_ROTATED_DIR, dataset, f'{obj_id}.hdf5')
+    return (
+        os.path.isfile(sam_path)
+        and os.path.isfile(hp_path)
+        and mesh_scale_json_path(obj_id, dataset) is not None
+    )
+
+
 def infer_obj_dataset(obj_id: str, dataset: str | None = None) -> str:
     if dataset:
         return dataset
@@ -122,6 +135,10 @@ def infer_obj_dataset(obj_id: str, dataset: str | None = None) -> str:
         return 'dexycb'
     if obj_id.startswith('arctic_'):
         return 'arctic'
+    for ds in SAMPLER_DATASET_ORDER:
+        list_ds = 'dexycb' if ds == 'ycb' else ds
+        if _has_sampler_assets(obj_id, list_ds):
+            return ds
     return 'oakink'
 
 
@@ -256,7 +273,7 @@ def _hp_search_paths(obj_id: str, hp_dir: str | None, dataset: str | None, *, us
         subdirs.append(dataset)
     if obj_id.startswith('ycb_dex_'):
         subdirs.extend(['dexycb', 'ycb'])
-    subdirs.extend(['oakink', 'dexycb', 'ycb', 'arctic'])
+    subdirs.extend(['egodex', 'oakink', 'dexycb', 'ycb', 'arctic'])
 
     seen: set[str] = set()
     paths: list[str] = []

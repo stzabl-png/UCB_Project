@@ -176,10 +176,10 @@ def scan_merged_objects(merged_dir: str) -> dict[str, int]:
 
 
 def resolve_dataset(obj_id: str) -> Optional[str]:
-    """Return sampler --dataset (oakink / ycb) if object is in rotated_mesh pipeline."""
+    """Return sampler --dataset (oakink / ycb / egodex) if object is in rotated_mesh pipeline."""
     from random_grasp_sampler import list_dataset_objs
 
-    for ds in ("oakink", "ycb"):
+    for ds in ("oakink", "ycb", "egodex"):
         list_ds = "dexycb" if ds == "ycb" else ds
         if obj_id in list_dataset_objs(list_ds, use_legacy_assets=False):
             return ds
@@ -497,6 +497,10 @@ def main():
         "--obj",
         help="只处理单个物体（须在 merged 中且 success < threshold）",
     )
+    parser.add_argument(
+        "--dataset",
+        help="只处理指定 dataset，逗号分隔：oakink,ycb,egodex（与 --obj 可同时用）",
+    )
     args = parser.parse_args()
 
     if args.success_threshold < 0:
@@ -528,6 +532,16 @@ def main():
         args.success_threshold,
         min_merged_success=args.min_merged_success,
     )
+    if args.dataset:
+        allowed = {p.strip().lower() for p in args.dataset.split(",") if p.strip()}
+        valid = {"oakink", "ycb", "egodex"}
+        unknown = sorted(allowed - valid)
+        if unknown:
+            print(f"❌ unknown --dataset: {unknown}  (allowed: {', '.join(sorted(valid))})")
+            sys.exit(1)
+        before = len(targets)
+        targets = [t for t in targets if t[1] in allowed]
+        print(f"Dataset filter {sorted(allowed)}: {len(targets)}/{before} object(s)")
     if args.obj:
         targets = [t for t in targets if t[0] == args.obj]
         if not targets:
@@ -583,6 +597,8 @@ def main():
     )
     print(f"Target: {args.target} candidates / object")
     print(f"Gen mode: {args.gen_mode}")
+    if args.dataset:
+        print(f"Dataset: {args.dataset}")
     print(f"Objects: {len(targets)}")
     print(f"Workers: {args.sampler_workers}")
     print(f"Resume: {args.resume}  Force: {args.force}")

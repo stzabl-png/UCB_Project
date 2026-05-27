@@ -105,14 +105,14 @@ class SimResult:
 
 
 # 当前 batch 支持的 dataset（--dataset all 等价于下列全部）
-BATCH_DATASETS = ("oakink", "ycb")
+BATCH_DATASETS = ("oakink", "ycb", "egodex")
 ObjectJob = tuple[str, str]  # (obj_id, dataset)
 
 
 def parse_datasets(spec: str) -> list[str]:
     """解析 --dataset：单集 / 逗号多集 / all → ['oakink', 'ycb', ...]。"""
     s = (spec or "oakink").strip().lower()
-    if s in ("all", "oakink+ycb"):
+    if s in ("all", "oakink+ycb", "oakink+ycb+egodex"):
         return list(BATCH_DATASETS)
     parts = [p.strip().lower() for p in s.split(",") if p.strip()]
     if not parts:

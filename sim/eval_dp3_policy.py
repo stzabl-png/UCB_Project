@@ -15,7 +15,7 @@ For each (object × N init poses):
 
 Requires:
   • DP3 inference server running on http://127.0.0.1:8765 (see Baseline1/eval/dp3_inference_server.py)
-  • USDs at output/obj_usd/{ycb,oakink}/{obj_id}.usd
+  • USDs at output/obj_usd/{ycb,oakink,egodex}/{obj_id}.usd
   • R_align at Baseline1/assets/sam3d_align/[oakink/]{obj_id}.json
   • SAM3D meshes at data_hub/ProcessedData/obj_meshes/{ds}/{obj_id}/mesh.ply
 
@@ -92,7 +92,7 @@ if os.path.exists(CANONICAL_ROT_FILE):
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 def find_usd(obj_id):
-    for ds in ("oakink", "ycb"):
+    for ds in ("oakink", "ycb", "egodex"):
         p = os.path.join(PROJ_DIR, "output", "obj_usd", ds, f"{obj_id}.usd")
         if os.path.exists(p):
             return p, ds
@@ -375,7 +375,7 @@ def main():
     for obj_id in args.objects:
         usd_path, ds = find_usd(obj_id)
         if usd_path is None:
-            cprint(f"❌ USD not found for {obj_id} (output/obj_usd/{{ycb,oakink}}/)", "red")
+            cprint(f"❌ USD not found for {obj_id} (output/obj_usd/{{ycb,oakink,egodex}}/)", "red")
             continue
         cprint(f"\n=== {obj_id} ({ds}) === USD: {usd_path}", "yellow")
 

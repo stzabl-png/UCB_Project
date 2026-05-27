@@ -182,16 +182,39 @@ def _count_successful_in_merged(path: str) -> int:
     return 0
 
 
+def write_empty_merged_placeholder(
+    path: str,
+    obj_id: str,
+    *,
+    note: str = "bootstrap:empty_placeholder",
+) -> str:
+    """
+    写入 n_successful=0 的 merged，供 pool 规划 / auto-refill 识别物体。
+    后续用 merge_robot_gt 扫 robot_gt 会覆盖；不要用 --cleanup-empty-merged-dir 清掉。
+    """
+    write_merged(path, obj_id, [], source_files=[note])
+    with h5py.File(path, "a") as f:
+        f.attrs["bootstrap_placeholder"] = True
+    return path
+
+
 def cleanup_empty_merged_files(merged_dir: str) -> int:
-    """删除 merged 目录下无成功条目的占位 HDF5。"""
+    """删除 merged 目录下无成功条目的占位 HDF5（保留 bootstrap_placeholder）。"""
     import glob
 
     removed = 0
     for path in glob.glob(os.path.join(merged_dir, "*_merged.hdf5")):
-        if _count_successful_in_merged(path) == 0:
-            os.remove(path)
-            removed += 1
-            print(f"  removed empty: {path}")
+        if _count_successful_in_merged(path) != 0:
+            continue
+        try:
+            with h5py.File(path, "r") as f:
+                if f.attrs.get("bootstrap_placeholder"):
+                    continue
+        except OSError:
+            pass
+        os.remove(path)
+        removed += 1
+        print(f"  removed empty: {path}")
     return removed
 
 
@@ -448,7 +471,45 @@ def main():
         metavar="DIR",
         help="删除 DIR 下 successful_grasps 为空的 *_merged.hdf5，然后退出",
     )
+    parser.add_argument(
+        "--bootstrap-empty",
+        action="store_true",
+        help="写入 n_successful=0 的 merged 占位（需 --obj 与 --output，或 --dataset egodex）",
+    )
+    parser.add_argument(
+        "--dataset",
+        help="--bootstrap-empty 时批量：egodex / oakink / ycb（list_dataset_objs）",
+    )
     args = parser.parse_args()
+
+    if args.bootstrap_empty:
+        if args.dataset:
+            _tools = os.path.dirname(os.path.abspath(__file__))
+            if _TOOLS not in sys.path:
+                sys.path.insert(0, _TOOLS)
+            from random_grasp_sampler import list_dataset_objs
+
+            list_ds = "dexycb" if args.dataset == "ycb" else args.dataset
+            obj_ids = list_dataset_objs(list_ds, use_legacy_assets=False)
+            if not obj_ids:
+                print(f"❌ no objects for dataset {args.dataset}")
+                sys.exit(1)
+            out_dir = args.output or os.path.join(
+                os.path.dirname(os.path.dirname(_TOOLS)),
+                "output", "grasp_collect_no_rot", "merged",
+            )
+            os.makedirs(out_dir, exist_ok=True)
+            for oid in obj_ids:
+                out_path = os.path.join(out_dir, f"{oid}_robot_gt_merged.hdf5")
+                write_empty_merged_placeholder(out_path, oid)
+                print(f"  bootstrap {oid} → {out_path}")
+            print(f"✅ {len(obj_ids)} placeholder(s) in {out_dir}")
+            return
+        if not args.obj or not args.output:
+            parser.error("--bootstrap-empty needs --obj and --output, or --dataset")
+        write_empty_merged_placeholder(args.output, args.obj)
+        print(f"✅ bootstrap → {args.output}")
+        return
 
     if args.cleanup_empty_merged_dir:
         removed = cleanup_empty_merged_files(args.cleanup_empty_merged_dir)
