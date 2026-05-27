@@ -76,6 +76,15 @@ python -m model.inference_v6 --checkpoint ... --split val --save-dir output/inf_
 # → inf_v6/png/{obj}.png  and  inf_v6/all_objects_grid.png (montage, default)
 
 python -m model.inference_v6 --compose-grid-only --save-dir output/inf_v6   # grid from existing png/
+
+### Inference on arbitrary meshes (real machine GLB)
+
+```bash
+python tools/infer_mesh_v6.py
+# default: data_hub/real_machine/sam3d_glb/*.glb → output/real_machine/affordance_v6_inf/
+```
+
+Meshes are centroid-centered and uniformly scaled to training extent (see `scale_report.json`).
 python -m model.inference_v6 --checkpoint ... --h5 output/.../affordance_all_soft.h5 --all --save-dir output/inf_v6
 python -m model.inference_v6 --checkpoint ... --split val   # default batch-size 64 objects per GPU forward
 ```
