@@ -144,6 +144,29 @@ def _delete_rigid_prims() -> None:
     delete_prim("/World/Rigid/rigid")
 
 
+def _invalidate_rigid_physics_view(rigid) -> None:
+    if rigid is None:
+        return
+    try:
+        if hasattr(rigid, "_invalidate_physics_handle_callback"):
+            rigid._invalidate_physics_handle_callback(None)
+    except Exception:
+        pass
+    try:
+        if hasattr(rigid, "_physics_view"):
+            rigid._physics_view = None
+    except Exception:
+        pass
+
+
+def _release_scene_rigid_object(scene: SimEvaluationContext) -> None:
+    old_obj = getattr(scene, "obj", None)
+    if old_obj is None:
+        return
+    _invalidate_rigid_physics_view(getattr(old_obj, "rigid", None))
+    scene.obj = None
+
+
 def _apply_object_physics_materials(stage, obj) -> None:
     from pxr import PhysxSchema, Usd, UsdGeom, UsdPhysics, UsdShade
 
@@ -191,6 +214,80 @@ def _ensure_finger_friction_materials(stage) -> None:
                         UsdShade.Tokens.weakerThanDescendants,
                         "physics",
                     )
+
+
+def _reset_franka_home(scene: SimEvaluationContext) -> None:
+    home_joints = np.array([0, -0.785, 0, -2.356, 0, 1.571, 0.785, 0.04, 0.04])
+    scene.franka.set_joint_positions(home_joints)
+    scene.franka.open_gripper()
+    for _ in range(150):
+        scene.world.step(render=scene.render)
+
+
+def _spawn_rigid_object(world, spec: SceneSpec, *, render: bool):
+    placement = resolve_object_placement(spec.obj_id, spec.object_scale, spec.sim_z_yaw_deg)
+    obj = RigidObject(
+        world,
+        usd_path=placement["usd_path"],
+        pos=np.array(placement["pos"]),
+        ori=np.array(placement["ori"]),
+        scale=np.array([spec.object_scale] * 3),
+        mass=0.05,
+    )
+    _apply_object_physics_materials(world.stage, obj)
+    for _ in range(100):
+        world.step(render=render)
+    mesh_info = prepare_curobo_mesh(world.stage, obj.rigid_prim_path)
+    return obj, placement, mesh_info
+
+
+def _update_context_object(
+    scene: SimEvaluationContext,
+    spec: SceneSpec,
+    obj,
+    placement: dict,
+    mesh_info: dict | None,
+) -> None:
+    scene.spec = spec
+    scene.obj = obj
+    scene.object_placement = placement
+    scene.metadata["obj_id"] = spec.obj_id
+    scene.metadata["sim_z_yaw_deg"] = spec.sim_z_yaw_deg
+    if mesh_info is not None:
+        scene.curobo_mesh_vertices = mesh_info["vertices"]
+        scene.curobo_mesh_faces = mesh_info["faces"]
+    else:
+        scene.curobo_mesh_vertices = None
+        scene.curobo_mesh_faces = None
+
+
+def reset_scene_pose(scene: SimEvaluationContext, spec: SceneSpec) -> None:
+    """Reset same object to a new placement/yaw and home the robot."""
+    placement = resolve_object_placement(spec.obj_id, spec.object_scale, spec.sim_z_yaw_deg)
+    scene.spec = spec
+    scene.object_placement = placement
+    scene.obj.set_obj_pose(
+        np.array(placement["pos"], dtype=np.float64),
+        ori=np.array(placement["ori"], dtype=np.float64),
+    )
+    try:
+        scene.obj.rigid.set_linear_velocity(np.zeros(3))
+        scene.obj.rigid.set_angular_velocity(np.zeros(3))
+    except Exception:
+        pass
+    _reset_franka_home(scene)
+
+
+def swap_scene_object(scene: SimEvaluationContext, spec: SceneSpec) -> None:
+    """Replace the object USD while keeping World, table, and Franka alive."""
+    _release_scene_rigid_object(scene)
+    _delete_rigid_prims()
+    scene.world.reset()
+    for _ in range(20):
+        scene.world.step(render=scene.render)
+    obj, placement, mesh_info = _spawn_rigid_object(scene.world, spec, render=scene.render)
+    _update_context_object(scene, spec, obj, placement, mesh_info)
+    _reset_franka_home(scene)
 
 
 def setup_scene(spec: SceneSpec, *, render: bool) -> SimEvaluationContext:
@@ -250,21 +347,8 @@ def setup_scene(spec: SceneSpec, *, render: bool) -> SimEvaluationContext:
         world.step(render=render)
     _ensure_finger_friction_materials(world.stage)
 
-    placement = resolve_object_placement(spec.obj_id, spec.object_scale, spec.sim_z_yaw_deg)
     _delete_rigid_prims()
-    obj = RigidObject(
-        world,
-        usd_path=placement["usd_path"],
-        pos=np.array(placement["pos"]),
-        ori=np.array(placement["ori"]),
-        scale=np.array([spec.object_scale] * 3),
-        mass=0.05,
-    )
-    _apply_object_physics_materials(world.stage, obj)
-    for _ in range(100):
-        world.step(render=render)
-
-    mesh_info = prepare_curobo_mesh(world.stage, obj.rigid_prim_path)
+    obj, placement, mesh_info = _spawn_rigid_object(world, spec, render=render)
     mesh_vertices = mesh_faces = None
     if mesh_info is not None:
         mesh_vertices = mesh_info["vertices"]
