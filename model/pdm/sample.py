@@ -22,6 +22,7 @@ from model.pdm.dataset import (
     find_mesh_path,
     sample_mesh_condition,
     _resample_rows,
+    yaw_feature_from_deg,
 )
 from model.pdm.model import PDM
 from model.pdm.pose_codec import pose9_to_command
@@ -172,9 +173,13 @@ def sample_one(
         affordance_h5=args.affordance_h5,
         mesh_root=args.mesh_root,
     ).to(device=device, dtype=torch.float32)
+    yaw = None
+    if model.config.use_yaw_condition:
+        yaw_deg = 0.0 if args.z_yaw_deg is None else float(args.z_yaw_deg)
+        yaw = torch.from_numpy(yaw_feature_from_deg(yaw_deg)).unsqueeze(0).to(device)
 
     with torch.no_grad():
-        pose_norm = model.sample(points, n_samples=args.n_samples, ddim_steps=args.ddim_steps)
+        pose_norm = model.sample(points, yaw=yaw, n_samples=args.n_samples, ddim_steps=args.ddim_steps)
         pose = pose_norm * pose_std.unsqueeze(0) + pose_mean.unsqueeze(0)
     poses_np = pose.cpu().numpy().astype(np.float32)
 
@@ -189,7 +194,12 @@ def sample_one(
     if args.output and use_explicit_output:
         out_path = args.output
     else:
-        out_path = os.path.join(args.output_dir, f"{obj_id}_grasp.hdf5")
+        if args.z_yaw_deg is None:
+            out_name = f"{obj_id}_grasp.hdf5"
+        else:
+            yaw_tag = int(round(float(args.z_yaw_deg))) % 360
+            out_name = f"{obj_id}_yaw{yaw_tag:03d}_grasp.hdf5"
+        out_path = os.path.join(args.output_dir, out_name)
     mesh_path = find_mesh_path(obj_id, args.mesh_root)
     write_candidates_hdf5(
         out_path,
@@ -244,6 +254,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gripper-width", type=float, default=0.06)
     parser.add_argument("--reject-upward", action="store_true")
     parser.add_argument("--max-approach-z", type=float, default=0.3)
+    parser.add_argument("--z-yaw-deg", type=float, default=None)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--cpu", action="store_true")
     return parser

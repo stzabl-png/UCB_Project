@@ -25,11 +25,21 @@ from model.pdm.dataset import DEFAULT_MERGED_DIR, PDMMergedDataset, compute_pose
 from model.pdm.model import PDM, PDMConfig
 
 
-def _to_device(batch: dict, device: torch.device, pose_mean: torch.Tensor, pose_std: torch.Tensor):
+def _to_device(
+    batch: dict,
+    device: torch.device,
+    pose_mean: torch.Tensor,
+    pose_std: torch.Tensor,
+    *,
+    use_yaw_condition: bool,
+):
     points = batch["points"].to(device=device, dtype=torch.float32)
     pose = batch["pose"].to(device=device, dtype=torch.float32)
     pose_norm = (pose - pose_mean) / pose_std
-    return points, pose_norm
+    yaw = None
+    if use_yaw_condition:
+        yaw = batch["yaw"].to(device=device, dtype=torch.float32)
+    return points, pose_norm, yaw
 
 
 def train(args: argparse.Namespace) -> None:
@@ -81,6 +91,7 @@ def train(args: argparse.Namespace) -> None:
         point_feat_dim=args.point_feat_dim,
         hidden_dim=args.hidden_dim,
         T=args.T,
+        use_yaw_condition=args.use_yaw_condition,
     )
     model = PDM(config).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
@@ -107,8 +118,14 @@ def train(args: argparse.Namespace) -> None:
         model.train()
         train_losses = []
         for batch in train_loader:
-            points, pose_norm = _to_device(batch, device, pose_mean, pose_std)
-            loss, _ = model.training_loss(pose_norm, points)
+            points, pose_norm, yaw = _to_device(
+                batch,
+                device,
+                pose_mean,
+                pose_std,
+                use_yaw_condition=args.use_yaw_condition,
+            )
+            loss, _ = model.training_loss(pose_norm, points, yaw=yaw)
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
@@ -120,8 +137,14 @@ def train(args: argparse.Namespace) -> None:
         val_losses = []
         with torch.no_grad():
             for batch in val_loader:
-                points, pose_norm = _to_device(batch, device, pose_mean, pose_std)
-                loss, _ = model.training_loss(pose_norm, points)
+                points, pose_norm, yaw = _to_device(
+                    batch,
+                    device,
+                    pose_mean,
+                    pose_std,
+                    use_yaw_condition=args.use_yaw_condition,
+                )
+                loss, _ = model.training_loss(pose_norm, points, yaw=yaw)
                 val_losses.append(float(loss.item()))
 
         train_loss = sum(train_losses) / max(len(train_losses), 1)
@@ -177,6 +200,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--T", type=int, default=1000)
     parser.add_argument("--hidden-dim", type=int, default=512)
     parser.add_argument("--point-feat-dim", type=int, default=512)
+    parser.add_argument("--use-yaw-condition", action="store_true")
     parser.add_argument("--val-ratio", type=float, default=0.2)
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--seed", type=int, default=42)

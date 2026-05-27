@@ -58,6 +58,7 @@ class PDMSampleMeta:
     score: float
     source_file: str
     trusted_tips: bool
+    yaw_deg: float
 
 
 @dataclass
@@ -68,6 +69,53 @@ class ObjectCondition:
 
 def _decode_obj_ids(raw: np.ndarray) -> list[str]:
     return [x.decode() if isinstance(x, bytes) else str(x) for x in raw]
+
+
+def yaw_feature_from_deg(yaw_deg: float) -> np.ndarray:
+    """Return yaw condition [sin(theta), cos(theta)] for degrees."""
+
+    rad = np.deg2rad(float(yaw_deg))
+    return np.array([np.sin(rad), np.cos(rad)], dtype=np.float32)
+
+
+def _normalize_name(x) -> str:
+    return x.decode() if isinstance(x, bytes) else str(x)
+
+
+def recover_yaw_deg_from_source(
+    source_file: str,
+    *,
+    grasp_name: str = "",
+    pool_candidate_key: str = "",
+) -> float:
+    """Recover sim z-yaw for a merged successful grasp.
+
+    Priority:
+      1. Per-grasp `sim_z_yaw_deg` in source robot_gt (pool sim, 0/90/180/270).
+      2. Root `sim_z_yaw_deg` in source robot_gt (legacy one yaw per round/object).
+      3. Missing yaw fields => 0 degrees (no extra sim yaw).
+    """
+
+    if not source_file or not os.path.isfile(source_file):
+        return 0.0
+    try:
+        with h5py.File(source_file, "r") as f:
+            sg = f.get("successful_grasps")
+            if sg is not None:
+                for key in sg.keys():
+                    g = sg[key]
+                    name_match = grasp_name and _normalize_name(g.attrs.get("name", "")) == grasp_name
+                    key_match = (
+                        pool_candidate_key
+                        and _normalize_name(g.attrs.get("pool_candidate_key", "")) == pool_candidate_key
+                    )
+                    if (name_match or key_match) and "sim_z_yaw_deg" in g.attrs:
+                        return float(g.attrs["sim_z_yaw_deg"])
+            if "sim_z_yaw_deg" in f.attrs:
+                return float(f.attrs["sim_z_yaw_deg"])
+    except OSError:
+        return 0.0
+    return 0.0
 
 
 def _infer_dataset(obj_id: str) -> str:
@@ -564,13 +612,22 @@ class PDMMergedDataset(Dataset):
                             self.skipped["outlier"] += 1
                             continue
                     pose9 = command_to_pose9(command)
+                    source_file = str(g.attrs.get("source_file", ""))
+                    grasp_name = _normalize_name(g.attrs.get("name", key))
+                    pool_candidate_key = _normalize_name(g.attrs.get("pool_candidate_key", ""))
+                    yaw_deg = recover_yaw_deg_from_source(
+                        source_file,
+                        grasp_name=grasp_name,
+                        pool_candidate_key=pool_candidate_key,
+                    )
                     meta = PDMSampleMeta(
                         obj_id=obj_id,
                         merged_path=path,
                         grasp_key=key,
                         score=float(g.attrs.get("score", 0.0)),
-                        source_file=str(g.attrs.get("source_file", "")),
+                        source_file=source_file,
                         trusted_tips=trusted,
+                        yaw_deg=yaw_deg,
                     )
                     self.rows.append((meta, pose9))
 
@@ -599,6 +656,8 @@ class PDMMergedDataset(Dataset):
         return {
             "points": torch.from_numpy(points),
             "pose": torch.from_numpy(pose9.astype(np.float32)),
+            "yaw": torch.from_numpy(yaw_feature_from_deg(meta.yaw_deg)),
+            "yaw_deg": torch.tensor(meta.yaw_deg, dtype=torch.float32),
             "obj_id": meta.obj_id,
             "score": torch.tensor(meta.score, dtype=torch.float32),
         }

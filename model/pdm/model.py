@@ -18,6 +18,8 @@ class PDMConfig:
     point_feat_dim: int = 512
     time_dim: int = 128
     hidden_dim: int = 512
+    use_yaw_condition: bool = False
+    yaw_dim: int = 2
     T: int = 1000
     beta_start: float = 1e-4
     beta_end: float = 2e-2
@@ -76,7 +78,8 @@ class PDMDenoiser(nn.Module):
     def __init__(self, config: PDMConfig):
         super().__init__()
         self.time_emb = SinusoidalEmbedding(config.time_dim)
-        in_dim = config.pose_dim + config.time_dim + config.point_feat_dim
+        cond_dim = config.point_feat_dim + (config.yaw_dim if config.use_yaw_condition else 0)
+        in_dim = config.pose_dim + config.time_dim + cond_dim
         self.net = nn.Sequential(
             nn.Linear(in_dim, config.hidden_dim),
             nn.LayerNorm(config.hidden_dim),
@@ -120,8 +123,19 @@ class PDM(nn.Module):
         self.register_buffer("sqrt_ab", torch.sqrt(alphas_bar))
         self.register_buffer("sqrt_1m_ab", torch.sqrt(1.0 - alphas_bar))
 
-    def encode_condition(self, points: torch.Tensor) -> torch.Tensor:
-        return self.encoder(points)
+    def encode_condition(self, points: torch.Tensor, yaw: torch.Tensor | None = None) -> torch.Tensor:
+        cond = self.encoder(points)
+        if self.config.use_yaw_condition:
+            if yaw is None:
+                yaw = torch.zeros(cond.shape[0], self.config.yaw_dim, device=cond.device)
+                yaw[:, 1] = 1.0
+            yaw = yaw.to(device=cond.device, dtype=cond.dtype)
+            if yaw.ndim == 1:
+                yaw = yaw.unsqueeze(0)
+            if yaw.shape[0] == 1 and cond.shape[0] > 1:
+                yaw = yaw.expand(cond.shape[0], -1)
+            cond = torch.cat([cond, yaw], dim=-1)
+        return cond
 
     def q_sample(self, x0: torch.Tensor, t: torch.Tensor, noise: torch.Tensor) -> torch.Tensor:
         return self.sqrt_ab[t].unsqueeze(-1) * x0 + self.sqrt_1m_ab[t].unsqueeze(-1) * noise
@@ -130,6 +144,7 @@ class PDM(nn.Module):
         self,
         pose_norm: torch.Tensor,
         points: torch.Tensor,
+        yaw: torch.Tensor | None = None,
         return_pred: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Noise-prediction DDPM objective on normalized pose vectors."""
@@ -138,7 +153,7 @@ class PDM(nn.Module):
         t = torch.randint(0, self.config.T, (batch,), device=pose_norm.device)
         noise = torch.randn_like(pose_norm)
         x_t = self.q_sample(pose_norm, t, noise)
-        cond = self.encode_condition(points)
+        cond = self.encode_condition(points, yaw=yaw)
         pred_noise = self.denoiser(x_t, t, cond)
         loss = F.mse_loss(pred_noise, noise)
         if return_pred:
@@ -151,12 +166,13 @@ class PDM(nn.Module):
     def sample(
         self,
         points: torch.Tensor,
+        yaw: torch.Tensor | None = None,
         n_samples: int = 1,
         ddim_steps: int = 50,
     ) -> torch.Tensor:
         """Sample normalized pose vectors conditioned on object points."""
 
-        cond = self.encode_condition(points)
+        cond = self.encode_condition(points, yaw=yaw)
         if cond.shape[0] == 1:
             cond = cond.expand(n_samples, -1)
         elif n_samples != 1:
