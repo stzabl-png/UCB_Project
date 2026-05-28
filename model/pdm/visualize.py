@@ -23,6 +23,7 @@ import numpy as np
 PROJ = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, PROJ)
 
+from model.inference_v6 import AFFORDANCE_CMAP_NAME, affordance_vmax
 from model.pdm.dataset import (
     DEFAULT_ROTATED_MESH_DIR,
     PDMConditionStore,
@@ -186,18 +187,25 @@ def _scatter_object_points(
     ax,
     pts: np.ndarray,
     affordance: np.ndarray | None = None,
+    *,
+    affordance_vmax_fixed: float | None = None,
 ) -> None:
     """Background point cloud for overlays (same frame as PDM candidates)."""
     if affordance is not None and affordance.shape[0] == pts.shape[0]:
         aff = np.asarray(affordance, dtype=np.float64).reshape(-1)
+        vmax = (
+            float(affordance_vmax_fixed)
+            if affordance_vmax_fixed is not None
+            else affordance_vmax(aff)
+        )
         ax.scatter(
             pts[:, 0],
             pts[:, 1],
             pts[:, 2],
             c=aff,
-            cmap="hot",
+            cmap=AFFORDANCE_CMAP_NAME,
             vmin=0.0,
-            vmax=max(float(aff.max()), 0.05),
+            vmax=vmax,
             s=3.0,
             alpha=0.55,
             linewidths=0,
@@ -229,6 +237,7 @@ def save_candidate_overlay(
     azim: float = 132.0,
     dpi: int = 140,
     title_suffix: str = "",
+    affordance_vmax_fixed: float | None = None,
 ) -> str:
     """Overlay PDM grippers on a precomputed object point cloud (e.g. from glb_to_pdm_grasp)."""
 
@@ -252,7 +261,7 @@ def save_candidate_overlay(
 
     fig = plt.figure(figsize=(8, 8), facecolor="#1a1a2e")
     ax = fig.add_subplot(111, projection="3d", facecolor="#1a1a2e")
-    _scatter_object_points(ax, pts, affordance=affordance)
+    _scatter_object_points(ax, pts, affordance=affordance, affordance_vmax_fixed=affordance_vmax_fixed)
     cmap = plt.get_cmap("hsv")
     for i, cand in enumerate(cands):
         draw_gripper(ax, cand, cmap(i / max(len(cands), 1))[:3], width_scale=width_scale)
@@ -315,7 +324,7 @@ def render_one_image(path: str, args: argparse.Namespace):
 
     fig = plt.figure(figsize=(8, 8), facecolor="#1a1a2e")
     ax = fig.add_subplot(111, projection="3d", facecolor="#1a1a2e")
-    _scatter_object_points(ax, pts, affordance=affordance)
+    _scatter_object_points(ax, pts, affordance=affordance, affordance_vmax_fixed=affordance_vmax_fixed)
     cmap = plt.get_cmap("hsv")
     for i, cand in enumerate(cands):
         draw_gripper(ax, cand, cmap(i / max(len(cands), 1))[:3], width_scale=args.width_scale)

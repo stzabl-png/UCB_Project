@@ -58,11 +58,24 @@ OBJECT_POSITION = [0.0, 0.55, TABLE_TOP_Z]
 OBJECT_ORIENTATION = [0.0, 0.0, 0.0]
 HARD_GATE_TABLE_MARGIN = 0.005
 DEFAULT_GRIPPER_WIDTH = 0.06
-# Max distance from grasp-quad samples to mesh surface (object frame, metres).
-GRASP_SURFACE_EPS = 0.003
-# Bilinear grid on wrist-back / fingertip-front quad (object frame).
-GRASP_QUAD_U_SAMPLES = 8
-GRASP_QUAD_V_SAMPLES = 4
+
+# Filtering (hard gate + scoring) defaults.
+FILTER_POOL_MULTIPLIER = 2
+FILTER_SURFACE_SIGMA_M = 0.003
+FILTER_WIDTH_CENTER_M = 0.035
+FILTER_WIDTH_SIGMA_M = 0.020
+FILTER_WIDTH_MIN_M = 0.005
+FILTER_WIDTH_MAX_M = 0.080
+FILTER_CLEARANCE_LAMBDA_M = 0.020
+FILTER_APPROACH_Z_MIN = -1.0
+FILTER_APPROACH_Z_MAX = 0.30
+
+# Soft scoring weights (sum not required to be 1.0).
+FILTER_W_SURF = 0.35
+FILTER_W_WIDTH = 0.20
+FILTER_W_ANTI = 0.25
+FILTER_W_APPROACH = 0.10
+FILTER_W_CLEAR = 0.10
 
 
 def _load_json(path: Path) -> Any:
@@ -231,76 +244,54 @@ def _grasp_footprint_object(cmd, gripper_width: float) -> dict[str, np.ndarray]:
     }
 
 
-def _grasp_footprint_quad_corners(cmd, gripper_width: float) -> tuple[np.ndarray, ...]:
-    """Wrist back edge (P0,P1) to fingertip front edge (P3,P2) in object frame."""
-    fp = _grasp_footprint_object(cmd, gripper_width)
-    finger = fp["finger"]
-    half_width = max(float(gripper_width) * 0.5, 0.001)
-    wrist = fp["wrist"]
-    p0 = wrist - finger * half_width
-    p1 = wrist + finger * half_width
-    p2 = fp["right_tip"]
-    p3 = fp["left_tip"]
-    return p0, p1, p2, p3
+def _clamp01(x: float) -> float:
+    return float(max(0.0, min(1.0, float(x))))
 
 
-def _sample_grasp_quad_points(
-    cmd,
-    gripper_width: float,
-    *,
-    nu: int = GRASP_QUAD_U_SAMPLES,
-    nv: int = GRASP_QUAD_V_SAMPLES,
-) -> np.ndarray:
-    """Uniform samples on the grasp envelope quad (wrist span × fingertip span)."""
-    p0, p1, p2, p3 = _grasp_footprint_quad_corners(cmd, gripper_width)
-    us = np.linspace(0.0, 1.0, max(2, int(nu)))
-    vs = np.linspace(0.0, 1.0, max(2, int(nv)))
-    rows: list[np.ndarray] = []
-    for u in us:
-        back = (1.0 - vs)[:, None] * p0 + vs[:, None] * p1
-        front = (1.0 - vs)[:, None] * p3 + vs[:, None] * p2
-        rows.append((1.0 - u) * back + u * front)
-    return np.concatenate(rows, axis=0)
+def _score_surface_nearness(d_left: float, d_right: float, sigma: float) -> float:
+    sigma = max(1e-6, float(sigma))
+    return float(np.exp(-((d_left * d_left + d_right * d_right) / (2.0 * sigma * sigma))))
 
 
-def _batch_points_near_mesh_surface(
-    mesh: trimesh.Trimesh,
-    points: np.ndarray,
-    *,
-    eps: float = GRASP_SURFACE_EPS,
-) -> tuple[bool, str, float]:
-    """True when any sample is inside the mesh or within eps of its surface."""
-    pts = np.asarray(points, dtype=np.float64).reshape(-1, 3)
-    if pts.size == 0:
-        return False, "miss", float("inf")
-    try:
-        if np.any(mesh.contains(pts)):
-            return True, "contains", 0.0
-    except Exception:
-        pass
-    try:
-        _closest, dist, _ = trimesh.proximity.closest_point(mesh, pts)
-        min_dist = float(np.min(dist))
-        if min_dist <= float(eps):
-            return True, "closest_point", min_dist
-        return False, "miss", min_dist
-    except Exception:
-        return False, "miss", float("inf")
+def _score_width(width: float, *, center: float, sigma: float, wmin: float, wmax: float) -> float:
+    w = float(width)
+    if not (float(wmin) <= w <= float(wmax)):
+        return 0.0
+    sigma = max(1e-6, float(sigma))
+    return float(np.exp(-((w - float(center)) * (w - float(center))) / (2.0 * sigma * sigma)))
 
 
-def _grasp_quad_contacts_mesh(
-    mesh: trimesh.Trimesh,
-    cmd,
-    gripper_width: float,
-    *,
-    nu: int = GRASP_QUAD_U_SAMPLES,
-    nv: int = GRASP_QUAD_V_SAMPLES,
-    eps: float = GRASP_SURFACE_EPS,
-) -> tuple[bool, str, float]:
-    """True when the wrist–fingertip grasp quad contacts the mesh (batch closest_point)."""
-    pts = _sample_grasp_quad_points(cmd, gripper_width, nu=nu, nv=nv)
-    ok, method, min_dist = _batch_points_near_mesh_surface(mesh, pts, eps=eps)
-    return ok, method, min_dist
+def _score_antipodal(n_left: np.ndarray, n_right: np.ndarray, finger_dir: np.ndarray) -> float:
+    nl = np.asarray(n_left, dtype=np.float64).reshape(3)
+    nr = np.asarray(n_right, dtype=np.float64).reshape(3)
+    f = np.asarray(finger_dir, dtype=np.float64).reshape(3)
+    alpha = _clamp01(float(-np.dot(nl, nr)))
+    beta = _clamp01(float(np.dot(nl, f))) * _clamp01(float(-np.dot(nr, f)))
+    return float(np.sqrt(alpha * beta))
+
+
+def _score_approach(approach_world_z: float, *, zmin: float, zmax: float) -> float:
+    denom = float(zmax) - float(zmin)
+    if abs(denom) < 1e-9:
+        return 0.0
+    return _clamp01((float(zmax) - float(approach_world_z)) / denom)
+
+
+def _score_clearance(delta_z: float, *, lam: float) -> float:
+    if float(delta_z) <= 0.0:
+        return 0.0
+    lam = max(1e-6, float(lam))
+    return float(1.0 - np.exp(-float(delta_z) / lam))
+
+
+def _nearest_points_and_normals(
+    mesh: trimesh.Trimesh, points: np.ndarray
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return (nearest_points, normals, distances) for each query point."""
+    q = np.asarray(points, dtype=np.float64).reshape(-1, 3)
+    closest, dist, tri_id = trimesh.proximity.closest_point(mesh, q)
+    normals = np.asarray(mesh.face_normals, dtype=np.float64)[np.asarray(tri_id, dtype=np.int64)]
+    return np.asarray(closest, dtype=np.float64), normals, np.asarray(dist, dtype=np.float64)
 
 
 def _object_points_to_world(
@@ -331,12 +322,6 @@ def _hard_gate_pose(
         t_world_obj = _make_transform(placement["pos"], placement["ori"])
 
     def _check(cmd_pose) -> tuple[bool, str, dict]:
-        hits, hit_method, quad_min_dist = _grasp_quad_contacts_mesh(mesh, cmd_pose, gripper_width)
-        if not hits:
-            return False, "grasp_quad_misses_mesh", {
-                "grasp_quad_hit_method": hit_method,
-                "grasp_quad_min_dist_m": quad_min_dist,
-            }
         fp = _grasp_footprint_object(cmd_pose, gripper_width)
         tcp_w, wrist_w, left_w, right_w = _object_points_to_world(
             np.stack([fp["tcp"], fp["wrist"], fp["left_tip"], fp["right_tip"]]),
@@ -345,6 +330,7 @@ def _hard_gate_pose(
         )
         rot_world_cmd = t_world_obj[:3, :3] @ np.asarray(cmd_pose.rotation, dtype=np.float64)
         hand_up_world = (rot_world_cmd @ R_ADAPT)[:, 1]
+        approach_world = rot_world_cmd[:, 2]
         z_values = {
             "tcp_z": float(tcp_w[2]),
             "wrist_z": float(wrist_w[2]),
@@ -354,14 +340,11 @@ def _hard_gate_pose(
         min_z = TABLE_TOP_Z + float(table_margin)
         if min(z_values.values()) < min_z:
             return False, "pose_pokes_table", {
-                "grasp_quad_hit_method": hit_method,
-                "grasp_quad_min_dist_m": quad_min_dist,
                 **z_values,
             }
         meta = {
-            "grasp_quad_hit_method": hit_method,
-            "grasp_quad_min_dist_m": quad_min_dist,
             "hand_up_z": float(hand_up_world[2]),
+            "approach_z": float(approach_world[2]),
             **z_values,
         }
         if float(hand_up_world[2]) <= 0.0:
@@ -451,6 +434,10 @@ def _generate_one(task: dict, args: argparse.Namespace, models: dict, device: to
     t_world_obj = _make_transform(placement["pos"], placement["ori"])
 
     max_batches = int(args.max_batches)
+    filtering_enabled = not bool(args.no_filtering)
+    pool_target = (
+        int(max(1, int(args.filter_pool_multiplier)) * target) if filtering_enabled else int(target)
+    )
     for batch_idx in range(max_batches):
         batches_run = batch_idx + 1
         batch_no = batch_idx + 1
@@ -478,7 +465,7 @@ def _generate_one(task: dict, args: argparse.Namespace, models: dict, device: to
         )
         batch_pass = 0
         t_gate0 = time.perf_counter()
-        use_hard_gate = not bool(args.no_hard_gate)
+        use_hard_gate = filtering_enabled and (not bool(args.no_hard_gate))
         for local_idx, pose9 in enumerate(poses):
             all_sampled += 1
             if use_hard_gate:
@@ -515,28 +502,102 @@ def _generate_one(task: dict, args: argparse.Namespace, models: dict, device: to
         print(
             f"[batch-candidates] obj={obj_id} yaw={yaw:.0f} "
             f"batch={batch_no}/{max_batches} {gate_tag} batch_pass={batch_pass}/{len(poses)} "
-            f"total_pass={len(accepted)}/{target} sampled={all_sampled} "
+            f"total_pass={len(accepted)}/{pool_target} sampled={all_sampled} "
             f"gate_elapsed_s={gate_elapsed_s:.1f} pdm_elapsed_s={pdm_elapsed_s:.1f}",
             flush=True,
         )
-        if len(accepted) >= target:
+        if len(accepted) >= pool_target:
             break
 
     rng = np.random.default_rng()
     chosen: list[tuple[np.ndarray, dict]] = []
-    if len(accepted) >= target:
-        indices = rng.choice(len(accepted), size=target, replace=False)
-        chosen = [accepted[int(i)] for i in indices]
+    if not filtering_enabled:
+        # Legacy behavior: do not filter or score; take the first target poses.
+        chosen = accepted[:target]
+        if len(chosen) < target:
+            need = target - len(chosen)
+            if need > 0 and rejected:
+                indices = rng.choice(len(rejected), size=min(need, len(rejected)), replace=False)
+                for i in indices:
+                    pose9, row = rejected[int(i)]
+                    row = dict(row)
+                    row["hard_gate_forced_fill"] = True
+                    chosen.append((pose9, row))
     else:
-        chosen.extend(accepted)
-        need = target - len(chosen)
-        if need > 0 and rejected:
-            indices = rng.choice(len(rejected), size=min(need, len(rejected)), replace=False)
-            for i in indices:
-                pose9, row = rejected[int(i)]
-                row = dict(row)
-                row["hard_gate_forced_fill"] = True
-                chosen.append((pose9, row))
+        # Filtering: pool accepted poses, then score and take top-K.
+        pool = accepted[:pool_target]
+        scored: list[tuple[float, np.ndarray, dict]] = []
+        for pose9, row in pool:
+            cmd = pose9_to_command(pose9)
+            fp = _grasp_footprint_object(cmd, float(args.gripper_width))
+            pts_obj = np.stack([fp["left_tip"], fp["right_tip"]], axis=0)
+            closest, normals, dists = _nearest_points_and_normals(prepared["mesh"], pts_obj)
+            d_left, d_right = float(dists[0]), float(dists[1])
+            n_left, n_right = normals[0], normals[1]
+            width = float(np.linalg.norm(np.asarray(closest[0]) - np.asarray(closest[1])))
+
+            finger_dir_obj = np.asarray(cmd.rotation[:, 0], dtype=np.float64)
+            surf = _score_surface_nearness(d_left, d_right, float(args.filter_surface_sigma))
+            sw = _score_width(
+                width,
+                center=float(args.filter_width_center),
+                sigma=float(args.filter_width_sigma),
+                wmin=float(args.filter_width_min),
+                wmax=float(args.filter_width_max),
+            )
+            anti = _score_antipodal(n_left, n_right, finger_dir_obj)
+            sa = _score_approach(
+                float(row.get("approach_z", 0.0)),
+                zmin=float(args.filter_approach_z_min),
+                zmax=float(args.filter_approach_z_max),
+            )
+            dz = float(
+                min(
+                    row.get("tcp_z", 0.0),
+                    row.get("wrist_z", 0.0),
+                    row.get("left_tip_z", 0.0),
+                    row.get("right_tip_z", 0.0),
+                )
+                - (TABLE_TOP_Z + float(args.table_margin))
+            )
+            sc = _score_clearance(dz, lam=float(args.filter_clearance_lambda))
+            total = (
+                float(args.filter_w_surf) * surf
+                + float(args.filter_w_width) * sw
+                + float(args.filter_w_anti) * anti
+                + float(args.filter_w_approach) * sa
+                + float(args.filter_w_clear) * sc
+            )
+            row2 = dict(row)
+            row2.update(
+                {
+                    "filter_score": float(total),
+                    "filter_surf": float(surf),
+                    "filter_width": float(sw),
+                    "filter_anti": float(anti),
+                    "filter_approach": float(sa),
+                    "filter_clearance": float(sc),
+                    "filter_width_m": float(width),
+                    "filter_tip_dist_left_m": float(d_left),
+                    "filter_tip_dist_right_m": float(d_right),
+                }
+            )
+            scored.append((float(total), pose9, row2))
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        chosen = [(pose9, row) for _s, pose9, row in scored[:target]]
+
+        # If pool was short (max_batches hit), allow sorting whatever we have.
+        if len(chosen) < target:
+            need = target - len(chosen)
+            if need > 0 and rejected:
+                indices = rng.choice(len(rejected), size=min(need, len(rejected)), replace=False)
+                for i in indices:
+                    pose9, row = rejected[int(i)]
+                    row = dict(row)
+                    row["hard_gate_forced_fill"] = True
+                    chosen.append((pose9, row))
+
         if len(chosen) < target and chosen:
             while len(chosen) < target:
                 pose9, row = chosen[int(rng.integers(0, len(chosen)))]
@@ -566,8 +627,11 @@ def _generate_one(task: dict, args: argparse.Namespace, models: dict, device: to
         "z_yaw_deg": yaw,
         "n_target": target,
         "n_selected": len(chosen),
-        "hard_gate_enabled": not bool(args.no_hard_gate),
-        "hard_gate_pass_count": len(accepted) if not args.no_hard_gate else len(chosen),
+        "hard_gate_enabled": bool(use_hard_gate),
+        "filtering_enabled": bool(filtering_enabled),
+        "filter_pool_multiplier": int(args.filter_pool_multiplier),
+        "filter_pool_target": int(pool_target),
+        "hard_gate_pass_count": len(accepted) if use_hard_gate else len(chosen),
         "n_batches_used": batches_run,
         "forced_fill_count": forced,
         "all_sampled_count": all_sampled,
@@ -617,8 +681,27 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--no-hard-gate",
         action="store_true",
-        help="Accept all PDM samples without grasp-quad / table / hand-up hard gates.",
+        help="Skip the two hard gates (table poke + hand-up). Only effective when filtering is enabled.",
     )
+    p.add_argument(
+        "--no-filtering",
+        action="store_true",
+        help="Disable filtering (hard gates + scoring). Default enables filtering.",
+    )
+    p.add_argument("--filter-pool-multiplier", type=int, default=FILTER_POOL_MULTIPLIER)
+    p.add_argument("--filter-surface-sigma", type=float, default=FILTER_SURFACE_SIGMA_M)
+    p.add_argument("--filter-width-center", type=float, default=FILTER_WIDTH_CENTER_M)
+    p.add_argument("--filter-width-sigma", type=float, default=FILTER_WIDTH_SIGMA_M)
+    p.add_argument("--filter-width-min", type=float, default=FILTER_WIDTH_MIN_M)
+    p.add_argument("--filter-width-max", type=float, default=FILTER_WIDTH_MAX_M)
+    p.add_argument("--filter-clearance-lambda", type=float, default=FILTER_CLEARANCE_LAMBDA_M)
+    p.add_argument("--filter-approach-z-min", type=float, default=FILTER_APPROACH_Z_MIN)
+    p.add_argument("--filter-approach-z-max", type=float, default=FILTER_APPROACH_Z_MAX)
+    p.add_argument("--filter-w-surf", type=float, default=FILTER_W_SURF)
+    p.add_argument("--filter-w-width", type=float, default=FILTER_W_WIDTH)
+    p.add_argument("--filter-w-anti", type=float, default=FILTER_W_ANTI)
+    p.add_argument("--filter-w-approach", type=float, default=FILTER_W_APPROACH)
+    p.add_argument("--filter-w-clear", type=float, default=FILTER_W_CLEAR)
     return p
 
 

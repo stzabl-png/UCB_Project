@@ -25,8 +25,53 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.colors import Normalize
 
 PROJ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# Shared affordance heatmap: blue (low) → red (high).
+AFFORDANCE_CMAP_NAME = "coolwarm"
+
+
+def affordance_vmax(values: np.ndarray, *, floor: float = 0.05) -> float:
+    vals = np.asarray(values, dtype=np.float64).reshape(-1)
+    return max(float(vals.max()) if vals.size else 0.0, float(floor))
+
+
+def affordance_colormap_norm(values: np.ndarray, *, vmax: float | None = None) -> Normalize:
+    """Matplotlib Normalize for affordance coloring."""
+    vmax_use = affordance_vmax(values) if vmax is None else max(float(vmax), 0.05)
+    return Normalize(vmin=0.0, vmax=vmax_use)
+
+
+def normalize_affordance_pred(
+    values: np.ndarray,
+    *,
+    eps: float = 1e-8,
+) -> tuple[np.ndarray, dict[str, float]]:
+    """Linearly scale per-object values to [0, 1]: (x - min) / (max - min)."""
+    vals = np.asarray(values, dtype=np.float32).reshape(-1)
+    vmin = float(vals.min()) if vals.size else 0.0
+    vmax = float(vals.max()) if vals.size else 0.0
+    span = vmax - vmin
+    stats = {
+        "pred_min": vmin,
+        "pred_max": vmax,
+        "pred_span": span,
+    }
+    if span <= eps:
+        return np.zeros_like(vals, dtype=np.float32), stats
+    out = ((vals - vmin) / span).astype(np.float32)
+    return out, stats
+
+
+def affordance_rgb(values: np.ndarray, *, vmax: float | None = None) -> np.ndarray:
+    """Map affordance scalars to RGB rows using the shared blue→red colormap."""
+    vals = np.asarray(values, dtype=np.float64).reshape(-1)
+    norm = affordance_colormap_norm(vals, vmax=vmax)
+    return plt.get_cmap(AFFORDANCE_CMAP_NAME)(norm(vals))[:, :3]
+
+
 DEFAULT_MERGED_DIR = os.path.join(PROJ, "output", "grasp_collect_no_rot", "merged")
 sys.path.insert(0, PROJ)
 
@@ -315,17 +360,21 @@ def save_vis_png(
     threshold: float,
     *,
     n_trusted: int | None = None,
+    pred_vis: np.ndarray | None = None,
 ):
+    """Write affordance PNG. ``pred_vis`` (e.g. max-normalized) controls colors; ``pred`` keeps raw stats/binary."""
+    vis = np.asarray(pred_vis if pred_vis is not None else pred, dtype=np.float32).reshape(-1)
+    raw = np.asarray(pred, dtype=np.float32).reshape(-1)
+    vis_vmax = 1.0 if pred_vis is not None else None
     fig = plt.figure(figsize=(14, 4), facecolor="#1a1a2e")
-    cmap = plt.cm.jet
-    panels = [(f"Pred (max={pred.max():.2f})", pred)]
+    panels = [(f"Pred [0,1] (raw max={raw.max():.2f})", vis)]
     if gt is not None:
         panels.insert(0, (f"GT (max={gt.max():.2f})", gt))
         panels.append(
-            (f"|Error| MAE={np.abs(pred - gt).mean():.4f}", np.abs(pred - gt)),
+            (f"|Error| MAE={np.abs(raw - gt).mean():.4f}", np.abs(raw - gt)),
         )
     panels.append(
-        (f"Binary τ={threshold}", (pred > threshold).astype(np.float32)),
+        (f"Binary τ={threshold}", (raw > threshold).astype(np.float32)),
     )
     if n_trusted is not None and n_trusted >= 0:
         suptitle = f"{obj_id}  |  trusted successful grasps = {n_trusted}"
@@ -338,7 +387,8 @@ def save_vis_png(
         ax = fig.add_subplot(1, len(panels), col + 1, projection="3d", facecolor="#1a1a2e")
         ax.scatter(
             pts[:, 0], pts[:, 1], pts[:, 2],
-            c=cmap(vals)[:, :3], s=2, alpha=0.85, linewidths=0,
+            c=affordance_rgb(vals, vmax=vis_vmax if title.startswith("Pred [0,1]") else None),
+            s=2, alpha=0.85, linewidths=0,
         )
         _set_equal_3d_limits(ax, pts)
         _style_3d_background_axes(ax)

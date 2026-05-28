@@ -24,7 +24,14 @@ Usage::
 
     python tools/glb_to_pdm_grasp.py --mesh-dir data_hub/real_machine/sam3d_glb --z-yaw-deg 90
 
-Default writes grasp HDF5 + overlay PNGs (``--vis``, same scaled point cloud as PDM).
+Default writes:
+  - affordance npz/png + scale report under ``<output-dir>/../affordance/``
+  - grasp HDF5 under ``--output-dir``
+  - PDM overlay PNGs under ``<output-dir>/../vis/`` (``--vis``)
+
+Both affordance and PDM point clouds use the same blue→red colormap (``coolwarm``).
+Affordance PNG/PDM overlay use max-normalized predictions (peak → 1); PDM conditioning
+uses raw v6 outputs. Normalized arrays are also written under ``affordance/npz_norm/``.
 """
 
 from __future__ import annotations
@@ -42,18 +49,29 @@ DEFAULT_MESH_DIR = PROJ / "data_hub" / "real_machine" / "sam3d_glb"
 DEFAULT_AFF_CKPT = (
     PROJ / "output" / "affordance_no_rot_executed" / "min20" / "checkpoints_v6" / "best_v6_model.pth"
 )
-DEFAULT_PDM_CKPT = PROJ / "output" / "pdm" / "checkpoints_yaw" / "best_model.pth"
+DEFAULT_PDM_CKPT = PROJ / "output" / "pdm" / "checkpoints_yaw_v6cond" / "best_model.pth"
 DEFAULT_OUT_DIR = PROJ / "output" / "real_machine" / "pdm" / "candidates"
+DEFAULT_AFF_OUT_DIR = PROJ / "output" / "real_machine" / "affordance"
 
 sys.path.insert(0, str(PROJ))
 
-from model.inference_v6 import default_threshold, load_model, predict_heatmap_batch  # noqa: E402
+from model.inference_v6 import (  # noqa: E402
+    default_threshold,
+    load_model,
+    normalize_affordance_pred,
+    predict_heatmap_batch,
+    save_inference_montage,
+    save_vis_png,
+)
 from model.pdm.dataset import yaw_feature_from_deg  # noqa: E402
 from model.pdm.model import PDM  # noqa: E402
 from model.pdm.pose_codec import pose9_to_command  # noqa: E402
 from model.pdm.sample import write_candidates_hdf5  # noqa: E402
 from model.pdm.visualize import make_overview, save_candidate_overlay  # noqa: E402
 from tools.infer_mesh_v6 import (  # noqa: E402
+    TRAIN_MAX_EXTENT_MEDIAN,
+    TRAIN_MAX_EXTENT_P10,
+    TRAIN_MAX_EXTENT_P90,
     apply_pre_rotation_x,
     discover_meshes,
     load_triangle_mesh,
@@ -169,7 +187,7 @@ def prepare_mesh_item(
             prefer_scale_json=not ignore_scale_json,
         )
     srep.obj_id = oid
-    pts, nrm = sample_mesh_points(mesh, num_points, seed + index)
+    pts, nrm = sample_mesh_points(mesh, num_points, seed)
     return {
         "obj_id": oid,
         "mesh_path": str(mpath.resolve()),
@@ -221,6 +239,107 @@ def run_pdm_sample(
     return poses_np
 
 
+def save_affordance_outputs(
+    *,
+    affordance_dir: Path,
+    item: dict,
+    pred: np.ndarray,
+    pred_norm: np.ndarray,
+    pred_norm_scale: float,
+    threshold: float,
+    no_aff_vis: bool,
+) -> tuple[str, str, str]:
+    """Write raw + normalized affordance npz and PNG; return (raw_npz, norm_npz, png)."""
+    oid = item["obj_id"]
+    srep = item["scale_report"]
+    npz_dir = affordance_dir / "npz"
+    npz_norm_dir = affordance_dir / "npz_norm"
+    png_dir = affordance_dir / "png"
+    npz_dir.mkdir(parents=True, exist_ok=True)
+    npz_norm_dir.mkdir(parents=True, exist_ok=True)
+    if not no_aff_vis:
+        png_dir.mkdir(parents=True, exist_ok=True)
+
+    base_kw = dict(
+        points=item["points"],
+        normals=item["normals"],
+        obj_id=oid,
+        threshold=threshold,
+        mesh_path=item["mesh_path"],
+        scale_applied=srep.scale_applied,
+        max_extent_before_m=srep.max_extent_before,
+        max_extent_after_m=srep.max_extent_after,
+        extent_before_m=srep.extent_before,
+        extent_after_m=srep.extent_after,
+        centered=srep.centered,
+        scale_mode=srep.mode,
+        skipped_scale=srep.skipped_scale,
+        pred_norm_scale=float(pred_norm_scale),
+    )
+    if item["pre_rotation_x_deg"] is not None:
+        base_kw["pre_rotation_x_deg"] = item["pre_rotation_x_deg"]
+    if item["pre_rotation_matrix"] is not None:
+        base_kw["pre_rotation_matrix"] = item["pre_rotation_matrix"]
+    if srep.target_height_m is not None:
+        base_kw["target_height_m"] = float(srep.target_height_m)
+        base_kw["height_axis"] = srep.height_axis
+        base_kw["height_before_m"] = srep.height_before
+        base_kw["height_after_m"] = srep.height_after
+    if srep.scale_json_path:
+        base_kw["scale_json_path"] = srep.scale_json_path
+
+    raw_npz_path = str(npz_dir / f"{oid}.npz")
+    np.savez(raw_npz_path, pred=pred, gt=None, **base_kw)
+
+    norm_npz_path = str(npz_norm_dir / f"{oid}.npz")
+    np.savez(
+        norm_npz_path,
+        pred=pred_norm,
+        pred_raw=pred,
+        gt=None,
+        **base_kw,
+    )
+
+    png_path = ""
+    if not no_aff_vis:
+        title_suffix = (
+            f"  scale×{srep.scale_applied:.3f}"
+            if not srep.skipped_scale
+            else "  scale=1 (in band)"
+        )
+        png_path = str(png_dir / f"{oid}.png")
+        save_vis_png(
+            png_path,
+            item["points"],
+            None,
+            pred,
+            f"{oid}{title_suffix}",
+            threshold,
+            pred_vis=pred_norm,
+        )
+    return raw_npz_path, norm_npz_path, png_path
+
+
+def scale_report_row(item: dict) -> dict:
+    srep = item["scale_report"]
+    return {
+        "obj_id": item["obj_id"],
+        "mesh_path": item["mesh_path"],
+        "scale_json": srep.scale_json_path,
+        "pre_rotation_x_deg": item["pre_rotation_x_deg"],
+        "target_height_m": srep.target_height_m,
+        "height_axis": srep.height_axis,
+        "height_before_m": srep.height_before,
+        "height_after_m": srep.height_after,
+        "max_extent_before_m": srep.max_extent_before,
+        "max_extent_after_m": srep.max_extent_after,
+        "scale_applied": srep.scale_applied,
+        "skipped_scale": srep.skipped_scale,
+        "scale_mode": srep.mode,
+        "centered": srep.centered,
+    }
+
+
 def main() -> None:
     p = argparse.ArgumentParser(
         description="GLB/mesh → affordance v6 → PDM grasp candidate HDF5",
@@ -242,7 +361,7 @@ def main() -> None:
     p.add_argument("--n-samples", type=int, default=50, help="PDM poses per mesh")
     p.add_argument("--ddim-steps", type=int, default=50)
     p.add_argument("--num-points", type=int, default=4096)
-    p.add_argument("--seed", type=int, default=None, help="Fixed RNG seed (omit with --random-seed)")
+    p.add_argument("--seed", type=int, default=42, help="Fixed RNG seed for mesh sampling (+ obj index)")
     p.add_argument(
         "--random-seed",
         action="store_true",
@@ -274,9 +393,16 @@ def main() -> None:
         action="store_true",
         help="Input mesh is data_hub/meshes/SAM3DMesh/rotated_mesh/{dataset}/{obj}/mesh.ply; skip +X rotation, preserve frame, apply metric scale.",
     )
-  # extras
-    p.add_argument("--save-affordance-npz", action="store_true", help="Also write affordance npz per object")
-    p.add_argument("--affordance-npz-dir", type=Path, default=None)
+  # outputs
+    p.add_argument(
+        "--affordance-dir",
+        type=Path,
+        default=None,
+        help="Affordance npz/png root (default: <output-dir>/../../affordance or DEFAULT_AFF_OUT_DIR)",
+    )
+    p.add_argument("--no-affordance-output", action="store_true", help="Skip affordance npz/png/scale report")
+    p.add_argument("--no-aff-vis", action="store_true", help="Skip affordance PNG + grid (still writes npz)")
+    p.add_argument("--aff-grid-cols", type=int, default=4, help="Columns in affordance montage")
     p.add_argument(
         "--vis",
         action="store_true",
@@ -288,7 +414,7 @@ def main() -> None:
         "--vis-dir",
         type=Path,
         default=None,
-        help="Overlay PNG directory (default: <output-dir>/../vis)",
+        help="PDM overlay PNG directory (default: <output-dir>/../vis)",
     )
     p.add_argument("--vis-top", type=int, default=20, help="Max grippers drawn per PNG")
     p.add_argument("--device", default=None)
@@ -326,12 +452,14 @@ def main() -> None:
     vis_dir = args.vis_dir.expanduser().resolve() if args.vis_dir else (out_dir.parent / "vis")
     if args.vis:
         vis_dir.mkdir(parents=True, exist_ok=True)
-    npz_dir = args.affordance_npz_dir
-    if npz_dir is None and args.save_affordance_npz:
-        npz_dir = out_dir.parent / "affordance_npz"
-    if npz_dir is not None:
-        npz_dir = npz_dir.expanduser().resolve()
-        npz_dir.mkdir(parents=True, exist_ok=True)
+    if args.affordance_dir is not None:
+        affordance_dir = args.affordance_dir.expanduser().resolve()
+    elif out_dir.name == "candidates" and out_dir.parent.name == "pdm":
+        affordance_dir = out_dir.parent.parent / "affordance"
+    else:
+        affordance_dir = DEFAULT_AFF_OUT_DIR
+    if not args.no_affordance_output:
+        affordance_dir.mkdir(parents=True, exist_ok=True)
 
     device = torch.device(
         args.device or ("cpu" if args.cpu else ("cuda" if torch.cuda.is_available() else "cpu")),
@@ -361,7 +489,9 @@ def main() -> None:
     print(f"  z_yaw_deg:           {args.z_yaw_deg if args.z_yaw_deg is not None else '(none)'}")
     print(f"  n_samples / ddim:    {args.n_samples} / {args.ddim_steps}")
     print(f"  Output dir:          {out_dir}")
-    print(f"  Visualization:       {args.vis}  -> {vis_dir if args.vis else '(off)'}")
+    print(f"  Affordance out:      {affordance_dir if not args.no_affordance_output else '(off)'}")
+    print(f"  PDM visualization:   {args.vis}  -> {vis_dir if args.vis else '(off)'}")
+    print(f"  Mesh sample seed:    {'random' if args.random_seed else args.seed}")
     print(f"  Device:              {device}")
     print("=" * 72)
 
@@ -399,6 +529,8 @@ def main() -> None:
     batch_size = max(1, args.aff_batch_size)
     summary_rows: list[dict] = []
     vis_png_paths: list[str] = []
+    scale_rows: list[dict] = []
+    obj_ids_order: list[str] = []
 
     for start in range(0, len(prepared), batch_size):
         chunk = prepared[start : start + batch_size]
@@ -411,21 +543,32 @@ def main() -> None:
         for j, item in enumerate(chunk):
             oid = item["obj_id"]
             pred = preds[j].astype(np.float32)
-            print(f"\n  {oid}: affordance max={pred.max():.3f} mean={pred.mean():.4f}")
+            pred_norm, pred_norm_stats = normalize_affordance_pred(pred)
+            pred_norm_scale = float(pred_norm_stats.get("pred_span", 0.0))
+            print(
+                f"\n  {oid}: affordance max={pred.max():.3f} mean={pred.mean():.4f}  "
+                f"norm_scale={pred_norm_scale:.4f}",
+            )
+            obj_ids_order.append(oid)
+            scale_rows.append(scale_report_row(item))
 
-            if npz_dir is not None:
-                srep = item["scale_report"]
-                np.savez(
-                    npz_dir / f"{oid}.npz",
-                    points=item["points"],
-                    normals=item["normals"],
+            aff_npz_path = None
+            aff_npz_norm_path = None
+            aff_png_path = None
+            if not args.no_affordance_output:
+                aff_npz_path, aff_npz_norm_path, aff_png_path = save_affordance_outputs(
+                    affordance_dir=affordance_dir,
+                    item=item,
                     pred=pred,
-                    obj_id=oid,
+                    pred_norm=pred_norm,
+                    pred_norm_scale=pred_norm_scale,
                     threshold=aff_thresh,
-                    mesh_path=item["mesh_path"],
-                    scale_mode=srep.mode,
-                    scale_applied=srep.scale_applied,
+                    no_aff_vis=args.no_aff_vis,
                 )
+                print(f"  → affordance npz/{oid}.npz")
+                print(f"  → affordance npz_norm/{oid}.npz")
+                if aff_png_path:
+                    print(f"  → affordance png/{oid}.png")
 
             condition = build_condition_tensor(item["points"], item["normals"], pred)
             poses_np = run_pdm_sample(
@@ -439,48 +582,60 @@ def main() -> None:
                 reject_upward=args.reject_upward,
                 max_approach_z=args.max_approach_z,
             )
+
+            out_path = None
+            vis_png = None
+            n_candidates = 0
             if poses_np.size == 0:
                 print(f"  WARNING: no poses left after filters for {oid}")
-                continue
-
-            out_name = output_hdf5_name(oid, args.z_yaw_deg)
-            out_path = out_dir / out_name
-            write_candidates_hdf5(
-                str(out_path),
-                oid,
-                poses_np,
-                mesh_path=item["mesh_path"],
-                gripper_width=args.gripper_width,
-                dataset=args.dataset,
-            )
-            print(f"  → {out_path}  ({len(poses_np)} candidates)")
-
-            vis_png = None
-            if args.vis:
-                yaw_tag = ""
-                if args.z_yaw_deg is not None:
-                    yaw_tag = f"  yaw={int(round(float(args.z_yaw_deg))) % 360}°"
-                vis_name = out_name.replace("_grasp.hdf5", f"_pdm_overlay_top{min(len(poses_np), args.vis_top)}.png")
-                vis_png = str(vis_dir / vis_name)
-                save_candidate_overlay(
+            else:
+                n_candidates = int(len(poses_np))
+                out_name = output_hdf5_name(oid, args.z_yaw_deg)
+                out_path = out_dir / out_name
+                write_candidates_hdf5(
                     str(out_path),
-                    item["points"],
-                    vis_png,
-                    top=args.vis_top,
-                    affordance=pred,
-                    title_suffix=yaw_tag,
+                    oid,
+                    poses_np,
+                    mesh_path=item["mesh_path"],
+                    gripper_width=args.gripper_width,
+                    dataset=args.dataset,
                 )
-                vis_png_paths.append(vis_png)
-                print(f"  → {vis_png}")
+                print(f"  → {out_path}  ({n_candidates} candidates)")
+
+                if args.vis:
+                    yaw_tag = ""
+                    if args.z_yaw_deg is not None:
+                        yaw_tag = f"  yaw={int(round(float(args.z_yaw_deg))) % 360}°"
+                    vis_name = out_name.replace(
+                        "_grasp.hdf5",
+                        f"_pdm_overlay_top{min(n_candidates, args.vis_top)}.png",
+                    )
+                    vis_png = str(vis_dir / vis_name)
+                    save_candidate_overlay(
+                        str(out_path),
+                        item["points"],
+                        vis_png,
+                        top=args.vis_top,
+                        affordance=pred_norm,
+                        affordance_vmax_fixed=1.0,
+                        title_suffix=yaw_tag,
+                    )
+                    vis_png_paths.append(vis_png)
+                    print(f"  → {vis_png}")
 
             srep = item["scale_report"]
             summary_rows.append({
                 "obj_id": oid,
                 "mesh_path": item["mesh_path"],
-                "output_hdf5": str(out_path),
-                "n_candidates": int(len(poses_np)),
+                "output_hdf5": str(out_path) if out_path is not None else None,
+                "n_candidates": n_candidates,
                 "affordance_max": float(pred.max()),
                 "affordance_mean": float(pred.mean()),
+                "affordance_norm_scale": float(pred_norm_scale),
+                "affordance_norm_stats": dict(pred_norm_stats),
+                "affordance_npz": aff_npz_path,
+                "affordance_npz_norm": aff_npz_norm_path,
+                "affordance_png": aff_png_path or None,
                 "z_yaw_deg": args.z_yaw_deg,
                 "pdm_use_yaw_condition": bool(pdm_model.config.use_yaw_condition),
                 "scale_mode": srep.mode,
@@ -490,6 +645,38 @@ def main() -> None:
                 "vis_png": vis_png,
                 "scale_json": srep.scale_json_path,
             })
+
+    if not args.no_affordance_output:
+        scale_json = affordance_dir / "scale_report.json"
+        with open(scale_json, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "target_max_extent_m": args.target_max_extent,
+                    "scale_mode": args.scale_mode,
+                    "min_scale_factor": args.min_scale_factor,
+                    "auto_extent_lo": args.auto_extent_lo,
+                    "auto_extent_hi": args.auto_extent_hi,
+                    "train_max_extent_median": TRAIN_MAX_EXTENT_MEDIAN,
+                    "train_max_extent_p10": TRAIN_MAX_EXTENT_P10,
+                    "train_max_extent_p90": TRAIN_MAX_EXTENT_P90,
+                    "center_mesh": not args.no_center,
+                    "pre_rotation_x_deg": None if args.no_pre_rotate_x else float(args.pre_rotate_x_deg),
+                    "seed": None if args.random_seed else int(args.seed),
+                    "objects": scale_rows,
+                },
+                f,
+                indent=2,
+            )
+        print(f"\n  Affordance scale report: {scale_json}")
+        if not args.no_aff_vis and obj_ids_order:
+            save_inference_montage(
+                str(affordance_dir),
+                obj_ids_order,
+                cols=args.aff_grid_cols,
+                max_cell_width=512,
+                max_per_page=0,
+            )
+            print(f"  Affordance grid: {affordance_dir / 'all_objects_grid.png'}")
 
     if args.vis and len(vis_png_paths) > 1:
         overview_path = str(vis_dir / "overview.png")
@@ -503,9 +690,11 @@ def main() -> None:
                 "meshes": len(mesh_paths),
                 "affordance_checkpoint": str(aff_ckpt),
                 "pdm_checkpoint": str(pdm_ckpt),
+                "affordance_dir": str(affordance_dir) if not args.no_affordance_output else None,
                 "n_samples": args.n_samples,
                 "z_yaw_deg": args.z_yaw_deg,
                 "vis_dir": str(vis_dir) if args.vis else None,
+                "seed": None if args.random_seed else int(args.seed),
                 "objects": summary_rows,
             },
             f,
