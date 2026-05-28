@@ -21,6 +21,7 @@ from torch.utils.data import DataLoader, random_split
 PROJ = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, PROJ)
 
+from model.pdm.build_condition_cache import DEFAULT_OUTPUT as DEFAULT_CONDITION_H5
 from model.pdm.dataset import DEFAULT_MERGED_DIR, PDMMergedDataset, compute_pose_stats
 from model.pdm.model import PDM, PDMConfig
 
@@ -42,9 +43,40 @@ def _to_device(
     return points, pose_norm, yaw
 
 
+def _verify_condition_h5(path: str) -> None:
+    import warnings
+
+    import h5py
+
+    if not path or not os.path.isfile(path):
+        raise RuntimeError(
+            "PDM training requires a v6-prediction condition cache. Build it with:\n"
+            "  python3 -m model.pdm.build_condition_cache \\\n"
+            "    --merged-dir output/grasp_collect_no_rot/merged \\\n"
+            "    --output output/pdm/cache/conditions_4096_v6pred.h5"
+        )
+    with h5py.File(path, "r") as f:
+        src = str(f["metadata"].attrs.get("affordance_source", "") or "")
+    if src and src != "v6_prediction":
+        warnings.warn(
+            f"condition-h5 affordance_source={src!r} (expected 'v6_prediction'). "
+            "Rebuild cache with build_condition_cache before training.",
+            stacklevel=2,
+        )
+    elif not src:
+        warnings.warn(
+            "condition-h5 has no affordance_source metadata (old GT cache?). "
+            "Rebuild with `python -m model.pdm.build_condition_cache`.",
+            stacklevel=2,
+        )
+
+
 def train(args: argparse.Namespace) -> None:
     device = torch.device("cuda" if torch.cuda.is_available() and not args.cpu else "cpu")
     os.makedirs(args.save_dir, exist_ok=True)
+    if not args.condition_h5:
+        raise RuntimeError("Pass --condition-h5 (v6-prediction cache from build_condition_cache).")
+    _verify_condition_h5(os.path.abspath(args.condition_h5))
 
     dataset = PDMMergedDataset(
         merged_dir=args.merged_dir,
@@ -188,8 +220,16 @@ def train(args: argparse.Namespace) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Train Pose Diffusion Model (PDM)")
     parser.add_argument("--merged-dir", default=DEFAULT_MERGED_DIR)
-    parser.add_argument("--condition-h5", default=None, help="Precomputed PDM condition cache HDF5")
-    parser.add_argument("--affordance-h5", default=None)
+    parser.add_argument(
+        "--condition-h5",
+        default=DEFAULT_CONDITION_H5,
+        help="PDM condition cache with v6-predicted affordance (build_condition_cache)",
+    )
+    parser.add_argument(
+        "--affordance-h5",
+        default=None,
+        help="Deprecated for training; only used if an object is missing from --condition-h5",
+    )
     parser.add_argument("--save-dir", default=os.path.join(PROJ, "output", "pdm", "checkpoints"))
     parser.add_argument("--n-points", type=int, default=4096)
     parser.add_argument("--batch-size", type=int, default=32)

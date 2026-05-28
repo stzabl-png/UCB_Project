@@ -96,12 +96,37 @@ def load_object_points(
     condition_h5: str | None,
     n_points: int,
     mesh_root: str,
+    use_condition_cache: bool = True,
 ) -> np.ndarray:
-    store = PDMConditionStore(condition_h5)
-    if store.has(obj_id):
-        cond = store.load(obj_id)
-        return _resample_rows(cond.points, n_points)[:, :3]
+    """Background points for overlays (metric rotated_mesh frame)."""
+    if use_condition_cache and condition_h5:
+        store = PDMConditionStore(condition_h5)
+        if store.has(obj_id):
+            cond = store.load(obj_id)
+            return _resample_rows(cond.points, n_points)[:, :3]
     return sample_mesh_condition(obj_id, n_points, mesh_root=mesh_root).points[:, :3]
+
+
+def load_overlay_background(
+    obj_id: str,
+    hdf5_path: str,
+    args: argparse.Namespace,
+) -> tuple[np.ndarray, np.ndarray | None]:
+    """Points (+ optional affordance) aligned with glb_to_pdm_grasp / batch_pdm inference."""
+    use_cache = bool(getattr(args, "use_condition_cache", True))
+    if "_pool_grasp" in os.path.basename(hdf5_path):
+        use_cache = False
+    if use_cache and args.condition_h5:
+        store = PDMConditionStore(args.condition_h5)
+        if store.has(obj_id):
+            cond = store.load(obj_id)
+            pts = _resample_rows(cond.points, args.bg_points)
+            aff = pts[:, 6] if pts.shape[1] > 6 else None
+            return pts[:, :3], aff
+    cond = sample_mesh_condition(obj_id, args.bg_points, mesh_root=args.mesh_root)
+    pts = cond.points
+    aff = pts[:, 6] if pts.shape[1] > 6 else None
+    return pts[:, :3], aff
 
 
 def _axis_equal(ax, pts: np.ndarray) -> None:
@@ -251,22 +276,21 @@ def save_one(path: str, args: argparse.Namespace) -> str:
     cands = load_candidates(path, top=args.top)
     if not cands:
         raise RuntimeError(f"no candidates in {path}")
-    pts = load_object_points(
-        obj_id,
-        condition_h5=args.condition_h5,
-        n_points=args.bg_points,
-        mesh_root=args.mesh_root,
-    )
+    pts, affordance = load_overlay_background(obj_id, path, args)
     if len(pts) > args.bg_points:
         pts = _resample_rows(pts, args.bg_points)
+        if affordance is not None and affordance.shape[0] > args.bg_points:
+            idx = np.linspace(0, affordance.shape[0] - 1, args.bg_points).astype(int)
+            affordance = affordance[idx]
 
     os.makedirs(args.outdir, exist_ok=True)
     out_path = os.path.join(args.outdir, f"{obj_id}_pdm_overlay_top{len(cands)}.png")
     return save_candidate_overlay(
         path,
-        pts[:, :3] if pts.shape[1] > 3 else pts,
+        pts,
         out_path,
         top=args.top,
+        affordance=affordance,
         bg_points=args.bg_points,
         width_scale=args.width_scale,
         elev=args.elev,
@@ -282,27 +306,16 @@ def render_one_image(path: str, args: argparse.Namespace):
     cands = load_candidates(path, top=args.top)
     if not cands:
         raise RuntimeError(f"no candidates in {path}")
-    pts = load_object_points(
-        obj_id,
-        condition_h5=args.condition_h5,
-        n_points=args.bg_points,
-        mesh_root=args.mesh_root,
-    )
+    pts, affordance = load_overlay_background(obj_id, path, args)
     if len(pts) > args.bg_points:
         pts = _resample_rows(pts, args.bg_points)
+        if affordance is not None and affordance.shape[0] > args.bg_points:
+            idx = np.linspace(0, affordance.shape[0] - 1, args.bg_points).astype(int)
+            affordance = affordance[idx]
 
     fig = plt.figure(figsize=(8, 8), facecolor="#1a1a2e")
     ax = fig.add_subplot(111, projection="3d", facecolor="#1a1a2e")
-    ax.scatter(
-        pts[:, 0],
-        pts[:, 1],
-        pts[:, 2],
-        c="#5ab4d4",
-        s=2.0,
-        alpha=0.35,
-        linewidths=0,
-        depthshade=False,
-    )
+    _scatter_object_points(ax, pts, affordance=affordance)
     cmap = plt.get_cmap("hsv")
     for i, cand in enumerate(cands):
         draw_gripper(ax, cand, cmap(i / max(len(cands), 1))[:3], width_scale=args.width_scale)
@@ -440,6 +453,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--hdf5", nargs="*", default=None, help="Specific candidate HDF5 file(s)")
     parser.add_argument("--candidates-dir", default=os.path.join(PROJ, "output", "pdm", "candidates"))
     parser.add_argument("--condition-h5", default=os.path.join(PROJ, "output", "pdm", "cache", "conditions_4096.h5"))
+    parser.add_argument(
+        "--use-condition-cache",
+        action="store_true",
+        default=False,
+        help="Use cached PDM condition points (training cache). Default: resample metric rotated_mesh.",
+    )
     parser.add_argument("--outdir", default=os.path.join(PROJ, "output", "pdm", "vis_overlay"))
     parser.add_argument("--obj", nargs="*", default=None)
     parser.add_argument("--all", action="store_true")

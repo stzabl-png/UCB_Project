@@ -641,6 +641,14 @@ class PDMMergedDataset(Dataset):
             cond = self.conditions.load(obj_id)
             cond.points = _resample_rows(cond.points, self.n_points)
         elif self.affordance.has(obj_id):
+            import warnings
+
+            warnings.warn(
+                f"PDM condition for {obj_id} loaded from affordance_h5 (GT soft labels). "
+                "Train with --condition-h5 from `python -m model.pdm.build_condition_cache` "
+                "(v6 predictions), not raw affordance_h5.",
+                stacklevel=2,
+            )
             cond = self.affordance.load(obj_id)
             cond.points = _resample_rows(cond.points, self.n_points)
         else:
