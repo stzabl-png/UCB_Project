@@ -21,6 +21,7 @@ from sim.evaluation.scene_builder import (
     TABLE_POSITION,
     TABLE_SCALE,
     TABLE_TOP_Z,
+    _euler_xyz_deg_to_wxyz,
 )
 
 SIM_DIR = Path(__file__).resolve().parents[1]
@@ -579,6 +580,97 @@ def _query_dp3_server(url, pc_obs, ap_obs, timeout):
     return np.asarray(r["action"], dtype=np.float32)
 
 
+# ============================================================
+# cuRobo 0.8 IK helper (DP3 / online-policy path).
+# We can't use partner's plan_trajectory()/init_curobo() in this branch
+# because they import from curobo.wrap.reacher.motion_gen which is the
+# v0.7 API; our env_isaaclab has v0.8.0 installed (required for RTX 5090
+# Blackwell sm_120). This helper uses v0.8's curobo.inverse_kinematics
+# directly. partner's plan_trajectory() is untouched and still used by
+# execute_open_loop_grasp() for the a2g_pdm path.
+# ============================================================
+_IK_V08_SOLVER = None
+_IK_V08_TOOL_LINK = None
+_IK_V08_BATCH_SIZE = 16   # n_action_steps=8 default; pad room for n_obs steps
+
+
+def _get_ik_v08_solver():
+    """Lazy global init of the v0.8 IK solver. Reused across episodes."""
+    global _IK_V08_SOLVER, _IK_V08_TOOL_LINK
+    if _IK_V08_SOLVER is None:
+        from curobo.inverse_kinematics import InverseKinematics, InverseKinematicsCfg
+        cfg = InverseKinematicsCfg.create(
+            robot="franka.yml",          # cuRobo bundled config
+            num_seeds=64,
+            max_batch_size=_IK_V08_BATCH_SIZE,
+            position_tolerance=0.005,
+            orientation_tolerance=0.05,
+            self_collision_check=True,
+            success_requires_convergence=False,  # don't reject sub-tolerance solutions
+        )
+        _IK_V08_SOLVER = InverseKinematics(cfg)
+        _IK_V08_TOOL_LINK = _IK_V08_SOLVER.tool_frames[0]
+        cprint(f"  🧊 cuRobo 0.8 IK initialized — tool_link={_IK_V08_TOOL_LINK} "
+               f"batch={_IK_V08_BATCH_SIZE} seeds=64", "green")
+    return _IK_V08_SOLVER, _IK_V08_TOOL_LINK
+
+
+def _solve_ik_chain_v08(targets_world, robot_pos_world, robot_quat_wxyz_world):
+    """Batched IK in cuRobo 0.8 API.
+
+    Args:
+        targets_world: list of (pos_world(3), quat_world_wxyz(4)) — target EE
+            poses in world frame.
+        robot_pos_world: (3,) Franka base position in world frame
+        robot_quat_wxyz_world: (4,) Franka base orientation in world frame
+
+    Returns:
+        qpos: (N, 7) np.float64, NaN-rows where IK failed
+        ok:   (N,) np.bool — per-target success
+    """
+    import torch
+    from curobo.types import GoalToolPose, Pose
+
+    n = len(targets_world)
+    ik_solver, tool_link = _get_ik_v08_solver()
+
+    # World → robot base frame transform
+    R_world_base = Rotation.from_quat([
+        robot_quat_wxyz_world[1], robot_quat_wxyz_world[2],
+        robot_quat_wxyz_world[3], robot_quat_wxyz_world[0],
+    ]).as_matrix()
+    R_base_world = R_world_base.T
+    p_base_world = -R_base_world @ np.asarray(robot_pos_world, dtype=np.float64)
+
+    positions_base = np.zeros((n, 3), dtype=np.float32)
+    quats_base_wxyz = np.zeros((n, 4), dtype=np.float32)
+    for i, (pos_w, q_w_wxyz) in enumerate(targets_world):
+        positions_base[i] = (R_base_world @ np.asarray(pos_w, dtype=np.float64) + p_base_world).astype(np.float32)
+        R_w = Rotation.from_quat([q_w_wxyz[1], q_w_wxyz[2], q_w_wxyz[3], q_w_wxyz[0]]).as_matrix()
+        R_base = R_base_world @ R_w
+        q_xyzw = Rotation.from_matrix(R_base).as_quat()
+        quats_base_wxyz[i] = np.array([q_xyzw[3], q_xyzw[0], q_xyzw[1], q_xyzw[2]], dtype=np.float32)
+
+    pos_t = torch.tensor(positions_base, device="cuda")
+    quat_t = torch.tensor(quats_base_wxyz, device="cuda")
+    goal = Pose(position=pos_t, quaternion=quat_t)
+    result = ik_solver.solve_pose(
+        GoalToolPose.from_poses({tool_link: goal}, num_goalset=1)
+    )
+    # result.js_solution.position shape: (B, 1, 9) — squeeze goalset dim,
+    # slice first 7 dims (arm joints; finger joints managed separately)
+    qpos_t = result.js_solution.position
+    if qpos_t.ndim == 3:
+        qpos_t = qpos_t.squeeze(1)        # (B, 9)
+    qpos = qpos_t[:, :7].detach().cpu().numpy().astype(np.float64)   # (B, 7)
+    ok = result.success.squeeze().detach().cpu().numpy().astype(bool)
+    # Mark failed rows as NaN so caller's ok-mask is the source of truth
+    if ok.ndim == 0:
+        ok = np.array([bool(ok)])
+    qpos[~ok] = np.nan
+    return qpos, ok
+
+
 def _get_server_info(url, timeout=10):
     import requests
     return requests.get(f"{url}/info", timeout=timeout).json()
@@ -716,31 +808,21 @@ def execute_closed_loop_actions(scene, payload: dict, pc0_world: np.ndarray | No
             chunk_wps.append((pos_w, q_franka))
             chunk_grips.append(float(a[7]))
 
-        # ── IK chain (TODO: titan branch may have its own IK helper; this is a
-        # placeholder. For first pass, port solve_ik_chain from gate3 branch.) ──
-        # For now, use cuRobo motion gen to get joint positions per waypoint:
-        global _CUROBO_MG
-        if _CUROBO_MG is None:
-            _CUROBO_MG = init_curobo(scene)
-        qpos = []
-        ok = []
-        for wp_pos, wp_quat in chunk_wps:
-            try:
-                traj = plan_trajectory(
-                    _CUROBO_MG, scene, wp_pos, wp_quat,
-                    label=f"dp3_chunk{chunk}",
-                    use_object_mesh=False,
-                )
-                if traj is not None and len(traj) > 0:
-                    qpos.append(traj[-1])
-                    ok.append(True)
-                else:
-                    qpos.append(last_qpos.copy())
-                    ok.append(False)
-            except Exception:
-                qpos.append(last_qpos.copy()); ok.append(False)
-        qpos = np.asarray(qpos, dtype=np.float64)
-        ok = np.asarray(ok, dtype=bool)
+        # ── IK chain (v0.8 batched, see _solve_ik_chain_v08) ──
+        # Robot base pose in world frame, from titan's ROBOT_POSITION /
+        # ROBOT_ORIENTATION constants (scene_builder.py).
+        robot_quat_wxyz_world = _euler_xyz_deg_to_wxyz(list(ROBOT_ORIENTATION))
+        try:
+            qpos_all, ok = _solve_ik_chain_v08(
+                chunk_wps,
+                robot_pos_world=np.array(ROBOT_POSITION, dtype=np.float64),
+                robot_quat_wxyz_world=robot_quat_wxyz_world,
+            )
+            qpos = np.where(np.isnan(qpos_all), last_qpos, qpos_all)
+        except Exception as e:
+            cprint(f"  ❌ v0.8 IK chain failed chunk {chunk}: {e}", "red")
+            qpos = np.tile(last_qpos, (n_action, 1))
+            ok = np.zeros(n_action, dtype=bool)
         cprint(f"  [chunk {chunk}] IK {ok.sum()}/{n_action} reachable, "
                f"grip [{min(chunk_grips):.2f}, {max(chunk_grips):.2f}], closed={gripper_closed}",
                "cyan")
