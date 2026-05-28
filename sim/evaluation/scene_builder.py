@@ -54,7 +54,7 @@ except Exception:
 def find_obj_usd_path(obj_id: str) -> str | None:
     """Search output/obj_usd then sim/assets for an object USD."""
     obj_usd_root = PROJ_DIR / "output" / "obj_usd"
-    datasets_order = ["oakink", "ycb", "arctic", "dexycb", "egocentric", "ho3d_v3"]
+    datasets_order = ["oakink", "ycb", "arctic", "dexycb", "egocentric", "ho3d_v3", "unseen", "egodex"]
     usd_search_paths = (
         [obj_usd_root / ds / f"{obj_id}.usd" for ds in datasets_order]
         + [SIM_DIR / "assets" / f"{obj_id}.usd"]

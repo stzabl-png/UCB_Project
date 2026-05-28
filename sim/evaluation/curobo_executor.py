@@ -11,6 +11,7 @@ import h5py
 import numpy as np
 import torch
 from scipy.spatial.transform import Rotation
+from scipy.spatial.transform import Slerp
 from termcolor import cprint
 
 from evaluation.specs import ExecutionResult, OpenLoopGraspCommand, SceneSpec
@@ -191,19 +192,13 @@ def init_curobo(scene: SimEvaluationContext):
     return mg
 
 
-def plan_trajectory(
+def _sync_curobo_world_for_scene(
     motion_gen,
     scene: SimEvaluationContext,
-    target_pos_world,
-    target_quat_wxyz_world,
     *,
-    label: str,
-    use_object_mesh: bool,
-):
-    from curobo.types.math import Pose
-    from curobo.types.robot import JointState as CuJointState
-    from curobo.wrap.reacher.motion_gen import MotionGenPlanConfig
-
+    include_object_mesh: bool,
+) -> np.ndarray:
+    """Sync cuRobo collision world (table/ground, optional object mesh). Returns T_robot_world."""
     _, T_robot_world = get_robot_base_transform()
     legacy_scene = scene.as_legacy_dict()
     table_pos_r = scene.metadata.get(
@@ -221,9 +216,28 @@ def plan_trajectory(
         ground_pos_r,
         TABLE_SCALE,
         T_robot_world,
-        include_object_mesh=use_object_mesh and scene.curobo_mesh_vertices is not None,
+        include_object_mesh=include_object_mesh and scene.curobo_mesh_vertices is not None,
     )
     scene.update_from_legacy_dict(legacy_scene)
+    return T_robot_world
+
+
+def plan_trajectory(
+    motion_gen,
+    scene: SimEvaluationContext,
+    target_pos_world,
+    target_quat_wxyz_world,
+    *,
+    label: str,
+    use_object_mesh: bool,
+):
+    from curobo.types.math import Pose
+    from curobo.types.robot import JointState as CuJointState
+    from curobo.wrap.reacher.motion_gen import MotionGenPlanConfig
+
+    T_robot_world = _sync_curobo_world_for_scene(
+        motion_gen, scene, include_object_mesh=use_object_mesh
+    )
 
     pos_r, quat_r = world_to_robot_pose(target_pos_world, target_quat_wxyz_world, T_robot_world)
     current_joints = scene.franka.get_joint_positions()[:7]
@@ -254,6 +268,87 @@ def plan_trajectory(
         return traj.position.cpu().numpy()
     cprint(f"      [{label}] plan failed", "red")
     return None
+
+
+def _try_final_straight_approach(
+    motion_gen,
+    scene: SimEvaluationContext,
+    *,
+    target_pos_world: np.ndarray,
+    target_quat_wxyz_world: np.ndarray,
+    hold_steps: int = 2,
+) -> bool:
+    """Final straight approach via cuRobo constrained planning (same collision world as final).
+
+    Syncs table + ground only (no object mesh), then runs ``plan_single`` with
+    ``PoseCostMetric`` path constraints (same idea as ``MotionGen.plan_grasp`` approach
+    segment): orientation and lateral axes held in the grasp frame, motion along the
+    approach axis. Includes world + self-collision checking via MotionGen.
+    """
+    from curobo.rollout.cost.pose_cost import PoseCostMetric
+    from curobo.types.math import Pose
+    from curobo.types.robot import JointState as CuJointState
+    from curobo.wrap.reacher.motion_gen import MotionGenPlanConfig
+
+    franka = scene.franka
+    world = scene.world
+    render = scene.render
+
+    T_robot_world = _sync_curobo_world_for_scene(motion_gen, scene, include_object_mesh=False)
+
+    target_pos_world = np.asarray(target_pos_world, dtype=np.float64).reshape(3)
+    target_quat_wxyz_world = np.asarray(target_quat_wxyz_world, dtype=np.float64).reshape(4)
+    pos_r, quat_r = world_to_robot_pose(target_pos_world, target_quat_wxyz_world, T_robot_world)
+    goal_pose = Pose.from_list(
+        [
+            float(pos_r[0]),
+            float(pos_r[1]),
+            float(pos_r[2]),
+            float(quat_r[0]),
+            float(quat_r[1]),
+            float(quat_r[2]),
+            float(quat_r[3]),
+        ]
+    )
+
+    cur_q = franka.get_joint_positions()[:7]
+    start_state = CuJointState.from_position(
+        torch.tensor(cur_q, dtype=torch.float32).unsqueeze(0).cuda(),
+        joint_names=[f"panda_joint{i}" for i in range(1, 8)],
+    )
+
+    # Default from MotionGen.plan_grasp: lock orientation + lateral motion in grasp frame,
+    # free axis aligned with approach (index 5 in [ox,oy,oz, px,py,pz] weight vector).
+    approach_constraint = [0.1, 0.1, 0.1, 0.1, 0.1, 0.0]
+    hold_metric = PoseCostMetric(
+        hold_partial_pose=True,
+        hold_vec_weight=motion_gen.tensor_args.to_device(approach_constraint),
+        project_to_goal_frame=True,
+    )
+    plan_config = MotionGenPlanConfig(
+        max_attempts=10,
+        enable_graph=True,
+        enable_opt=True,
+        pose_cost_metric=hold_metric,
+    )
+    try:
+        result = motion_gen.plan_single(start_state, goal_pose, plan_config)
+    finally:
+        motion_gen.update_pose_cost_metric(PoseCostMetric.reset_metric())
+
+    ok = result.success.item() if hasattr(result.success, "item") else bool(result.success)
+    if not ok:
+        cprint("      [final-straight] cuRobo constrained approach plan failed", "yellow")
+        return False
+
+    traj = result.get_interpolated_plan()
+    for joint_pos in traj.position.cpu().numpy():
+        gripper = franka.get_joint_positions()[7:9]
+        franka.set_joint_positions(np.concatenate([joint_pos, gripper]))
+        for _ in range(int(max(1, hold_steps))):
+            world.step(render=render)
+    cprint(f"      [final-straight] cuRobo constrained plan OK: {traj.position.shape[0]} steps", "green")
+    return True
 
 
 def _command_to_world_target(scene: SimEvaluationContext, command: OpenLoopGraspCommand):
@@ -305,6 +400,7 @@ def execute_open_loop_grasp(scene: SimEvaluationContext, command: OpenLoopGraspC
         "pregrasp_plan_success": False,
         "direct_plan_success": False,
         "final_plan_success": False,
+        "final_plan_mode": "",
         "lift_plan_success": False,
     }
 
@@ -367,24 +463,43 @@ def execute_open_loop_grasp(scene: SimEvaluationContext, command: OpenLoopGraspC
     for _ in range(10):
         world.step(render=render)
 
-    traj_final = plan_trajectory(
-        _CUROBO_MG,
-        scene,
-        pos_world,
-        quat_wxyz,
-        label="final",
-        use_object_mesh=False,
-    )
-    planning["final_plan_success"] = traj_final is not None
-    if traj_final is None:
-        res = _base_result(False, "final_plan")
-        res.planning = planning
-        return res
-    for joint_pos in traj_final:
-        gripper = franka.get_joint_positions()[7:9]
-        franka.set_joint_positions(np.concatenate([joint_pos, gripper]))
-        for _ in range(3):
-            world.step(render=render)
+    # Final approach: prefer a straight-line EE approach, then fall back to cuRobo.
+    straight_ok = False
+    try:
+        straight_ok = _try_final_straight_approach(
+            _CUROBO_MG,
+            scene,
+            target_pos_world=pos_world,
+            target_quat_wxyz_world=quat_wxyz,
+            hold_steps=2,
+        )
+    except Exception as exc:
+        cprint(f"      [final-straight] exception: {exc}", "yellow")
+        straight_ok = False
+
+    if straight_ok:
+        planning["final_plan_success"] = True
+        planning["final_plan_mode"] = "straight"
+    else:
+        traj_final = plan_trajectory(
+            _CUROBO_MG,
+            scene,
+            pos_world,
+            quat_wxyz,
+            label="final",
+            use_object_mesh=False,
+        )
+        planning["final_plan_success"] = traj_final is not None
+        planning["final_plan_mode"] = "curobo" if traj_final is not None else ""
+        if traj_final is None:
+            res = _base_result(False, "final_plan")
+            res.planning = planning
+            return res
+        for joint_pos in traj_final:
+            gripper = franka.get_joint_positions()[7:9]
+            franka.set_joint_positions(np.concatenate([joint_pos, gripper]))
+            for _ in range(3):
+                world.step(render=render)
 
     franka.close_gripper()
     force_log = []
