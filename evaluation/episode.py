@@ -80,7 +80,13 @@ def discover_obj_ids(
     if candidate_dir:
         cdir = Path(candidate_dir).expanduser()
         if cdir.is_dir():
-            for name in sorted(os.listdir(cdir)):
+            for entry in sorted(cdir.iterdir()):
+                if entry.is_dir():
+                    h5s = list(entry.glob("*_grasp.hdf5"))
+                    if h5s:
+                        found.append(entry.name)
+                    continue
+                name = entry.name
                 if not name.endswith("_grasp.hdf5"):
                     continue
                 if "_yaw" in name:
@@ -99,12 +105,19 @@ def discover_obj_ids(
 
 
 def default_candidate_hdf5(candidate_dir: Path, obj_id: str, z_yaw_deg: float) -> Path:
+    """Resolve eval_pool / batch pool HDF5 (flat or per-object subdir)."""
     tag = int(round(float(z_yaw_deg))) % 360
-    yaw_path = candidate_dir / f"{obj_id}_yaw{tag:03d}_grasp.hdf5"
-    if yaw_path.is_file():
-        return yaw_path
-    plain = candidate_dir / f"{obj_id}_grasp.hdf5"
-    return plain
+    candidates = [
+        candidate_dir / f"{obj_id}_yaw{tag:03d}_grasp.hdf5",
+        candidate_dir / f"{obj_id}_yaw{tag:03d}_pool_grasp.hdf5",
+        candidate_dir / obj_id / f"{obj_id}_yaw{tag:03d}_pool_grasp.hdf5",
+        candidate_dir / obj_id / f"{obj_id}_yaw{tag:03d}_grasp.hdf5",
+        candidate_dir / f"{obj_id}_grasp.hdf5",
+    ]
+    for path in candidates:
+        if path.is_file():
+            return path.resolve()
+    return candidates[0]
 
 
 def build_episode_id(

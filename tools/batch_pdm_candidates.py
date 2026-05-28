@@ -12,6 +12,7 @@ import json
 import os
 import secrets
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -28,8 +29,17 @@ if str(PROJ) not in sys.path:
 from model.inference_v6 import default_threshold, load_model, predict_heatmap_batch  # noqa: E402
 from model.pdm.dataset import yaw_feature_from_deg  # noqa: E402
 from model.pdm.model import PDM  # noqa: E402
-from model.pdm.pose_codec import R_ADAPT, TCP_OFFSET, pose9_to_command, rotation_to_6d  # noqa: E402
+from model.pdm.pose_codec import (  # noqa: E402
+    R_ADAPT,
+    TCP_OFFSET,
+    CommandPose,
+    command_to_executed,
+    pose9_to_command,
+    rotation_to_6d,
+)
 from model.pdm.sample import write_candidates_hdf5  # noqa: E402
+from model.pdm.mesh_points import resolve_metric_dataset as _resolve_metric_dataset_mp  # noqa: E402
+from model.pdm.mesh_points import resolve_mesh_path as _resolve_mesh_path_mp  # noqa: E402
 from tools.infer_mesh_v6 import (  # noqa: E402
     apply_pre_rotation_x,
     load_triangle_mesh,
@@ -48,6 +58,11 @@ OBJECT_POSITION = [0.0, 0.55, TABLE_TOP_Z]
 OBJECT_ORIENTATION = [0.0, 0.0, 0.0]
 HARD_GATE_TABLE_MARGIN = 0.005
 DEFAULT_GRIPPER_WIDTH = 0.06
+# Max distance from grasp-quad samples to mesh surface (object frame, metres).
+GRASP_SURFACE_EPS = 0.003
+# Bilinear grid on wrist-back / fingertip-front quad (object frame).
+GRASP_QUAD_U_SAMPLES = 8
+GRASP_QUAD_V_SAMPLES = 4
 
 
 def _load_json(path: Path) -> Any:
@@ -109,19 +124,13 @@ def _make_transform(pos, euler_xyz_deg) -> np.ndarray:
     return t
 
 
+def _resolve_metric_dataset(obj_id: str, dataset: str | None) -> str | None:
+    """Infer oakink/ycb/... for scale.json; never use placeholder 'evaluation'."""
+    return _resolve_metric_dataset_mp(obj_id, dataset)
+
+
 def _resolve_mesh_path(obj_id: str, mesh_root: str, dataset: str | None) -> Path:
-    root = Path(mesh_root).expanduser().resolve()
-    ds_guess = dataset if dataset and dataset != "evaluation" else "oakink"
-    candidates = [
-        root / ds_guess / obj_id / "mesh.ply",
-        root / obj_id / "mesh.ply",
-    ]
-    for ds in ("oakink", "ycb", "arctic", "dexycb", "egocentric", "ho3d_v3"):
-        candidates.append(root / ds / obj_id / "mesh.ply")
-    for path in candidates:
-        if path.is_file():
-            return path
-    raise FileNotFoundError(f"rotated SAM3D mesh not found for {obj_id} under {root}")
+    return _resolve_mesh_path_mp(obj_id, mesh_root, dataset)
 
 
 def _prepare_mesh(
@@ -203,20 +212,105 @@ def _sample_pdm_batch(
     return pose.cpu().numpy().astype(np.float32)
 
 
-def _mesh_contains(mesh: trimesh.Trimesh, point: np.ndarray) -> tuple[bool, str]:
-    p = np.asarray(point, dtype=np.float64).reshape(1, 3)
+def _grasp_footprint_object(cmd, gripper_width: float) -> dict[str, np.ndarray]:
+    """TCP, wrist, and finger tips in object_mesh frame (same as metric mesh)."""
+    tcp = np.asarray(cmd.position, dtype=np.float64)
+    r_cmd = np.asarray(cmd.rotation, dtype=np.float64)
+    executed = command_to_executed(cmd.position, cmd.rotation)
+    wrist = np.asarray(executed.position, dtype=np.float64)
+    finger = r_cmd[:, 0]
+    half_width = max(float(gripper_width) * 0.5, 0.001)
+    left_tip = tcp - finger * half_width
+    right_tip = tcp + finger * half_width
+    return {
+        "tcp": tcp,
+        "wrist": wrist,
+        "finger": finger,
+        "left_tip": left_tip,
+        "right_tip": right_tip,
+    }
+
+
+def _grasp_footprint_quad_corners(cmd, gripper_width: float) -> tuple[np.ndarray, ...]:
+    """Wrist back edge (P0,P1) to fingertip front edge (P3,P2) in object frame."""
+    fp = _grasp_footprint_object(cmd, gripper_width)
+    finger = fp["finger"]
+    half_width = max(float(gripper_width) * 0.5, 0.001)
+    wrist = fp["wrist"]
+    p0 = wrist - finger * half_width
+    p1 = wrist + finger * half_width
+    p2 = fp["right_tip"]
+    p3 = fp["left_tip"]
+    return p0, p1, p2, p3
+
+
+def _sample_grasp_quad_points(
+    cmd,
+    gripper_width: float,
+    *,
+    nu: int = GRASP_QUAD_U_SAMPLES,
+    nv: int = GRASP_QUAD_V_SAMPLES,
+) -> np.ndarray:
+    """Uniform samples on the grasp envelope quad (wrist span × fingertip span)."""
+    p0, p1, p2, p3 = _grasp_footprint_quad_corners(cmd, gripper_width)
+    us = np.linspace(0.0, 1.0, max(2, int(nu)))
+    vs = np.linspace(0.0, 1.0, max(2, int(nv)))
+    rows: list[np.ndarray] = []
+    for u in us:
+        back = (1.0 - vs)[:, None] * p0 + vs[:, None] * p1
+        front = (1.0 - vs)[:, None] * p3 + vs[:, None] * p2
+        rows.append((1.0 - u) * back + u * front)
+    return np.concatenate(rows, axis=0)
+
+
+def _batch_points_near_mesh_surface(
+    mesh: trimesh.Trimesh,
+    points: np.ndarray,
+    *,
+    eps: float = GRASP_SURFACE_EPS,
+) -> tuple[bool, str, float]:
+    """True when any sample is inside the mesh or within eps of its surface."""
+    pts = np.asarray(points, dtype=np.float64).reshape(-1, 3)
+    if pts.size == 0:
+        return False, "miss", float("inf")
     try:
-        return bool(mesh.contains(p)[0]), "trimesh.contains"
+        if np.any(mesh.contains(pts)):
+            return True, "contains", 0.0
     except Exception:
         pass
     try:
-        signed = trimesh.proximity.signed_distance(mesh, p)
-        return bool(float(signed[0]) >= 0.0), "signed_distance"
+        _closest, dist, _ = trimesh.proximity.closest_point(mesh, pts)
+        min_dist = float(np.min(dist))
+        if min_dist <= float(eps):
+            return True, "closest_point", min_dist
+        return False, "miss", min_dist
     except Exception:
-        pass
-    lo, hi = mesh.bounds
-    eps = 1e-4
-    return bool(np.all(p[0] >= lo - eps) and np.all(p[0] <= hi + eps)), "bbox_fallback"
+        return False, "miss", float("inf")
+
+
+def _grasp_quad_contacts_mesh(
+    mesh: trimesh.Trimesh,
+    cmd,
+    gripper_width: float,
+    *,
+    nu: int = GRASP_QUAD_U_SAMPLES,
+    nv: int = GRASP_QUAD_V_SAMPLES,
+    eps: float = GRASP_SURFACE_EPS,
+) -> tuple[bool, str, float]:
+    """True when the wrist–fingertip grasp quad contacts the mesh (batch closest_point)."""
+    pts = _sample_grasp_quad_points(cmd, gripper_width, nu=nu, nv=nv)
+    ok, method, min_dist = _batch_points_near_mesh_surface(mesh, pts, eps=eps)
+    return ok, method, min_dist
+
+
+def _object_points_to_world(
+    points_obj: np.ndarray, t_world_obj: np.ndarray, object_scale: float
+) -> np.ndarray:
+    scaled = np.asarray(points_obj, dtype=np.float64) * float(object_scale)
+    out = []
+    for p in scaled:
+        out.append((t_world_obj @ np.append(p, 1.0))[:3])
+    return np.stack(out, axis=0)
 
 
 def _hard_gate_pose(
@@ -228,66 +322,74 @@ def _hard_gate_pose(
     object_scale: float,
     gripper_width: float,
     table_margin: float,
+    t_world_obj: np.ndarray | None = None,
 ) -> tuple[bool, str, dict, np.ndarray]:
     cmd = pose9_to_command(pose9)
     pose9_out = np.asarray(pose9, dtype=np.float32).copy()
-    tcp_obj = np.asarray(cmd.position, dtype=np.float64)
-    inside, inside_method = _mesh_contains(mesh, tcp_obj)
-    if not inside:
-        return False, "tcp_outside_mesh", {"inside_method": inside_method}, pose9_out
+    if t_world_obj is None:
+        placement = _resolve_object_placement(obj_id, object_scale, z_yaw_deg)
+        t_world_obj = _make_transform(placement["pos"], placement["ori"])
 
-    placement = _resolve_object_placement(obj_id, object_scale, z_yaw_deg)
-    t_world_obj = _make_transform(placement["pos"], placement["ori"])
-    tcp_obj_scaled = tcp_obj * float(object_scale)
-    tcp_world = (t_world_obj @ np.append(tcp_obj_scaled, 1.0))[:3]
-    rot_world_cmd = t_world_obj[:3, :3] @ np.asarray(cmd.rotation, dtype=np.float64)
-    finger_world = rot_world_cmd[:, 0]
-    rot_hand_world = rot_world_cmd @ R_ADAPT
-    approach_world = rot_hand_world[:, 2]
-    hand_up_world = rot_hand_world[:, 1]
-    wrist_world = tcp_world - approach_world * TCP_OFFSET
-    half_width = max(float(gripper_width) * 0.5, 0.001)
-    left_tip = tcp_world - finger_world * half_width
-    right_tip = tcp_world + finger_world * half_width
-    min_z = TABLE_TOP_Z + float(table_margin)
-    z_values = {
-        "tcp_z": float(tcp_world[2]),
-        "wrist_z": float(wrist_world[2]),
-        "left_tip_z": float(left_tip[2]),
-        "right_tip_z": float(right_tip[2]),
-    }
-    if min(z_values.values()) < min_z:
-        return False, "pose_pokes_table", {"inside_method": inside_method, **z_values}, pose9_out
-    if float(hand_up_world[2]) <= 0.0:
-        # Same approach/TCP, but roll the gripper 180deg around approach:
-        # finger and lateral axes flip, approach stays unchanged. This swaps
-        # left/right fingers and makes the wrist/hand-up side consistent.
+    def _check(cmd_pose) -> tuple[bool, str, dict]:
+        hits, hit_method, quad_min_dist = _grasp_quad_contacts_mesh(mesh, cmd_pose, gripper_width)
+        if not hits:
+            return False, "grasp_quad_misses_mesh", {
+                "grasp_quad_hit_method": hit_method,
+                "grasp_quad_min_dist_m": quad_min_dist,
+            }
+        fp = _grasp_footprint_object(cmd_pose, gripper_width)
+        tcp_w, wrist_w, left_w, right_w = _object_points_to_world(
+            np.stack([fp["tcp"], fp["wrist"], fp["left_tip"], fp["right_tip"]]),
+            t_world_obj,
+            object_scale,
+        )
+        rot_world_cmd = t_world_obj[:3, :3] @ np.asarray(cmd_pose.rotation, dtype=np.float64)
+        hand_up_world = (rot_world_cmd @ R_ADAPT)[:, 1]
+        z_values = {
+            "tcp_z": float(tcp_w[2]),
+            "wrist_z": float(wrist_w[2]),
+            "left_tip_z": float(left_w[2]),
+            "right_tip_z": float(right_w[2]),
+        }
+        min_z = TABLE_TOP_Z + float(table_margin)
+        if min(z_values.values()) < min_z:
+            return False, "pose_pokes_table", {
+                "grasp_quad_hit_method": hit_method,
+                "grasp_quad_min_dist_m": quad_min_dist,
+                **z_values,
+            }
+        meta = {
+            "grasp_quad_hit_method": hit_method,
+            "grasp_quad_min_dist_m": quad_min_dist,
+            "hand_up_z": float(hand_up_world[2]),
+            **z_values,
+        }
+        if float(hand_up_world[2]) <= 0.0:
+            return False, "hand_upside_down", meta
+        return True, "", meta
+
+    ok, reason, meta = _check(cmd)
+    if ok:
+        return True, "", meta, pose9_out
+
+    if reason == "hand_upside_down":
         flip = np.diag([-1.0, -1.0, 1.0])
         rot_cmd_fixed = np.asarray(cmd.rotation, dtype=np.float64) @ flip
-        rot_world_fixed = t_world_obj[:3, :3] @ rot_cmd_fixed
-        hand_up_fixed = (rot_world_fixed @ R_ADAPT)[:, 1]
-        if float(hand_up_fixed[2]) > 0.0:
+        cmd_fixed = CommandPose(
+            position=cmd.position,
+            rotation=rot_cmd_fixed.astype(np.float32),
+        )
+        ok2, reason2, meta2 = _check(cmd_fixed)
+        if ok2:
             pose9_out[:3] = np.asarray(cmd.position, dtype=np.float32)
             pose9_out[3:9] = rotation_to_6d(rot_cmd_fixed).astype(np.float32)
-            return (
-                True,
-                "",
-                {
-                    "inside_method": inside_method,
-                    "hand_up_z": float(hand_up_fixed[2]),
-                    "hard_gate_pose_flipped": True,
-                    "pre_flip_hand_up_z": float(hand_up_world[2]),
-                    **z_values,
-                },
-                pose9_out,
-            )
-        return (
-            False,
-            "hand_upside_down",
-            {"inside_method": inside_method, "hand_up_z": float(hand_up_world[2]), **z_values},
-            pose9_out,
-        )
-    return True, "", {"inside_method": inside_method, "hand_up_z": float(hand_up_world[2]), **z_values}, pose9_out
+            meta2 = dict(meta2)
+            meta2["hard_gate_pose_flipped"] = True
+            meta2["pre_flip_hand_up_z"] = float(meta.get("hand_up_z", 0.0))
+            return True, "", meta2, pose9_out
+        return False, reason2, meta2, pose9_out
+
+    return False, reason, meta, pose9_out
 
 
 def _postprocess_hdf5(path: Path, stats: dict, selected_meta: list[dict]) -> None:
@@ -317,12 +419,13 @@ def _generate_one(task: dict, args: argparse.Namespace, models: dict, device: to
     yaw = float(task["z_yaw_deg"])
     target = int(task["target_candidates"])
     out_path = Path(task["output_hdf5"]).expanduser().resolve()
-    mesh_path = Path(task.get("mesh_path") or _resolve_mesh_path(obj_id, args.mesh_root, args.dataset))
+    metric_ds = _resolve_metric_dataset(obj_id, args.dataset)
+    mesh_path = Path(task.get("mesh_path") or _resolve_mesh_path(obj_id, args.mesh_root, metric_ds))
     seed = secrets.randbits(31)
     prepared = _prepare_mesh(
         obj_id=obj_id,
         mesh_path=mesh_path,
-        dataset=args.dataset,
+        dataset=metric_ds,
         num_points=args.num_points,
         seed=seed,
         target_max_extent=args.target_max_extent,
@@ -344,9 +447,19 @@ def _generate_one(task: dict, args: argparse.Namespace, models: dict, device: to
     rejected: list[tuple[np.ndarray, dict]] = []
     all_sampled = 0
     batches_run = 0
+    placement = _resolve_object_placement(obj_id, float(args.object_scale), yaw)
+    t_world_obj = _make_transform(placement["pos"], placement["ori"])
 
-    for batch_idx in range(int(args.max_batches)):
+    max_batches = int(args.max_batches)
+    for batch_idx in range(max_batches):
         batches_run = batch_idx + 1
+        batch_no = batch_idx + 1
+        print(
+            f"[batch-candidates] obj={obj_id} yaw={yaw:.0f} "
+            f"batch={batch_no}/{max_batches} pdm_sample_start n={batch_size}",
+            flush=True,
+        )
+        t_pdm0 = time.perf_counter()
         poses = _sample_pdm_batch(
             models["pdm"],
             models["stats"],
@@ -356,32 +469,54 @@ def _generate_one(task: dict, args: argparse.Namespace, models: dict, device: to
             z_yaw_deg=yaw,
             device=device,
         )
+        pdm_elapsed_s = time.perf_counter() - t_pdm0
+        print(
+            f"[batch-candidates] obj={obj_id} yaw={yaw:.0f} "
+            f"batch={batch_no}/{max_batches} pdm_done n={len(poses)} "
+            f"elapsed_s={pdm_elapsed_s:.1f}",
+            flush=True,
+        )
+        batch_pass = 0
+        t_gate0 = time.perf_counter()
+        use_hard_gate = not bool(args.no_hard_gate)
         for local_idx, pose9 in enumerate(poses):
             all_sampled += 1
-            ok, reason, gate_meta, pose9_checked = _hard_gate_pose(
-                mesh=prepared["mesh"],
-                pose9=pose9,
-                obj_id=obj_id,
-                z_yaw_deg=yaw,
-                object_scale=float(args.object_scale),
-                gripper_width=float(args.gripper_width),
-                table_margin=float(args.table_margin),
-            )
+            if use_hard_gate:
+                ok, reason, gate_meta, pose9_checked = _hard_gate_pose(
+                    mesh=prepared["mesh"],
+                    pose9=pose9,
+                    obj_id=obj_id,
+                    z_yaw_deg=yaw,
+                    object_scale=float(args.object_scale),
+                    gripper_width=float(args.gripper_width),
+                    table_margin=float(args.table_margin),
+                    t_world_obj=t_world_obj,
+                )
+            else:
+                ok = True
+                reason = ""
+                gate_meta = {}
+                pose9_checked = np.asarray(pose9, dtype=np.float32)
             row = {
                 "source_batch": batch_idx,
                 "source_index": local_idx,
-                "hard_gate_pass": ok,
+                "hard_gate_pass": ok if use_hard_gate else True,
                 "hard_gate_forced_fill": False,
                 "hard_gate_reject_reason": reason,
                 **gate_meta,
             }
             if ok:
+                batch_pass += 1
                 accepted.append((pose9_checked, row))
             else:
                 rejected.append((pose9, row))
+        gate_elapsed_s = time.perf_counter() - t_gate0
+        gate_tag = "gate_done" if use_hard_gate else "gate_skipped"
         print(
             f"[batch-candidates] obj={obj_id} yaw={yaw:.0f} "
-            f"batch={batch_idx + 1}/{args.max_batches} pass={len(accepted)}/{target}",
+            f"batch={batch_no}/{max_batches} {gate_tag} batch_pass={batch_pass}/{len(poses)} "
+            f"total_pass={len(accepted)}/{target} sampled={all_sampled} "
+            f"gate_elapsed_s={gate_elapsed_s:.1f} pdm_elapsed_s={pdm_elapsed_s:.1f}",
             flush=True,
         )
         if len(accepted) >= target:
@@ -424,15 +559,15 @@ def _generate_one(task: dict, args: argparse.Namespace, models: dict, device: to
         poses_np,
         mesh_path=str(mesh_path),
         gripper_width=float(args.gripper_width),
-        dataset=args.dataset,
+        dataset=metric_ds or "oakink",
     )
     forced = sum(1 for row in selected_meta if row.get("hard_gate_forced_fill"))
     stats = {
         "z_yaw_deg": yaw,
         "n_target": target,
         "n_selected": len(chosen),
-        "hard_gate_enabled": True,
-        "hard_gate_pass_count": len(accepted),
+        "hard_gate_enabled": not bool(args.no_hard_gate),
+        "hard_gate_pass_count": len(accepted) if not args.no_hard_gate else len(chosen),
         "n_batches_used": batches_run,
         "forced_fill_count": forced,
         "all_sampled_count": all_sampled,
@@ -458,7 +593,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--tasks-json", type=Path, required=True)
     p.add_argument("--output-manifest", type=Path, required=True)
     p.add_argument("--mesh-root", required=True)
-    p.add_argument("--dataset", default="evaluation")
+    p.add_argument(
+        "--dataset",
+        default=None,
+        help="Dataset for scale.json lookup (oakink/ycb/...). Omit to infer per obj_id.",
+    )
     p.add_argument("--affordance-checkpoint", type=Path, default=DEFAULT_AFF_CKPT)
     p.add_argument("--pdm-checkpoint", type=Path, default=DEFAULT_PDM_CKPT)
     p.add_argument("--pose-stats", type=Path, default=None)
@@ -475,6 +614,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--auto-extent-hi", type=float, default=0.80)
     p.add_argument("--min-scale-factor", type=float, default=1e-6)
     p.add_argument("--cpu", action="store_true")
+    p.add_argument(
+        "--no-hard-gate",
+        action="store_true",
+        help="Accept all PDM samples without grasp-quad / table / hand-up hard gates.",
+    )
     return p
 
 
@@ -499,12 +643,7 @@ def main() -> None:
         f"aff_thresh={threshold:.3f}",
         flush=True,
     )
-    for idx, task in enumerate(tasks):
-        print(
-            f"[batch-candidates] task {idx + 1}/{len(tasks)} "
-            f"obj={task['obj_id']} yaw={float(task['z_yaw_deg']):.0f}",
-            flush=True,
-        )
+    for task in tasks:
         rows.append(_generate_one(task, args, models, device))
     _write_json(args.output_manifest, {"version": 1, "tasks": rows})
     print(f"[batch-candidates] wrote {args.output_manifest}", flush=True)

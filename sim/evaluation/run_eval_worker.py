@@ -232,8 +232,25 @@ def main() -> None:
     cprint(f"[worker] {chunk_id}: {len(tasks)} task(s)", "cyan")
     scene = None
     results: list[dict] = []
+    completed_task_ids: set[str] = set()
+    if results_path.is_file():
+        try:
+            existing = json.loads(results_path.read_text(encoding="utf-8"))
+            results = list(existing.get("results", []))
+            completed_task_ids = {str(r.get("task_id", "")) for r in results if r.get("task_id")}
+            if completed_task_ids:
+                cprint(
+                    f"[worker] resume: found {len(completed_task_ids)} completed task(s) in {results_path.name}",
+                    "cyan",
+                )
+        except Exception as exc:
+            cprint(f"[worker] resume: failed to read {results_path.name}: {exc}", "red")
+            results = []
+            completed_task_ids = set()
     try:
         for task in tasks:
+            if str(task.get("task_id", "")) in completed_task_ids:
+                continue
             cprint(f"[worker] task {task['task_id']}", "yellow")
             try:
                 scene, row = _execute_task(scene, task, chunk, result_dir)
@@ -259,6 +276,7 @@ def main() -> None:
                 }
                 cprint(f"[worker] ERROR {task['task_id']}: {exc}", "red")
             results.append(row)
+            completed_task_ids.add(str(row.get("task_id", "")))
             with results_path.open("w", encoding="utf-8") as f:
                 json.dump({"chunk_id": chunk_id, "results": results}, f, indent=2, sort_keys=True)
                 f.write("\n")

@@ -101,7 +101,7 @@ output/affordance_no_rot_executed/min20/checkpoints_v6/best_v6_model.pth
 output/pdm/checkpoints_yaw/best_model.pth
 sim/assets_scene/                                       # 可视背景/scene assets
 sim/object_rotation_overrides.json                      # 物体放置 z_offset / rotation override
-evaluation/configs/eval_objects_merged_success_ge40.csv # 推荐 evaluation object list
+evaluation/configs/eval_objects_merged_success_ge30.csv # 推荐 evaluation object list (round>=3 成功数>=30)
 ```
 
 `obj_meshes` 说明：
@@ -465,7 +465,7 @@ C22001,0,disabled example
 然后：
 
 ```bash
-python evaluation/eval_pool.py --obj-list evaluation/configs/eval_objects_merged_success_ge40.csv ...
+python evaluation/eval_pool.py --obj-list evaluation/configs/eval_objects_merged_success_ge30.csv ...
 ```
 
 `--obj-list` 也兼容 JSON：
@@ -476,7 +476,7 @@ python evaluation/eval_pool.py --obj-list evaluation/configs/eval_objects_merged
 
 Pool eval 的 yaw 是外层循环：`--z-yaw-grid 0,90 --trials-per-obj-yaw 2` 会生成并执行 `yaw000 t000,t001`，然后 `yaw090 t000,t001`。`--trials-per-object` 仍可用作兼容 alias，但新脚本建议使用 `--trials-per-obj-yaw`。
 
-在线生成 candidate 时，pool eval 使用独立的 `tools/batch_pdm_candidates.py`，不会改变 `tools/glb_to_pdm_grasp.py`。生成阶段先按 `obj×yaw` 在 GPU 上批量采样 PDM pose，再经过硬门筛选：TCP 在 mesh 内部、目标关键点不低于桌面、hand-up axis 不倒置。每个 `obj×yaw` 写一个 candidate pool HDF5，随后每个 trial 使用其中不同的 candidate index。
+在线生成 candidate 时，pool eval 使用独立的 `tools/batch_pdm_candidates.py`，不会改变 `tools/glb_to_pdm_grasp.py`。生成阶段先按 `obj×yaw` 在 GPU 上批量采样 PDM pose，再经过硬门筛选：左右指尖连线与物体 mesh 有接触、目标关键点不低于桌面、hand-up axis 不倒置（可自动翻转修正）。每个 batch 会打 log（PDM 采样开始 / 硬门结束）。每个 `obj×yaw` 写一个 candidate pool HDF5，随后每个 trial 使用其中不同的 candidate index。
 
 录像仍用 `--record-video` / `--record-count-per-object`。含录像 task 的 chunk 会自动用 headed worker；如果服务器没有 `DISPLAY`，`eval_pool.py` 会像 `eval_single.py` 一样自动用 `xvfb-run` 重启自己（可用 `--no-auto-xvfb` 关闭）。
 

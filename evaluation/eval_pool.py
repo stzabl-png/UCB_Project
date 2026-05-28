@@ -17,9 +17,10 @@ PROJ = Path(__file__).resolve().parents[1]
 if str(PROJ) not in sys.path:
     sys.path.insert(0, str(PROJ))
 
+from evaluation.candidate_batch import build_candidate_tasks, run_candidate_batch_generation
 from evaluation.episode import discover_obj_ids
 from evaluation.eval_single import resolve_generate_mesh
-from evaluation.solution_gen import generate_solutions
+from evaluation.solution_gen import generate_solutions, resolve_yaw_values
 from evaluation.task_queue import build_task_queue, load_json, write_chunks, write_json
 from evaluation.yaw import parse_yaw_pool
 
@@ -111,8 +112,60 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="GPUs for batch candidate generation; defaults to --sim-gpu-ids.",
     )
+    p.add_argument(
+        "--candidate-workers",
+        type=int,
+        default=None,
+        help="Parallel batch_pdm_candidates processes (tasks split evenly). "
+        "Default: one per GPU (--candidate-per-gpu 1).",
+    )
+    p.add_argument(
+        "--candidate-per-gpu",
+        type=int,
+        default=None,
+        help="If set and --candidate-workers omitted: workers = len(gpu_ids) * this "
+        "(e.g. 2 GPUs × 3 = 6 workers).",
+    )
     p.add_argument("--candidate-batch-multiplier", type=int, default=2)
     p.add_argument("--candidate-max-batches", type=int, default=10)
+    p.add_argument(
+        "--pdm-checkpoint",
+        default=str(PROJ / "output" / "pdm" / "checkpoints_yaw_v6cond" / "best_model.pth"),
+        help="PDM weights for batch_pdm_candidates (eval online generation).",
+    )
+    p.add_argument(
+        "--pose-stats",
+        default=str(PROJ / "output" / "pdm" / "checkpoints_yaw_v6cond" / "pose_stats.pt"),
+        help="Pose normalization stats if not embedded in --pdm-checkpoint.",
+    )
+    p.add_argument(
+        "--affordance-checkpoint",
+        default=str(
+            PROJ
+            / "output"
+            / "affordance_no_rot_executed"
+            / "min20"
+            / "checkpoints_v6"
+            / "best_v6_model.pth"
+        ),
+        help="Affordance v6 checkpoint used during batch candidate generation.",
+    )
+    p.add_argument(
+        "--no-hard-gate",
+        action="store_true",
+        help="Skip grasp hard gates in batch_pdm_candidates (accept raw PDM samples).",
+    )
+    p.add_argument(
+        "--stop-after-solutions",
+        action="store_true",
+        help="Only generate candidates + solutions; do not launch Isaac workers.",
+    )
+    p.add_argument(
+        "--candidates-only",
+        action="store_true",
+        help="Only run batch PDM candidate pools (requires --generate-candidate-each-trial). "
+        "Skips solutions/*.json and Isaac. Use --trials-per-obj-yaw as pool size (e.g. 500).",
+    )
     p.add_argument("--resume", action="store_true")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--log-only", action="store_true")
@@ -486,9 +539,62 @@ def main() -> None:
         raise SystemExit("No objects discovered; pass --obj, --obj-list, --usd-root, or --candidate-dir")
     obj_ids = _filter_objects_with_generate_mesh(args, obj_ids)
 
+    if args.candidates_only and not args.generate_candidate_each_trial:
+        raise SystemExit("--candidates-only requires --generate-candidate-each-trial")
+
     yaw_grid = parse_yaw_pool(args.z_yaw_grid) if args.z_yaw_grid else None
     yaw_pool = parse_yaw_pool(args.z_yaw_pool) if args.z_yaw_random else None
     candidate_dir = Path(args.candidate_dir).expanduser() if args.candidate_dir else None
+
+    if args.candidates_only:
+        if args.dry_run:
+            raise SystemExit("--candidates-only does not support --dry-run yet")
+        pool_size = _trials_per_obj_yaw(args)
+        yaw_values_by_obj = {
+            oid: resolve_yaw_values(
+                obj_id=oid,
+                z_yaw_deg=args.z_yaw_deg,
+                z_yaw_grid=yaw_grid,
+                z_yaw_random_pool=yaw_pool,
+                z_yaw_random=bool(args.z_yaw_random),
+            )
+            for oid in obj_ids
+        }
+        n_tasks = sum(len(yaws) for yaws in yaw_values_by_obj.values())
+        _important(
+            args,
+            f"[pool] candidates-only: {len(obj_ids)} object(s), "
+            f"{pool_size} pose(s)/obj×yaw, {n_tasks} pool file(s)",
+        )
+        if not args.no_hard_gate:
+            _important(args, "[pool] hard gate ON (pass --no-hard-gate to disable)")
+        tasks = build_candidate_tasks(
+            obj_ids=obj_ids,
+            yaw_values_by_obj=yaw_values_by_obj,
+            trials_per_obj_yaw=pool_size,
+            result_dir=result_dir,
+            mesh_root=args.mesh_root,
+            dataset=args.dataset,
+        )
+        run_candidate_batch_generation(
+            tasks=tasks,
+            result_dir=result_dir,
+            mesh_root=args.mesh_root,
+            dataset=args.dataset,
+            candidate_python=args.candidate_python,
+            candidate_gpu_ids=args.candidate_gpu_ids or args.sim_gpu_ids,
+            batch_multiplier=int(args.candidate_batch_multiplier),
+            max_batches=int(args.candidate_max_batches),
+            object_scale=float(args.object_scale),
+            no_hard_gate=bool(args.no_hard_gate),
+            pdm_checkpoint=args.pdm_checkpoint,
+            pose_stats=args.pose_stats,
+            affordance_checkpoint=args.affordance_checkpoint,
+            candidate_workers=args.candidate_workers,
+            candidate_per_gpu=args.candidate_per_gpu,
+        )
+        _important(args, f"[pool] done -> {result_dir}/candidates/{{obj_id}}/*_pool_grasp.hdf5")
+        return
 
     _important(args, f"[pool] generating/loading solutions for {len(obj_ids)} object(s)")
     manifest = generate_solutions(
@@ -514,11 +620,22 @@ def main() -> None:
         candidate_batch_multiplier=args.candidate_batch_multiplier,
         candidate_max_batches=args.candidate_max_batches,
         object_scale=args.object_scale,
+        no_hard_gate=bool(args.no_hard_gate),
+        pdm_checkpoint=args.pdm_checkpoint,
+        pose_stats=args.pose_stats,
+        affordance_checkpoint=args.affordance_checkpoint,
+        candidate_workers=args.candidate_workers,
+        candidate_per_gpu=args.candidate_per_gpu,
         reuse_existing=bool(args.resume),
         dry_run=bool(args.dry_run),
     )
     queue = build_task_queue(manifest)
     write_json(result_dir / "task_queue.json", queue)
+
+    if args.stop_after_solutions:
+        _important(args, f"[pool] --stop-after-solutions: wrote candidates + solutions under {result_dir}")
+        _important(args, f"[pool] {queue['n_tasks']} task(s) queued; re-run without --stop-after-solutions to sim")
+        return
 
     n_workers = max(1, len(_gpu_ids(args.sim_gpu_ids)) * max(1, int(args.sim_per_gpu)))
     # If any task in a chunk records video, the chunk cannot be headless.

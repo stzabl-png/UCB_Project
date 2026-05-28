@@ -11,14 +11,14 @@ Entry points live under `model/pdm/`:
 | Sample candidates | `python3 -m model.pdm.sample` |
 | Visualize | `python3 -m model.pdm.visualize` |
 
-**Upstream data:** merged successful grasps ([`grasp_collect_pipeline.md`](grasp_collect_pipeline.md)) and optional affordance v6 HDF5 ([`train_affordance.md`](train_affordance.md)).
+**Upstream data:** merged successful grasps ([`grasp_collect_pipeline.md`](grasp_collect_pipeline.md)) and **affordance v6 checkpoint** (for condition cache; same inference as [`glb_to_pdm_grasp.py`](../tools/glb_to_pdm_grasp.py) / eval).
 
 ---
 
 ## Pipeline
 
 1. **Merged GT** — `output/grasp_collect_no_rot/merged/{obj}_robot_gt_merged.hdf5` (from pool sim or legacy collect).
-2. **Condition cache** (recommended) — one fixed point cloud per object: xyz + normal + affordance (`4096` points by default).
+2. **Condition cache** (required for training) — per object: metric mesh sample + **v6-predicted** affordance (`4096` points). Not GT soft labels from `affordance_all_soft.h5`.
 3. **Train** — DDPM noise prediction on normalized 9D pose vectors; saves `best_model.pth` + `pose_stats.pt`.
 4. **Sample** — DDIM poses → per-object `{obj}_grasp.hdf5` (same candidate layout as raycast/anchored sampler).
 5. **Visualize** — overlay grippers on the condition cloud; optional `overview.png` montage.
@@ -27,36 +27,30 @@ Entry points live under `model/pdm/`:
 export PROJ=/home/vision/Project/Affordance2Grasp
 cd "$PROJ"
 
-# 1) Precompute object conditions (reuse affordance v6 points when available)
+# 1) Precompute object conditions (v6 prediction on metric rotated_mesh; cached once)
 python3 -m model.pdm.build_condition_cache \
   --merged-dir output/grasp_collect_no_rot/merged \
-  --affordance-h5 output/affordance_no_rot_executed/min20/affordance_all_soft.h5 \
-  --output output/pdm/cache/conditions_4096.h5
+  --affordance-checkpoint output/affordance_no_rot_executed/min20/checkpoints_v6/best_v6_model.pth \
+  --mesh-root data_hub/meshes/SAM3DMesh/rotated_mesh \
+  --output output/pdm/cache/conditions_4096_v6pred.h5
 
-# 2) Train
+# 2) Train PDM (pose labels = merged GT; condition affordance = cached v6 pred)
 python3 -m model.pdm.train \
   --merged-dir output/grasp_collect_no_rot/merged \
-  --condition-h5 output/pdm/cache/conditions_4096.h5 \
-  --affordance-h5 output/affordance_no_rot_executed/min20/affordance_all_soft.h5 \
-  --save-dir output/pdm/checkpoints
+  --condition-h5 output/pdm/cache/conditions_4096_v6pred.h5 \
+  --save-dir output/pdm/checkpoints \
+  --use-yaw-condition
 
-# 3) Sample candidates for one or many objects
-python3 -m model.pdm.sample \
-  --checkpoint output/pdm/checkpoints/best_model.pth \
-  --condition-h5 output/pdm/cache/conditions_4096.h5 \
-  --obj ycb_dex_04 \
-  --n-samples 50
-
-python3 -m model.pdm.sample \
-  --checkpoint output/pdm/checkpoints/best_model.pth \
-  --condition-h5 output/pdm/cache/conditions_4096.h5 \
-  --all
+# 3) Sample candidates (deploy: live v6 via glb_to_pdm / eval batch; or reuse cache for debugging)
+python3 tools/glb_to_pdm_grasp.py \
+  --mesh data_hub/meshes/SAM3DMesh/rotated_mesh/oakink/A01001/mesh.ply \
+  --sam3d-rotated-mesh --dataset oakink --n-samples 50 \
+  --output-dir output/pdm/candidates
 
 # 4) Visualize
 python3 -m model.pdm.visualize \
-  --candidates-dir output/pdm/candidates \
-  --condition-h5 output/pdm/cache/conditions_4096.h5 \
-  --all
+  --hdf5 output/pdm/candidates/A01001_grasp.hdf5 \
+  --mesh-root data_hub/meshes/SAM3DMesh/rotated_mesh
 ```
 
 ---
@@ -65,7 +59,7 @@ python3 -m model.pdm.visualize \
 
 **Supervision target (9D):** `[x, y, z, rot6d]` in the **simulator command frame** (TCP / finger-center position; rotation columns = finger, lateral, approach). Labels are built from merged `executed_panda_hand_at_close` wrist poses using the same `R_ADAPT` / `TCP_OFFSET=0.105` convention as `sim/run_grasp_sim.py`.
 
-**Object condition (per point, 7 channels):** `xyz (3) + normal (3) + affordance (1)`, `N=4096` by default. Training uses a PointNet-style global encoder (`PDMPointEncoder`) fused into the denoiser.
+**Object condition (per point, 7 channels):** `xyz (3) + normal (3) + affordance (1)`, `N=4096` by default. The affordance channel is **v6 model output** at cache build time (matches eval / `glb_to_pdm_grasp`). Training uses a PointNet-style global encoder (`PDMPointEncoder`) fused into the denoiser.
 
 **Training filters** (`PDMMergedDataset`, default):
 
@@ -82,7 +76,7 @@ Pose mean/std are computed over all kept rows and stored in `pose_stats.pt` (als
 ```
 output/pdm/
 ├── cache/
-│   └── conditions_4096.h5      # data/points, normals, affordance, obj_ids
+│   └── conditions_4096_v6pred.h5  # metric points/normals + v6-predicted affordance
 ├── checkpoints/
 │   ├── best_model.pth
 │   ├── final_model.pth
@@ -97,14 +91,14 @@ output/pdm/
 
 ### Condition cache HDF5
 
-Mirrors affordance v6 layout:
-
-| Dataset | Shape |
-|---------|--------|
-| `data/points` | `(M, N, 3)` |
+| Dataset / attr | Shape / meaning |
+|----------------|-----------------|
+| `data/points` | `(M, N, 3)` metric rotated_mesh samples |
 | `data/normals` | `(M, N, 3)` |
-| `data/affordance` | `(M, N)` |
+| `data/affordance` | `(M, N)` **v6 predicted** heatmap |
 | `data/obj_ids` | `(M,)` UTF-8 strings |
+| `metadata.affordance_source` | `v6_prediction` |
+| `metadata.affordance_checkpoint` | path to v6 ckpt used |
 
 Objects are taken from merged files that yield at least one training row (or pass `--obj` for a subset). Rows with insane coordinates/normals are skipped (`--max-abs-coord`, default `2.0`).
 
@@ -153,17 +147,17 @@ $ISAAC_SIM_PATH/python.sh evaluation/eval_single.py \
 | Flag | Default | Notes |
 |------|---------|--------|
 | `--merged-dir` | `output/grasp_collect_no_rot/merged` | Object list source |
-| `--affordance-h5` | none | Prefer aligned points/normals/labels; else mesh sample + zero affordance |
-| `--mesh-root` | `data_hub/meshes/SAM3DMesh/rotated_mesh` | Fallback surface sampling |
+| `--affordance-checkpoint` | `.../checkpoints_v6/best_v6_model.pth` | Runs v6 on each object mesh |
+| `--mesh-root` | `data_hub/meshes/SAM3DMesh/rotated_mesh` | Metric SAM3D mesh |
 | `--n-points` | `4096` | |
-| `--output` | `output/pdm/cache/conditions_4096.h5` | |
+| `--output` | `output/pdm/cache/conditions_4096_v6pred.h5` | |
 
 ### `train`
 
 | Flag | Default | Notes |
 |------|---------|--------|
-| `--condition-h5` | none | Strongly recommended for fast IO |
-| `--affordance-h5` | none | Fallback per-object conditions if not in cache |
+| `--condition-h5` | `conditions_4096_v6pred.h5` | **Required**; must be v6-prediction cache |
+| `--affordance-h5` | none | Deprecated fallback (GT soft labels); do not use for new training |
 | `--save-dir` | `output/pdm/checkpoints` | |
 | `--epochs` | `300` | Cosine LR, AdamW |
 | `--batch-size` | `32` | |
@@ -186,7 +180,7 @@ Checkpoints: `best_model.pth` (lowest val loss), optional `checkpoint_epoch*.pth
 | `--output` | — | Single HDF5 path (one object only) |
 | `--output-dir` | `output/pdm/candidates` | |
 
-Condition load order: precomputed cache → affordance HDF5 → on-the-fly mesh sample.
+For offline `model.pdm.sample`, condition load order: v6pred cache → (legacy) affordance HDF5 → mesh+zeros. **Eval/deploy** should use `glb_to_pdm_grasp` (live v6), not GT cache.
 
 ### `visualize`
 
@@ -207,6 +201,7 @@ model/pdm/
 ├── pose_codec.py         # executed ↔ command, 9D pack/unpack
 ├── dataset.py            # PDMMergedDataset, AffordanceStore, PDMConditionStore
 ├── model.py              # PDM encoder + denoiser + DDIM sample
+├── mesh_points.py          # metric mesh sample + v6 affordance inference
 ├── build_condition_cache.py
 ├── train.py
 ├── sample.py
@@ -219,6 +214,6 @@ model/pdm/
 
 - **GPU:** Training and sampling use CUDA when available (`--cpu` to force CPU).
 - **Empty dataset:** Usually means no merged files, no `executed_panda_hand_at_close`, or all rows filtered (untrusted tips / outliers). Re-run train with `--allow-untrusted-tips` or inspect `skipped` counts printed at startup.
-- **Affordance alignment:** For best geometry, pass the same `affordance_all_soft.h5` used for v6 training when building the condition cache.
+- **Affordance alignment:** Rebuild `conditions_4096_v6pred.h5` after changing the v6 checkpoint. Training/eval both use **v6 predictions** on metric `rotated_mesh`, not `affordance_all_soft.h5` soft labels.
 - **Reproducibility:** Training split uses `--seed` (default `42`). Diffusion sampling uses an unseeded RNG by default. `glb_to_pdm_grasp` supports `--random-seed` (used by eval) or fixed `--seed`.
 - **Sim z-yaw:** Yaw-conditioned models need the same `--z-yaw-deg` at sample time as in Isaac eval (`evaluation.md`).

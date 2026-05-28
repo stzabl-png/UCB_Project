@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from argparse import Namespace
 from pathlib import Path
 from typing import Any
@@ -186,6 +187,12 @@ def generate_solutions(
     candidate_batch_multiplier: int = 2,
     candidate_max_batches: int = 10,
     object_scale: float = 1.0,
+    no_hard_gate: bool = False,
+    pdm_checkpoint: str | None = None,
+    pose_stats: str | None = None,
+    affordance_checkpoint: str | None = None,
+    candidate_workers: int | None = None,
+    candidate_per_gpu: int | None = None,
     reuse_existing: bool = True,
     dry_run: bool = False,
 ) -> dict:
@@ -223,9 +230,16 @@ def generate_solutions(
             batch_multiplier=int(candidate_batch_multiplier),
             max_batches=int(candidate_max_batches),
             object_scale=float(object_scale),
+            no_hard_gate=bool(no_hard_gate),
+            pdm_checkpoint=pdm_checkpoint,
+            pose_stats=pose_stats,
+            affordance_checkpoint=affordance_checkpoint,
+            candidate_workers=candidate_workers,
+            candidate_per_gpu=candidate_per_gpu,
         )
 
-    for obj_id in obj_ids:
+    n_objs = len(obj_ids)
+    for obj_idx, obj_id in enumerate(obj_ids):
         yaw_values = yaw_values_by_obj[obj_id]
         n_obj_episodes = len(yaw_values) * int(trials_per_obj_yaw)
         record_trials = pick_record_trials(
@@ -233,6 +247,7 @@ def generate_solutions(
             record_count_per_object if record_video else 0,
             rng,
         )
+        obj_new = 0
         for yaw_idx, yaw in enumerate(yaw_values):
             for trial in range(int(trials_per_obj_yaw)):
                 obj_episode_idx = yaw_idx * int(trials_per_obj_yaw) + trial
@@ -287,6 +302,7 @@ def generate_solutions(
                         policy_seed=policy_seed,
                     )
                     write_json(sol_path, sol)
+                    obj_new += 1
                 rows.append(
                     {
                         "solution_id": sol["solution_id"],
@@ -298,6 +314,13 @@ def generate_solutions(
                         "record_video": bool(record_video and obj_episode_idx in record_trials),
                     }
                 )
+        if not dry_run:
+            print(
+                f"[solutions] {obj_idx + 1}/{n_objs} {obj_id}: "
+                f"{n_obj_episodes} episodes ({obj_new} new)",
+                flush=True,
+                file=sys.stderr,
+            )
 
     manifest = {
         "version": 1,

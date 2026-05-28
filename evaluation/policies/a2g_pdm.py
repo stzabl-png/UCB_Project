@@ -123,8 +123,20 @@ def _read_candidate_group(
     }
 
 
-def load_candidate_hdf5(path: str) -> tuple[list[dict], dict]:
+_CANDIDATE_HDF5_CACHE: dict[str, tuple[list[dict], dict]] = {}
+
+
+def clear_candidate_hdf5_cache() -> None:
+    """Drop cached pool reads (e.g. after regenerating candidates)."""
+    _CANDIDATE_HDF5_CACHE.clear()
+
+
+def load_candidate_hdf5(path: str, *, use_cache: bool = True) -> tuple[list[dict], dict]:
     """Load all supported candidate HDF5 layouts used by the project."""
+    abs_path = os.path.abspath(path)
+    if use_cache and abs_path in _CANDIDATE_HDF5_CACHE:
+        return _CANDIDATE_HDF5_CACHE[abs_path]
+
     if not os.path.isfile(path):
         raise FileNotFoundError(path)
 
@@ -196,7 +208,10 @@ def load_candidate_hdf5(path: str) -> tuple[list[dict], dict]:
         "dataset": dataset,
         "no_rotation": no_rotation,
     }
-    return candidates, metadata
+    result = (candidates, metadata)
+    if use_cache:
+        _CANDIDATE_HDF5_CACHE[abs_path] = result
+    return result
 
 
 def select_candidate(

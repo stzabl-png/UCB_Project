@@ -83,11 +83,23 @@ def run_candidate_batch_generation(
     batch_multiplier: int,
     max_batches: int,
     object_scale: float,
+    no_hard_gate: bool = False,
+    pdm_checkpoint: str | Path | None = None,
+    pose_stats: str | Path | None = None,
+    affordance_checkpoint: str | Path | None = None,
+    candidate_workers: int | None = None,
+    candidate_per_gpu: int | None = None,
 ) -> dict[tuple[str, float], str]:
     if not tasks:
         return {}
     gpu_ids = parse_gpu_ids(candidate_gpu_ids)
-    chunks = _split_even(tasks, len(gpu_ids))
+    if candidate_workers is not None:
+        n_workers = max(1, int(candidate_workers))
+    elif candidate_per_gpu is not None:
+        n_workers = max(1, len(gpu_ids) * max(1, int(candidate_per_gpu)))
+    else:
+        n_workers = max(1, len(gpu_ids))
+    chunks = _split_even(tasks, n_workers)
     work_dir = result_dir / "candidate_generation"
     work_dir.mkdir(parents=True, exist_ok=True)
     python_cmd = candidate_python or default_candidate_python()
@@ -108,8 +120,6 @@ def run_candidate_batch_generation(
             str(manifest_path),
             "--mesh-root",
             str(mesh_root),
-            "--dataset",
-            dataset or "evaluation",
             "--batch-multiplier",
             str(int(batch_multiplier)),
             "--max-batches",
@@ -117,6 +127,18 @@ def run_candidate_batch_generation(
             "--object-scale",
             str(float(object_scale)),
         ]
+        if dataset:
+            cmd.extend(["--dataset", str(dataset)])
+        if no_hard_gate:
+            cmd.append("--no-hard-gate")
+        if pdm_checkpoint:
+            cmd.extend(["--pdm-checkpoint", str(Path(pdm_checkpoint).expanduser().resolve())])
+        if pose_stats:
+            cmd.extend(["--pose-stats", str(Path(pose_stats).expanduser().resolve())])
+        if affordance_checkpoint:
+            cmd.extend(
+                ["--affordance-checkpoint", str(Path(affordance_checkpoint).expanduser().resolve())]
+            )
         env = os.environ.copy()
         env["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
         env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
