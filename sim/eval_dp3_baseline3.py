@@ -97,6 +97,10 @@ parser.add_argument("--video-all", action="store_true",
 parser.add_argument("--result-dir", type=str,
                     default=os.path.join(PROJ_ROOT, "output/dp3_eval_b3curobo"),
                     help="where to write the per-run JSON summary")
+parser.add_argument("--retry-physx", type=int, default=1,
+                    help="number of retry attempts when an ep returns 'physx_corrupt'. "
+                         "DP3 is stochastic, so a fresh sample likely avoids the "
+                         "same physx fault. Set 0 to disable. Default 1.")
 args, _ = parser.parse_known_args()
 
 simulation_app = SimulationApp({"headless": args.headless})
@@ -139,7 +143,7 @@ SUCCESS_DZ_M    = 0.03                                 # same as baseline_3
 N_PC_POINTS     = 4096
 
 _VID = {"on": False, "i": 0, "n": 0, "vp": None}
-_VID_FRAMES = "/tmp/b3eval_video_frames"
+_VID_FRAMES = f"/tmp/b3eval_video_frames_{os.getpid()}"  # per-pid to avoid --par N race
 
 
 # ============================================================
@@ -325,6 +329,29 @@ def setup_world_b3_eval():
 
     cprint("✅ World + Franka ready", "green")
     return {"world": world, "franka": franka, "obj": None}
+
+
+def reset_scene_between_eps(scene, usd_path, mass):
+    """Per-ep scene reset to clear PhysX solver NaN before next episode.
+
+    Adopted from partner's titan swap_scene_object (sim/evaluation/scene_builder.py).
+    Without this, one bad ep (NaN in PhysX solver) poisons all subsequent eps in
+    the same subprocess — see "parent_poisoned" stage in pre-fix eval results.
+
+    Steps: world.reset() clears solver state + resets articulations to initial;
+    a few steps drain the physics buffer; load_object re-spawns the rigid body
+    fresh; Franka HOME is set defensively.
+    """
+    world = scene["world"]
+    world.reset()                              # clears PhysX solver state (NaN)
+    for _ in range(10):
+        world.step(render=False)               # drain buffer
+    scene["obj"] = load_object(world, usd_path, mass)   # fresh rigid body
+    scene["obj_mesh"] = getattr(scene["obj"], "_curobo_mesh", None)
+    scene["franka"].set_joint_positions(HOME_JOINTS)   # defensive
+    scene["franka"].open_gripper()
+    for _ in range(5):
+        world.step(render=False)
 
 
 def load_object(world, usd_path, mass):
@@ -558,6 +585,26 @@ def rollout_chunked(scene, server_url, info, pc0_G, origin_world,
                                     gripper_state=(1.0 if gripper_closed else 0.0))
         obs_window = obs_window[1:] + [new_obs]
 
+        # ★ early stop: once gripper closed + obj lifted > SUCCESS_DZ_M, no point continuing ★
+        # Saves ~15-20% per ep when DP3 emits grip-close early (typical chunks 2-3).
+        if gripper_closed and initial_z is not None:
+            try:
+                obj_pos_now, _ = obj.get_obj_pos()
+                dz_now = float(obj_pos_now[2]) - initial_z
+                if dz_now > SUCCESS_DZ_M:
+                    cprint(f"  🎯 EARLY STOP @ chunk {chunk}: dz={dz_now*100:+.1f}cm > "
+                           f"{SUCCESS_DZ_M*100:.0f}cm threshold (saved {max_chunks-chunk-1} chunks)",
+                           "green")
+                    dists = np.array([np.linalg.norm(p - obj_centroid_w) for p, _ in executed]) \
+                            if executed else np.array([np.nan])
+                    return {"success": True, "dz": dz_now,
+                            "n_chunks": chunk + 1, "grip_signal_idx": grip_signal_idx,
+                            "n_executed": len(executed),
+                            "min_dist_to_obj_cm": float(dists.min()) * 100,
+                            "stage": "dp3_close_lift_early_stop"}
+            except Exception:
+                pass  # if obj.get_obj_pos errors, just continue normally
+
     # End of all chunks — settle
     for _ in range(80):
         world.step(render=True)
@@ -777,17 +824,40 @@ def main():
 
     scene = setup_world_b3_eval()
 
-    # Load USD for the target object (use the first episode's class id; assume single class)
+    # Single-class assumption: all eps in --episodes-glob must share the same
+    # obj (dataset + obj_id + cid). For multi-class eval, the OUTER wrapper
+    # (scripts/eval_combined/04_batch_eval.sh) groups eps by class and runs
+    # this script ONCE per class. Per-ep USD reload mid-run hits IsaacSim
+    # PhysX 'Failed to get rigid body velocities from backend' on prim swap;
+    # fresh subprocess per class avoids it cleanly.
     with h5py.File(chosen[0], "r") as h:
+        usd, obj_label = grasp_physics.usd_path_for_ep(h.attrs, proj_root=PROJ_ROOT)
         cid = int(h.attrs["ycb_class_id"])
-    usd = os.path.join(PROJ_ROOT, "output/obj_usd_cad/ycb", f"ycb_dex_{cid:02d}.usd")
+        ds  = str(h.attrs.get("dataset", "dexycb"))
+        oid = str(h.attrs.get("obj_id", ""))
+
+    # Sanity: all OTHER eps in the glob must match chosen[0]. If not, abort
+    # loudly to avoid producing wrong-USD results (the 2026-05-26 bug: 16 eps
+    # across 8 classes all used chosen[0]'s USD silently).
+    for ep in chosen[1:]:
+        with h5py.File(ep, "r") as h:
+            ep_ds  = str(h.attrs.get("dataset", "dexycb"))
+            ep_oid = str(h.attrs.get("obj_id", ""))
+            ep_cid = int(h.attrs["ycb_class_id"])
+        if (ep_ds, ep_oid, ep_cid) != (ds, oid, cid):
+            cprint(f"❌ multi-class glob detected: ep '{os.path.basename(ep)}' "
+                   f"has ({ep_ds},{ep_oid},{ep_cid}) vs first ep "
+                   f"({ds},{oid},{cid}). "
+                   f"Use scripts/eval_combined/04_batch_eval.sh for multi-class eval.", "red")
+            simulation_app.close(); return
+
     # Match v4 collector L962: hardcoded mass=0.05kg. Real masses (0.3–0.6kg)
     # cause PhysX collision force ~10× larger → solver overflow + NaN poison,
     # AND the policy was trained on the lighter-object distribution → using real
     # mass at eval means PD needs ~10× more force to lift than training implies.
     mass = 0.05
-    real_mass = grasp_physics.object_mass_kg(cid)
-    cprint(f"\n=== object ycb_dex_{cid:02d}  mass={mass}kg "
+    real_mass = grasp_physics.object_mass_kg(cid) if ds != "oakink" else 0.05
+    cprint(f"\n=== object {obj_label}  mass={mass}kg "
            f"(real {real_mass}kg, matching training collector) ===", "cyan")
     if not os.path.exists(usd):
         cprint(f"  ❌ USD missing: {usd}", "red")
@@ -799,6 +869,10 @@ def main():
     poisoned = False
     for i, ep in enumerate(chosen):
         cprint(f"\n[{i+1}/{len(chosen)}] {os.path.basename(ep)}", "yellow")
+        # ★ per-ep scene reset: clears PhysX solver state from any prior ep ★
+        # First ep already has fresh state from the initial load_object above.
+        if i > 0:
+            reset_scene_between_eps(scene, usd, mass)
         video_begin()
         try:
             r = eval_one_episode(scene, ep, info)
@@ -808,6 +882,22 @@ def main():
             cprint(traceback.format_exc()[-600:], "red")
             r = {"name": os.path.basename(ep), "success": False, "dz": 0.0,
                  "stage": f"crash_{type(e).__name__}"}
+        # ★ retry physx_corrupt (DP3 is stochastic → fresh sample likely avoids fault) ★
+        retry_n = 0
+        while (r.get("stage") == "physx_corrupt" and retry_n < args.retry_physx):
+            retry_n += 1
+            cprint(f"  🔄 physx_corrupt retry {retry_n}/{args.retry_physx} on {os.path.basename(ep)}",
+                   "yellow")
+            try:
+                reset_scene_between_eps(scene, usd, mass)
+                r2 = eval_one_episode(scene, ep, info)
+                r2["physx_retry_n"] = retry_n
+                r2["physx_retry_prior_stage"] = r["stage"]
+                r = r2
+            except Exception as e:
+                cprint(f"  ❌ retry crashed: {type(e).__name__}: {e}", "red")
+                r["physx_retry_n"] = retry_n
+                break
         results.append(r)
         video_end(scene["world"], r["name"].replace(".hdf5", ".mp4"),
                   keep=(r["success"] or args.video_all))
@@ -824,7 +914,7 @@ def main():
     # ── Summary ────────────────────────────────────────────────────────────
     n_succ = sum(int(r["success"]) for r in results)
     cprint("\n" + "=" * 64, "cyan")
-    cprint(f"  EVAL SUMMARY  ycb_dex_{cid:02d}", "cyan")
+    cprint(f"  EVAL SUMMARY  {obj_label}", "cyan")
     cprint("=" * 64, "cyan")
     for r in results:
         tag = "✓" if r["success"] else "✗"

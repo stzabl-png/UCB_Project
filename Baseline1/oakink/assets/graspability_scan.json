@@ -1,999 +1,1668 @@
 {
-  "_schema": "OakInk per-object geometry + session count + graspability flag",
-  "_generated": "2026-05-25",
+  "_schema": "OakInk per-object geometry + session count + category metadata (v2)",
+  "_generated": "2026-05-26",
   "_franka_max_open_cm": 8.0,
   "_threshold_cm": 8.0,
-  "_threshold_meaning": "graspable iff min_width_cm <= 8.0 (i.e., there EXISTS a finger-axis direction where the object fits inside Franka's 8cm opening). Objects whose narrowest direction still exceeds 8cm are NOT graspable.",
-  "_min_width_method": "support-function min over 2000 random unit directions",
-  "_n_objects": 76,
+  "_n_objects": 101,
   "objects": [
     {
       "obj_id": "S10018",
-      "aabb_cm": [
-        8.3444,
-        10.943200000000001,
-        11.0212
+      "name": "mug_s018",
+      "category": "container",
+      "attr": [
+        "handled",
+        "pourable"
       ],
-      "aabb_min_cm": 8.3444,
-      "min_width_cm": 8.273051511366383,
+      "aabb_cm": [
+        8.34,
+        10.94,
+        11.02
+      ],
+      "min_width_cm": 8.27,
       "n_sessions": 64,
-      "has_usd": true,
       "graspable_8cm": false
     },
     {
       "obj_id": "O01000",
-      "aabb_cm": [
-        6.3591999999999995,
-        9.8408,
-        20.288999999999998
+      "name": "omo_cleaner",
+      "category": "container",
+      "attr": [
+        "trigger_sprayer"
       ],
-      "aabb_min_cm": 6.3591999999999995,
-      "min_width_cm": 6.360096510841755,
+      "aabb_cm": [
+        6.36,
+        9.84,
+        20.29
+      ],
+      "min_width_cm": 6.36,
       "n_sessions": 60,
-      "has_usd": true,
       "graspable_8cm": true
     },
     {
       "obj_id": "S10021",
-      "aabb_cm": [
-        8.1204,
-        11.454400000000001,
-        10.7726
+      "name": "mug_s021",
+      "category": "container",
+      "attr": [
+        "handled",
+        "pourable"
       ],
-      "aabb_min_cm": 8.1204,
-      "min_width_cm": 7.86585525104897,
+      "aabb_cm": [
+        8.12,
+        11.45,
+        10.77
+      ],
+      "min_width_cm": 7.87,
       "n_sessions": 60,
-      "has_usd": true,
       "graspable_8cm": true
     },
     {
       "obj_id": "A01001",
-      "aabb_cm": [
-        6.5008,
-        10.208200000000001,
-        22.7964
+      "name": "dispenser1",
+      "category": "container",
+      "attr": [
+        "trigger_sprayer"
       ],
-      "aabb_min_cm": 6.5008,
-      "min_width_cm": 6.2437312064595405,
+      "aabb_cm": [
+        6.5,
+        10.21,
+        22.8
+      ],
+      "min_width_cm": 6.24,
       "n_sessions": 56,
-      "has_usd": true,
       "graspable_8cm": true
     },
     {
       "obj_id": "S10011",
-      "aabb_cm": [
-        10.4348,
-        12.213000000000001,
-        7.1974
+      "name": "mug_s011",
+      "category": "container",
+      "attr": [
+        "handled",
+        "pourable"
       ],
-      "aabb_min_cm": 7.1974,
-      "min_width_cm": 7.377803730698057,
+      "aabb_cm": [
+        10.43,
+        12.21,
+        7.2
+      ],
+      "min_width_cm": 7.38,
       "n_sessions": 56,
-      "has_usd": true,
       "graspable_8cm": true
     },
     {
       "obj_id": "S10006",
-      "aabb_cm": [
-        10.2346,
-        12.895599999999998,
-        15.1586
+      "name": "mug_s006",
+      "category": "container",
+      "attr": [
+        "handled",
+        "pourable"
       ],
-      "aabb_min_cm": 10.2346,
-      "min_width_cm": 10.113822254983358,
+      "aabb_cm": [
+        10.23,
+        12.9,
+        15.16
+      ],
+      "min_width_cm": 10.11,
       "n_sessions": 56,
-      "has_usd": true,
       "graspable_8cm": false
     },
     {
       "obj_id": "S10001",
-      "aabb_cm": [
-        9.971,
-        13.0607,
-        6.3770999999999995
+      "name": "mug_s001",
+      "category": "container",
+      "attr": [
+        "handled",
+        "pourable"
       ],
-      "aabb_min_cm": 6.3770999999999995,
-      "min_width_cm": 6.607350020905773,
+      "aabb_cm": [
+        9.97,
+        13.06,
+        6.38
+      ],
+      "min_width_cm": 6.61,
       "n_sessions": 52,
-      "has_usd": true,
       "graspable_8cm": true
     },
     {
       "obj_id": "S10008",
-      "aabb_cm": [
-        7.280200000000001,
-        10.1792,
-        12.4246
+      "name": "mug_s008",
+      "category": "container",
+      "attr": [
+        "handled",
+        "pourable"
       ],
-      "aabb_min_cm": 7.280200000000001,
-      "min_width_cm": 7.231593549575846,
+      "aabb_cm": [
+        7.28,
+        10.18,
+        12.42
+      ],
+      "min_width_cm": 7.23,
       "n_sessions": 52,
-      "has_usd": true,
       "graspable_8cm": true
     },
     {
       "obj_id": "A01008",
-      "aabb_cm": [
-        7.4088,
-        10.8672,
-        25.529200000000003
+      "name": "dispenser8",
+      "category": "container",
+      "attr": [
+        "trigger_sprayer"
       ],
-      "aabb_min_cm": 7.4088,
-      "min_width_cm": 7.381795031227331,
+      "aabb_cm": [
+        7.41,
+        10.87,
+        25.53
+      ],
+      "min_width_cm": 7.38,
       "n_sessions": 52,
-      "has_usd": true,
       "graspable_8cm": true
     },
     {
       "obj_id": "S10007",
-      "aabb_cm": [
-        7.6568,
-        11.4854,
-        10.9748
+      "name": "mug_s007",
+      "category": "container",
+      "attr": [
+        "handled",
+        "pourable"
       ],
-      "aabb_min_cm": 7.6568,
-      "min_width_cm": 8.007635689913837,
+      "aabb_cm": [
+        7.66,
+        11.49,
+        10.97
+      ],
+      "min_width_cm": 8.01,
       "n_sessions": 52,
-      "has_usd": true,
       "graspable_8cm": false
     },
     {
       "obj_id": "S10005",
-      "aabb_cm": [
-        8.1082,
-        10.3906,
-        11.7168
+      "name": "mug_s005",
+      "category": "container",
+      "attr": [
+        "handled",
+        "pourable"
       ],
-      "aabb_min_cm": 8.1082,
-      "min_width_cm": 8.043817973562954,
+      "aabb_cm": [
+        8.11,
+        10.39,
+        11.72
+      ],
+      "min_width_cm": 8.04,
       "n_sessions": 52,
-      "has_usd": true,
       "graspable_8cm": false
     },
     {
       "obj_id": "S10017",
-      "aabb_cm": [
-        8.195,
-        11.1346,
-        10.9476
+      "name": "mug_s017",
+      "category": "container",
+      "attr": [
+        "handled",
+        "pourable"
       ],
-      "aabb_min_cm": 8.195,
-      "min_width_cm": 8.12023642128486,
+      "aabb_cm": [
+        8.2,
+        11.13,
+        10.95
+      ],
+      "min_width_cm": 8.12,
       "n_sessions": 52,
-      "has_usd": true,
       "graspable_8cm": false
     },
     {
       "obj_id": "S10009",
-      "aabb_cm": [
-        8.1616,
-        12.511,
-        9.3728
+      "name": "mug_s009",
+      "category": "container",
+      "attr": [
+        "handled",
+        "pourable"
       ],
-      "aabb_min_cm": 8.1616,
-      "min_width_cm": 8.196814964960067,
+      "aabb_cm": [
+        8.16,
+        12.51,
+        9.37
+      ],
+      "min_width_cm": 8.2,
       "n_sessions": 52,
-      "has_usd": true,
+      "graspable_8cm": false
+    },
+    {
+      "obj_id": "C10001",
+      "name": "contactpose_mug",
+      "category": "container",
+      "attr": [
+        "handled",
+        "pourable"
+      ],
+      "aabb_cm": [
+        8.21,
+        11.63,
+        10.56
+      ],
+      "min_width_cm": 8.21,
+      "n_sessions": 52,
       "graspable_8cm": false
     },
     {
       "obj_id": "S10019",
-      "aabb_cm": [
-        8.3488,
-        11.211,
-        10.7518
+      "name": "mug_s019",
+      "category": "container",
+      "attr": [
+        "handled",
+        "pourable"
       ],
-      "aabb_min_cm": 8.3488,
-      "min_width_cm": 8.248348952441034,
+      "aabb_cm": [
+        8.35,
+        11.21,
+        10.75
+      ],
+      "min_width_cm": 8.25,
       "n_sessions": 52,
-      "has_usd": true,
       "graspable_8cm": false
     },
     {
       "obj_id": "S10024",
-      "aabb_cm": [
-        8.3608,
-        11.781600000000001,
-        10.113199999999999
+      "name": "mug_s024",
+      "category": "container",
+      "attr": [
+        "handled",
+        "pourable"
       ],
-      "aabb_min_cm": 8.3608,
-      "min_width_cm": 8.364645489460187,
-      "n_sessions": 52,
-      "has_usd": true,
-      "graspable_8cm": false
-    },
-    {
-      "obj_id": "S10020",
       "aabb_cm": [
-        8.326,
-        12.5972,
-        10.0592
+        8.36,
+        11.78,
+        10.11
       ],
-      "aabb_min_cm": 8.326,
-      "min_width_cm": 8.466210281773561,
+      "min_width_cm": 8.36,
       "n_sessions": 52,
-      "has_usd": true,
       "graspable_8cm": false
     },
     {
       "obj_id": "A01023",
-      "aabb_cm": [
-        8.4796,
-        11.3646,
-        22.354000000000003
+      "name": "dispenser23",
+      "category": "container",
+      "attr": [
+        "trigger_sprayer"
       ],
-      "aabb_min_cm": 8.4796,
-      "min_width_cm": 8.469361533250277,
+      "aabb_cm": [
+        8.48,
+        11.36,
+        22.35
+      ],
+      "min_width_cm": 8.47,
       "n_sessions": 52,
-      "has_usd": true,
+      "graspable_8cm": false
+    },
+    {
+      "obj_id": "S10020",
+      "name": "mug_s020",
+      "category": "container",
+      "attr": [
+        "handled",
+        "pourable"
+      ],
+      "aabb_cm": [
+        8.33,
+        12.6,
+        10.06
+      ],
+      "min_width_cm": 8.47,
+      "n_sessions": 52,
       "graspable_8cm": false
     },
     {
       "obj_id": "S10014",
-      "aabb_cm": [
-        8.556999999999999,
-        11.945,
-        9.7056
+      "name": "mug_s014",
+      "category": "container",
+      "attr": [
+        "handled",
+        "pourable"
       ],
-      "aabb_min_cm": 8.556999999999999,
-      "min_width_cm": 8.555055204571271,
-      "n_sessions": 52,
-      "has_usd": true,
-      "graspable_8cm": false
-    },
-    {
-      "obj_id": "S10023",
       "aabb_cm": [
-        9.936200000000001,
-        11.905000000000001,
-        8.3984
+        8.56,
+        11.95,
+        9.71
       ],
-      "aabb_min_cm": 8.3984,
-      "min_width_cm": 8.588357771621306,
+      "min_width_cm": 8.56,
       "n_sessions": 52,
-      "has_usd": true,
       "graspable_8cm": false
     },
     {
       "obj_id": "A01027",
-      "aabb_cm": [
-        8.623800000000001,
-        11.4625,
-        31.7625
+      "name": "dispenser27",
+      "category": "container",
+      "attr": [
+        "trigger_sprayer"
       ],
-      "aabb_min_cm": 8.623800000000001,
-      "min_width_cm": 8.594777914806395,
+      "aabb_cm": [
+        8.62,
+        11.46,
+        31.76
+      ],
+      "min_width_cm": 8.59,
       "n_sessions": 52,
-      "has_usd": true,
+      "graspable_8cm": false
+    },
+    {
+      "obj_id": "S10023",
+      "name": "mug_s023",
+      "category": "container",
+      "attr": [
+        "handled",
+        "pourable"
+      ],
+      "aabb_cm": [
+        9.94,
+        11.91,
+        8.4
+      ],
+      "min_width_cm": 8.59,
+      "n_sessions": 52,
       "graspable_8cm": false
     },
     {
       "obj_id": "S10016",
-      "aabb_cm": [
-        8.791599999999999,
-        12.5154,
-        8.7786
+      "name": "mug_s016",
+      "category": "container",
+      "attr": [
+        "handled",
+        "pourable"
       ],
-      "aabb_min_cm": 8.7786,
-      "min_width_cm": 8.755032113412536,
+      "aabb_cm": [
+        8.79,
+        12.52,
+        8.78
+      ],
+      "min_width_cm": 8.76,
       "n_sessions": 52,
-      "has_usd": true,
       "graspable_8cm": false
     },
     {
       "obj_id": "S10015",
-      "aabb_cm": [
-        8.8716,
-        11.947199999999999,
-        9.463000000000001
+      "name": "mug_s015",
+      "category": "container",
+      "attr": [
+        "handled",
+        "pourable"
       ],
-      "aabb_min_cm": 8.8716,
-      "min_width_cm": 8.820611333055892,
+      "aabb_cm": [
+        8.87,
+        11.95,
+        9.46
+      ],
+      "min_width_cm": 8.82,
       "n_sessions": 52,
-      "has_usd": true,
       "graspable_8cm": false
     },
     {
       "obj_id": "S10022",
-      "aabb_cm": [
-        9.099400000000001,
-        11.860800000000001,
-        9.3546
+      "name": "mug_s022",
+      "category": "container",
+      "attr": [
+        "handled",
+        "pourable"
       ],
-      "aabb_min_cm": 9.099400000000001,
-      "min_width_cm": 9.054281221663244,
+      "aabb_cm": [
+        9.1,
+        11.86,
+        9.35
+      ],
+      "min_width_cm": 9.05,
       "n_sessions": 52,
-      "has_usd": true,
       "graspable_8cm": false
     },
     {
       "obj_id": "A01006",
-      "aabb_cm": [
-        10.927299999999999,
-        11.2328,
-        21.2626
+      "name": "dispenser6",
+      "category": "container",
+      "attr": [
+        "trigger_sprayer"
       ],
-      "aabb_min_cm": 10.927299999999999,
-      "min_width_cm": 9.589973225850223,
+      "aabb_cm": [
+        10.93,
+        11.23,
+        21.26
+      ],
+      "min_width_cm": 9.59,
       "n_sessions": 52,
-      "has_usd": true,
       "graspable_8cm": false
     },
     {
       "obj_id": "S10012",
-      "aabb_cm": [
-        10.214899999999998,
-        15.770600000000002,
-        11.8366
+      "name": "mug_s012",
+      "category": "container",
+      "attr": [
+        "handled",
+        "pourable"
       ],
-      "aabb_min_cm": 10.214899999999998,
-      "min_width_cm": 10.18598765613442,
+      "aabb_cm": [
+        10.21,
+        15.77,
+        11.84
+      ],
+      "min_width_cm": 10.19,
       "n_sessions": 52,
-      "has_usd": true,
       "graspable_8cm": false
     },
     {
       "obj_id": "A01002",
-      "aabb_cm": [
-        6.687899999999999,
-        9.204899999999999,
-        25.3943
+      "name": "dispenser2",
+      "category": "container",
+      "attr": [
+        "trigger_sprayer"
       ],
-      "aabb_min_cm": 6.687899999999999,
-      "min_width_cm": 6.60359828788509,
+      "aabb_cm": [
+        6.69,
+        9.2,
+        25.39
+      ],
+      "min_width_cm": 6.6,
       "n_sessions": 48,
-      "has_usd": true,
       "graspable_8cm": true
     },
     {
       "obj_id": "A01010",
-      "aabb_cm": [
-        6.9296,
-        9.295200000000001,
-        26.801
+      "name": "dispenser10",
+      "category": "container",
+      "attr": [
+        "trigger_sprayer"
       ],
-      "aabb_min_cm": 6.9296,
-      "min_width_cm": 6.86514976875231,
+      "aabb_cm": [
+        6.93,
+        9.3,
+        26.8
+      ],
+      "min_width_cm": 6.87,
       "n_sessions": 48,
-      "has_usd": true,
+      "graspable_8cm": true
+    },
+    {
+      "obj_id": "C14001",
+      "name": "contactpose_wineglass",
+      "category": "container",
+      "attr": [
+        "pourable",
+        "revolute"
+      ],
+      "aabb_cm": [
+        7.07,
+        7.07,
+        17.2
+      ],
+      "min_width_cm": 7.05,
+      "n_sessions": 48,
       "graspable_8cm": true
     },
     {
       "obj_id": "S10002",
-      "aabb_cm": [
-        8.3938,
-        13.5101,
-        7.6164
+      "name": "mug_s002",
+      "category": "container",
+      "attr": [
+        "handled",
+        "pourable"
       ],
-      "aabb_min_cm": 7.6164,
-      "min_width_cm": 7.683851390492995,
+      "aabb_cm": [
+        8.39,
+        13.51,
+        7.62
+      ],
+      "min_width_cm": 7.68,
       "n_sessions": 48,
-      "has_usd": true,
       "graspable_8cm": true
     },
     {
       "obj_id": "A01026",
-      "aabb_cm": [
-        8.4844,
-        10.7362,
-        21.3553
+      "name": "dispenser26",
+      "category": "container",
+      "attr": [
+        "trigger_sprayer"
       ],
-      "aabb_min_cm": 8.4844,
-      "min_width_cm": 8.464233120895203,
+      "aabb_cm": [
+        8.48,
+        10.74,
+        21.36
+      ],
+      "min_width_cm": 8.46,
       "n_sessions": 48,
-      "has_usd": true,
       "graspable_8cm": false
     },
     {
       "obj_id": "S10013",
-      "aabb_cm": [
-        8.5274,
-        12.081999999999999,
-        9.5844
+      "name": "mug_s013",
+      "category": "container",
+      "attr": [
+        "handled",
+        "pourable"
       ],
-      "aabb_min_cm": 8.5274,
-      "min_width_cm": 8.465412744292783,
+      "aabb_cm": [
+        8.53,
+        12.08,
+        9.58
+      ],
+      "min_width_cm": 8.47,
       "n_sessions": 48,
-      "has_usd": true,
       "graspable_8cm": false
     },
     {
       "obj_id": "S10010",
-      "aabb_cm": [
-        9.114600000000001,
-        11.697000000000001,
-        9.5266
+      "name": "mug_s010",
+      "category": "container",
+      "attr": [
+        "handled",
+        "pourable"
       ],
-      "aabb_min_cm": 9.114600000000001,
-      "min_width_cm": 8.65468448722281,
+      "aabb_cm": [
+        9.11,
+        11.7,
+        9.53
+      ],
+      "min_width_cm": 8.65,
       "n_sessions": 48,
-      "has_usd": true,
       "graspable_8cm": false
     },
     {
       "obj_id": "S10004",
-      "aabb_cm": [
-        8.9964,
-        11.8312,
-        9.4908
+      "name": "mug_s004",
+      "category": "container",
+      "attr": [
+        "handled",
+        "pourable"
       ],
-      "aabb_min_cm": 8.9964,
-      "min_width_cm": 8.979071510858262,
+      "aabb_cm": [
+        9.0,
+        11.83,
+        9.49
+      ],
+      "min_width_cm": 8.98,
       "n_sessions": 48,
-      "has_usd": true,
       "graspable_8cm": false
     },
     {
       "obj_id": "S10003",
-      "aabb_cm": [
-        9.1424,
-        11.392199999999999,
-        9.8802
+      "name": "mug_s003",
+      "category": "container",
+      "attr": [
+        "handled",
+        "pourable"
       ],
-      "aabb_min_cm": 9.1424,
-      "min_width_cm": 9.077234689544266,
+      "aabb_cm": [
+        9.14,
+        11.39,
+        9.88
+      ],
+      "min_width_cm": 9.08,
       "n_sessions": 48,
-      "has_usd": true,
       "graspable_8cm": false
     },
     {
       "obj_id": "O50001",
-      "aabb_cm": [
-        14.223999999999998,
-        11.6252,
-        20.765
+      "name": "nikon_d610_camera",
+      "category": "misc",
+      "attr": [
+        ""
       ],
-      "aabb_min_cm": 11.6252,
-      "min_width_cm": 11.687956688593978,
+      "aabb_cm": [
+        14.22,
+        11.63,
+        20.77
+      ],
+      "min_width_cm": 11.69,
       "n_sessions": 48,
-      "has_usd": true,
       "graspable_8cm": false
     },
     {
       "obj_id": "A01005",
-      "aabb_cm": [
-        4.8006,
-        9.317,
-        15.576800000000002
+      "name": "dispenser5",
+      "category": "container",
+      "attr": [
+        "trigger_sprayer"
       ],
-      "aabb_min_cm": 4.8006,
-      "min_width_cm": 4.821032485743471,
+      "aabb_cm": [
+        4.8,
+        9.32,
+        15.58
+      ],
+      "min_width_cm": 4.82,
       "n_sessions": 44,
-      "has_usd": true,
       "graspable_8cm": true
     },
     {
       "obj_id": "A01009",
-      "aabb_cm": [
-        5.8853,
-        8.716,
-        25.401
+      "name": "dispenser9",
+      "category": "container",
+      "attr": [
+        "trigger_sprayer"
       ],
-      "aabb_min_cm": 5.8853,
-      "min_width_cm": 5.922746632686767,
+      "aabb_cm": [
+        5.89,
+        8.72,
+        25.4
+      ],
+      "min_width_cm": 5.92,
       "n_sessions": 44,
-      "has_usd": true,
       "graspable_8cm": true
     },
     {
       "obj_id": "Y29040",
-      "aabb_cm": [
-        1.9352999999999998,
-        1.8625000000000003,
-        12.079300000000002
+      "name": "040_large_marker",
+      "category": "maniptools",
+      "attr": [
+        "handled",
+        "revolute"
       ],
-      "aabb_min_cm": 1.8625000000000003,
-      "min_width_cm": 1.8694288776311714,
+      "aabb_cm": [
+        1.94,
+        1.86,
+        12.08
+      ],
+      "min_width_cm": 1.87,
       "n_sessions": 40,
-      "has_usd": true,
       "graspable_8cm": true
     },
     {
       "obj_id": "S16001",
-      "aabb_cm": [
-        2.5114,
-        7.5108,
-        14.006599999999999
+      "name": "bottle_s001",
+      "category": "container",
+      "attr": [
+        "pourable"
       ],
-      "aabb_min_cm": 2.5114,
-      "min_width_cm": 2.596535501222339,
+      "aabb_cm": [
+        2.51,
+        7.51,
+        14.01
+      ],
+      "min_width_cm": 2.6,
       "n_sessions": 40,
-      "has_usd": true,
       "graspable_8cm": true
     },
     {
       "obj_id": "O03002",
-      "aabb_cm": [
-        2.6164,
-        5.0997,
-        11.4872
+      "name": "deli_white_latex",
+      "category": "container",
+      "attr": [
+        "squeezable"
       ],
-      "aabb_min_cm": 2.6164,
-      "min_width_cm": 2.6323822682499705,
+      "aabb_cm": [
+        2.62,
+        5.1,
+        11.49
+      ],
+      "min_width_cm": 2.63,
       "n_sessions": 40,
-      "has_usd": true,
+      "graspable_8cm": true
+    },
+    {
+      "obj_id": "C40001",
+      "name": "contactpose_eyeglasses",
+      "category": "wearable",
+      "attr": [
+        "symmetric"
+      ],
+      "aabb_cm": [
+        13.41,
+        4.42,
+        13.62
+      ],
+      "min_width_cm": 4.42,
+      "n_sessions": 40,
       "graspable_8cm": true
     },
     {
       "obj_id": "A16013",
-      "aabb_cm": [
-        4.5066999999999995,
-        7.483799999999999,
-        15.073999999999998
+      "name": "bottle13",
+      "category": "container",
+      "attr": [
+        "pourable"
       ],
-      "aabb_min_cm": 4.5066999999999995,
-      "min_width_cm": 4.650501521779127,
+      "aabb_cm": [
+        4.51,
+        7.48,
+        15.07
+      ],
+      "min_width_cm": 4.65,
       "n_sessions": 40,
-      "has_usd": true,
       "graspable_8cm": true
     },
     {
       "obj_id": "O03001",
-      "aabb_cm": [
-        4.8586,
-        9.7138,
-        24.4172
+      "name": "toilet_cleanser",
+      "category": "container",
+      "attr": [
+        "squeezable"
       ],
-      "aabb_min_cm": 4.8586,
-      "min_width_cm": 4.880380412639882,
+      "aabb_cm": [
+        4.86,
+        9.71,
+        24.42
+      ],
+      "min_width_cm": 4.88,
       "n_sessions": 40,
-      "has_usd": true,
       "graspable_8cm": true
     },
     {
       "obj_id": "A16026",
-      "aabb_cm": [
-        5.565100000000001,
-        10.562299999999999,
-        17.4925
+      "name": "bottle26",
+      "category": "container",
+      "attr": [
+        "pourable",
+        "handled"
       ],
-      "aabb_min_cm": 5.565100000000001,
-      "min_width_cm": 5.552036987950566,
+      "aabb_cm": [
+        5.57,
+        10.56,
+        17.49
+      ],
+      "min_width_cm": 5.55,
       "n_sessions": 40,
-      "has_usd": true,
       "graspable_8cm": true
     },
     {
       "obj_id": "Y27035",
-      "aabb_cm": [
-        5.7041,
-        18.180000000000003,
-        20.212
+      "name": "035_power_drill",
+      "category": "maniptools",
+      "attr": [
+        "handled"
       ],
-      "aabb_min_cm": 5.7041,
-      "min_width_cm": 5.798868262678594,
+      "aabb_cm": [
+        5.7,
+        18.18,
+        20.21
+      ],
+      "min_width_cm": 5.8,
       "n_sessions": 40,
-      "has_usd": true,
       "graspable_8cm": true
     },
     {
       "obj_id": "A02015",
-      "aabb_cm": [
-        6.0355,
-        6.183199999999999,
-        18.1491
+      "name": "dispenser15",
+      "category": "container",
+      "attr": [
+        "lotion_pump"
       ],
-      "aabb_min_cm": 6.0355,
-      "min_width_cm": 6.034603602560589,
+      "aabb_cm": [
+        6.04,
+        6.18,
+        18.15
+      ],
+      "min_width_cm": 6.03,
       "n_sessions": 40,
-      "has_usd": true,
       "graspable_8cm": true
     },
     {
       "obj_id": "O02001",
-      "aabb_cm": [
-        6.1132,
-        9.3034,
-        16.5294
+      "name": "chaoneng_handwash",
+      "category": "container",
+      "attr": [
+        "lotion_pump"
       ],
-      "aabb_min_cm": 6.1132,
-      "min_width_cm": 6.105887064640934,
+      "aabb_cm": [
+        6.11,
+        9.3,
+        16.53
+      ],
+      "min_width_cm": 6.11,
       "n_sessions": 40,
-      "has_usd": true,
       "graspable_8cm": true
     },
     {
       "obj_id": "A02011",
-      "aabb_cm": [
-        6.2089,
-        8.6903,
-        23.9685
+      "name": "dispenser11",
+      "category": "container",
+      "attr": [
+        "lotion_pump"
       ],
-      "aabb_min_cm": 6.2089,
-      "min_width_cm": 6.200386781217576,
+      "aabb_cm": [
+        6.21,
+        8.69,
+        23.97
+      ],
+      "min_width_cm": 6.2,
       "n_sessions": 40,
-      "has_usd": true,
       "graspable_8cm": true
     },
     {
       "obj_id": "Y03021",
-      "aabb_cm": [
-        6.7661999999999995,
-        9.8578,
-        25.4853
+      "name": "021_bleach_cleanser",
+      "category": "container",
+      "attr": [
+        "squeezable"
       ],
-      "aabb_min_cm": 6.7661999999999995,
-      "min_width_cm": 6.76438236535542,
+      "aabb_cm": [
+        6.77,
+        9.86,
+        25.49
+      ],
+      "min_width_cm": 6.76,
       "n_sessions": 40,
-      "has_usd": true,
       "graspable_8cm": true
     },
     {
       "obj_id": "A02014",
-      "aabb_cm": [
-        6.8201,
-        6.9826,
-        12.433900000000001
+      "name": "dispenser14",
+      "category": "container",
+      "attr": [
+        "lotion_pump"
       ],
-      "aabb_min_cm": 6.8201,
-      "min_width_cm": 6.891458914466645,
+      "aabb_cm": [
+        6.82,
+        6.98,
+        12.43
+      ],
+      "min_width_cm": 6.89,
       "n_sessions": 40,
-      "has_usd": true,
       "graspable_8cm": true
     },
     {
       "obj_id": "A15027",
-      "aabb_cm": [
-        7.2543999999999995,
-        7.277,
-        25.989799999999995
+      "name": "bottle27",
+      "category": "container",
+      "attr": [
+        "pourable",
+        "revolute"
       ],
-      "aabb_min_cm": 7.2543999999999995,
-      "min_width_cm": 7.243823093367713,
+      "aabb_cm": [
+        7.25,
+        7.28,
+        25.99
+      ],
+      "min_width_cm": 7.24,
       "n_sessions": 40,
-      "has_usd": true,
       "graspable_8cm": true
     },
     {
       "obj_id": "A02032",
-      "aabb_cm": [
-        7.2004,
-        16.8274,
-        25.471100000000003
+      "name": "dispenser32",
+      "category": "container",
+      "attr": [
+        "lotion_pump",
+        "handled"
       ],
-      "aabb_min_cm": 7.2004,
-      "min_width_cm": 7.307956476565722,
+      "aabb_cm": [
+        7.2,
+        16.83,
+        25.47
+      ],
+      "min_width_cm": 7.31,
       "n_sessions": 40,
-      "has_usd": true,
       "graspable_8cm": true
     },
     {
       "obj_id": "A15015",
-      "aabb_cm": [
-        7.7076,
-        7.6851,
-        18.729200000000002
+      "name": "bottle15",
+      "category": "container",
+      "attr": [
+        "pourable",
+        "revolute"
       ],
-      "aabb_min_cm": 7.6851,
-      "min_width_cm": 7.6389588759094105,
+      "aabb_cm": [
+        7.71,
+        7.69,
+        18.73
+      ],
+      "min_width_cm": 7.64,
       "n_sessions": 40,
-      "has_usd": true,
       "graspable_8cm": true
     },
     {
       "obj_id": "A02029",
+      "name": "dispenser29",
+      "category": "container",
+      "attr": [
+        "lotion_pump",
+        "handled"
+      ],
       "aabb_cm": [
         7.66,
-        16.2708,
-        22.911700000000003
+        16.27,
+        22.91
       ],
-      "aabb_min_cm": 7.66,
-      "min_width_cm": 7.709308508159346,
+      "min_width_cm": 7.71,
       "n_sessions": 40,
-      "has_usd": true,
+      "graspable_8cm": true
+    },
+    {
+      "obj_id": "C12001",
+      "name": "contactpose_bowl",
+      "category": "container",
+      "attr": [
+        "pourable",
+        "revolute"
+      ],
+      "aabb_cm": [
+        14.89,
+        14.9,
+        7.66
+      ],
+      "min_width_cm": 7.92,
+      "n_sessions": 40,
       "graspable_8cm": true
     },
     {
       "obj_id": "A16012",
-      "aabb_cm": [
-        8.7621,
-        8.6861,
-        19.0603
+      "name": "bottle12",
+      "category": "container",
+      "attr": [
+        "pourable"
       ],
-      "aabb_min_cm": 8.6861,
-      "min_width_cm": 8.517509203811175,
+      "aabb_cm": [
+        8.76,
+        8.69,
+        19.06
+      ],
+      "min_width_cm": 8.52,
       "n_sessions": 40,
-      "has_usd": true,
+      "graspable_8cm": false
+    },
+    {
+      "obj_id": "C13001",
+      "name": "contactpose_utah_teapot",
+      "category": "container",
+      "attr": [
+        "handled",
+        "pourable"
+      ],
+      "aabb_cm": [
+        14.5,
+        23.22,
+        11.15
+      ],
+      "min_width_cm": 11.19,
+      "n_sessions": 40,
       "graspable_8cm": false
     },
     {
       "obj_id": "A02018",
-      "aabb_cm": [
-        12.046499999999998,
-        23.229,
-        26.9458
+      "name": "dispenser18",
+      "category": "container",
+      "attr": [
+        "lotion_pump"
       ],
-      "aabb_min_cm": 12.046499999999998,
-      "min_width_cm": 11.959265820947266,
+      "aabb_cm": [
+        12.05,
+        23.23,
+        26.95
+      ],
+      "min_width_cm": 11.96,
       "n_sessions": 40,
-      "has_usd": true,
       "graspable_8cm": false
     },
     {
       "obj_id": "O03003",
+      "name": "mewon_shampoo",
+      "category": "container",
+      "attr": [
+        "squeezable"
+      ],
       "aabb_cm": [
-        3.5373,
-        6.533800000000001,
+        3.54,
+        6.53,
         17.62
       ],
-      "aabb_min_cm": 3.5373,
-      "min_width_cm": 3.513068509246231,
+      "min_width_cm": 3.51,
       "n_sessions": 36,
-      "has_usd": true,
       "graspable_8cm": true
     },
     {
       "obj_id": "Y03006",
-      "aabb_cm": [
-        5.9123,
-        9.6735,
-        19.1907
+      "name": "006_mustard_bottle",
+      "category": "container",
+      "attr": [
+        "squeezable"
       ],
-      "aabb_min_cm": 5.9123,
-      "min_width_cm": 5.825639684570722,
+      "aabb_cm": [
+        5.91,
+        9.67,
+        19.19
+      ],
+      "min_width_cm": 5.83,
       "n_sessions": 36,
-      "has_usd": true,
       "graspable_8cm": true
     },
     {
       "obj_id": "A02030",
-      "aabb_cm": [
-        7.3736,
-        5.9226,
-        19.402
+      "name": "dispenser30",
+      "category": "container",
+      "attr": [
+        "lotion_pump"
       ],
-      "aabb_min_cm": 5.9226,
-      "min_width_cm": 5.92074387378412,
+      "aabb_cm": [
+        7.37,
+        5.92,
+        19.4
+      ],
+      "min_width_cm": 5.92,
       "n_sessions": 36,
-      "has_usd": true,
       "graspable_8cm": true
     },
     {
       "obj_id": "S15004",
-      "aabb_cm": [
-        7.0356000000000005,
-        7.0354,
-        12.642999999999999
+      "name": "bottle_s004",
+      "category": "container",
+      "attr": [
+        "pourable",
+        "revolute"
       ],
-      "aabb_min_cm": 7.0354,
-      "min_width_cm": 6.843114922001617,
+      "aabb_cm": [
+        7.04,
+        7.04,
+        12.64
+      ],
+      "min_width_cm": 6.84,
       "n_sessions": 36,
-      "has_usd": true,
       "graspable_8cm": true
     },
     {
       "obj_id": "A02012",
-      "aabb_cm": [
-        6.6477,
-        7.5619,
-        27.2448
+      "name": "dispenser12",
+      "category": "container",
+      "attr": [
+        "lotion_pump"
       ],
-      "aabb_min_cm": 6.6477,
-      "min_width_cm": 6.972961578845627,
+      "aabb_cm": [
+        6.65,
+        7.56,
+        27.24
+      ],
+      "min_width_cm": 6.97,
       "n_sessions": 36,
-      "has_usd": true,
+      "graspable_8cm": true
+    },
+    {
+      "obj_id": "C35001",
+      "name": "contactpose_scissors",
+      "category": "maniptools",
+      "attr": [
+        "pincer_like"
+      ],
+      "aabb_cm": [
+        1.46,
+        7.39,
+        13.0
+      ],
+      "min_width_cm": 1.45,
+      "n_sessions": 32,
       "graspable_8cm": true
     },
     {
       "obj_id": "Y35037",
-      "aabb_cm": [
-        1.5652,
-        8.751000000000001,
-        20.241999999999997
+      "name": "037_scissors",
+      "category": "maniptools",
+      "attr": [
+        "pincer_like"
       ],
-      "aabb_min_cm": 1.5652,
-      "min_width_cm": 1.7015468534050116,
+      "aabb_cm": [
+        1.57,
+        8.75,
+        20.24
+      ],
+      "min_width_cm": 1.7,
       "n_sessions": 32,
-      "has_usd": true,
+      "graspable_8cm": true
+    },
+    {
+      "obj_id": "C52001",
+      "name": "contactpose_phone",
+      "category": "misc",
+      "attr": [
+        ""
+      ],
+      "aabb_cm": [
+        4.95,
+        2.44,
+        14.84
+      ],
+      "min_width_cm": 2.38,
+      "n_sessions": 32,
       "graspable_8cm": true
     },
     {
       "obj_id": "O36001",
-      "aabb_cm": [
-        2.7308,
-        5.6769,
-        16.7321
+      "name": "stanley_pincer",
+      "category": "maniptools",
+      "attr": [
+        "pincer_like"
       ],
-      "aabb_min_cm": 2.7308,
-      "min_width_cm": 2.7447934465468427,
+      "aabb_cm": [
+        2.73,
+        5.68,
+        16.73
+      ],
+      "min_width_cm": 2.74,
       "n_sessions": 32,
-      "has_usd": true,
+      "graspable_8cm": true
+    },
+    {
+      "obj_id": "C22001",
+      "name": "contactpose_hammer",
+      "category": "maniptools",
+      "attr": [
+        "handled"
+      ],
+      "aabb_cm": [
+        2.32,
+        11.83,
+        20.67
+      ],
+      "min_width_cm": 2.8,
+      "n_sessions": 32,
+      "graspable_8cm": true
+    },
+    {
+      "obj_id": "C37001",
+      "name": "contactpose_stapler",
+      "category": "maniptools",
+      "attr": [
+        "pincer_like"
+      ],
+      "aabb_cm": [
+        3.0,
+        4.11,
+        12.29
+      ],
+      "min_width_cm": 3.1,
+      "n_sessions": 32,
+      "graspable_8cm": true
+    },
+    {
+      "obj_id": "C26001",
+      "name": "contactpose_fryingpan",
+      "category": "maniptools",
+      "attr": [
+        "handled"
+      ],
+      "aabb_cm": [
+        14.99,
+        3.65,
+        23.55
+      ],
+      "min_width_cm": 3.41,
+      "n_sessions": 32,
+      "graspable_8cm": true
+    },
+    {
+      "obj_id": "C03001",
+      "name": "contactpose_toothpaste",
+      "category": "container",
+      "attr": [
+        "squeezeable"
+      ],
+      "aabb_cm": [
+        3.8,
+        5.26,
+        20.2
+      ],
+      "min_width_cm": 3.8,
+      "n_sessions": 32,
       "graspable_8cm": true
     },
     {
       "obj_id": "S16005",
-      "aabb_cm": [
-        4.869,
-        6.778300000000001,
-        14.091999999999999
+      "name": "bottle_s005",
+      "category": "container",
+      "attr": [
+        "pourable"
       ],
-      "aabb_min_cm": 4.869,
-      "min_width_cm": 4.631672709709591,
+      "aabb_cm": [
+        4.87,
+        6.78,
+        14.09
+      ],
+      "min_width_cm": 4.63,
       "n_sessions": 32,
-      "has_usd": true,
+      "graspable_8cm": true
+    },
+    {
+      "obj_id": "C50001",
+      "name": "contactpose_camera",
+      "category": "misc",
+      "attr": [
+        ""
+      ],
+      "aabb_cm": [
+        11.67,
+        6.86,
+        4.85
+      ],
+      "min_width_cm": 4.76,
+      "n_sessions": 32,
+      "graspable_8cm": true
+    },
+    {
+      "obj_id": "C42001",
+      "name": "contactpose_binoculars",
+      "category": "wearable",
+      "attr": [
+        "symmetric"
+      ],
+      "aabb_cm": [
+        14.16,
+        4.76,
+        10.88
+      ],
+      "min_width_cm": 4.96,
+      "n_sessions": 32,
+      "graspable_8cm": true
+    },
+    {
+      "obj_id": "C41001",
+      "name": "contactpose_headphones",
+      "category": "wearable",
+      "attr": [
+        "symmetric"
+      ],
+      "aabb_cm": [
+        12.62,
+        6.37,
+        13.2
+      ],
+      "min_width_cm": 6.08,
+      "n_sessions": 32,
       "graspable_8cm": true
     },
     {
       "obj_id": "A02021",
-      "aabb_cm": [
-        6.342300000000001,
-        6.5774,
-        20.3644
+      "name": "dispenser21",
+      "category": "container",
+      "attr": [
+        "lotion_pump",
+        "handled"
       ],
-      "aabb_min_cm": 6.342300000000001,
-      "min_width_cm": 6.224248625841522,
+      "aabb_cm": [
+        6.34,
+        6.58,
+        20.36
+      ],
+      "min_width_cm": 6.22,
       "n_sessions": 32,
-      "has_usd": true,
       "graspable_8cm": true
     },
     {
       "obj_id": "A02028",
-      "aabb_cm": [
-        6.331100000000001,
-        7.438899999999999,
-        19.7748
+      "name": "dispenser28",
+      "category": "container",
+      "attr": [
+        "lotion_pump"
       ],
-      "aabb_min_cm": 6.331100000000001,
-      "min_width_cm": 6.259142762877736,
+      "aabb_cm": [
+        6.33,
+        7.44,
+        19.77
+      ],
+      "min_width_cm": 6.26,
       "n_sessions": 32,
-      "has_usd": true,
       "graspable_8cm": true
     },
     {
       "obj_id": "S16002",
-      "aabb_cm": [
-        6.8991999999999996,
-        8.0974,
-        12.4953
+      "name": "bottle_s002",
+      "category": "container",
+      "attr": [
+        "pourable",
+        "handled"
       ],
-      "aabb_min_cm": 6.8991999999999996,
-      "min_width_cm": 6.83407955837321,
+      "aabb_cm": [
+        6.9,
+        8.1,
+        12.5
+      ],
+      "min_width_cm": 6.83,
       "n_sessions": 32,
-      "has_usd": true,
       "graspable_8cm": true
     },
     {
-      "obj_id": "O50002",
-      "aabb_cm": [
-        12.2196,
-        12.6463,
-        9.6159
+      "obj_id": "C11001",
+      "name": "contactpose_cup",
+      "category": "container",
+      "attr": [
+        "pourable",
+        "revolute"
       ],
-      "aabb_min_cm": 9.6159,
-      "min_width_cm": 9.156323846150197,
+      "aabb_cm": [
+        8.46,
+        8.47,
+        10.0
+      ],
+      "min_width_cm": 8.42,
       "n_sessions": 32,
-      "has_usd": true,
       "graspable_8cm": false
     },
     {
-      "obj_id": "O93001",
-      "aabb_cm": [
-        9.7128,
-        9.857099999999999,
-        4.8046
+      "obj_id": "O50002",
+      "name": "fuji_instax_camera",
+      "category": "misc",
+      "attr": [
+        ""
       ],
-      "aabb_min_cm": 4.8046,
-      "min_width_cm": 4.764479421892796,
+      "aabb_cm": [
+        12.22,
+        12.65,
+        9.62
+      ],
+      "min_width_cm": 9.16,
+      "n_sessions": 32,
+      "graspable_8cm": false
+    },
+    {
+      "obj_id": "C51001",
+      "name": "contactpose_mouse",
+      "category": "misc",
+      "attr": [
+        ""
+      ],
+      "aabb_cm": [
+        6.26,
+        4.09,
+        11.7
+      ],
+      "min_width_cm": 4.0,
       "n_sessions": 28,
-      "has_usd": true,
+      "graspable_8cm": true
+    },
+    {
+      "obj_id": "C91001",
+      "name": "contactpose_banana",
+      "category": "geometry",
+      "attr": [
+        "cylinder"
+      ],
+      "aabb_cm": [
+        4.2,
+        8.51,
+        20.71
+      ],
+      "min_width_cm": 4.17,
+      "n_sessions": 28,
+      "graspable_8cm": true
+    },
+    {
+      "obj_id": "O93001",
+      "name": "donut",
+      "category": "geometry",
+      "attr": [
+        "torus"
+      ],
+      "aabb_cm": [
+        9.71,
+        9.86,
+        4.8
+      ],
+      "min_width_cm": 4.76,
+      "n_sessions": 28,
+      "graspable_8cm": true
+    },
+    {
+      "obj_id": "C43001",
+      "name": "contactpose_gamecontroller",
+      "category": "wearable",
+      "attr": [
+        "symmetric"
+      ],
+      "aabb_cm": [
+        15.49,
+        5.14,
+        9.69
+      ],
+      "min_width_cm": 5.12,
+      "n_sessions": 28,
+      "graspable_8cm": true
+    },
+    {
+      "obj_id": "C90001",
+      "name": "contactpose_apple",
+      "category": "geometry",
+      "attr": [
+        "sphere"
+      ],
+      "aabb_cm": [
+        8.66,
+        8.17,
+        9.78
+      ],
+      "min_width_cm": 8.14,
+      "n_sessions": 28,
+      "graspable_8cm": false
+    },
+    {
+      "obj_id": "C25001",
+      "name": "contactpose_toothbrush",
+      "category": "maniptools",
+      "attr": [
+        "handled"
+      ],
+      "aabb_cm": [
+        1.18,
+        2.29,
+        16.49
+      ],
+      "min_width_cm": 1.23,
+      "n_sessions": 24,
       "graspable_8cm": true
     },
     {
       "obj_id": "S20005",
-      "aabb_cm": [
-        2.3334,
-        7.391,
-        20.994
+      "name": "knife_s005",
+      "category": "maniptools",
+      "attr": [
+        "handled"
       ],
-      "aabb_min_cm": 2.3334,
-      "min_width_cm": 1.2896752392971211,
+      "aabb_cm": [
+        2.33,
+        7.39,
+        20.99
+      ],
+      "min_width_cm": 1.29,
       "n_sessions": 24,
-      "has_usd": true,
       "graspable_8cm": true
     },
     {
       "obj_id": "S20022",
-      "aabb_cm": [
-        1.494,
-        4.197,
-        21.9314
+      "name": "knife_s022",
+      "category": "maniptools",
+      "attr": [
+        "handled"
       ],
-      "aabb_min_cm": 1.494,
-      "min_width_cm": 1.5078863523652604,
+      "aabb_cm": [
+        1.49,
+        4.2,
+        21.93
+      ],
+      "min_width_cm": 1.51,
       "n_sessions": 24,
-      "has_usd": true,
       "graspable_8cm": true
     },
     {
       "obj_id": "O24001",
-      "aabb_cm": [
-        1.5058,
-        5.741700000000001,
-        21.051000000000002
+      "name": "stanley_wrench",
+      "category": "maniptools",
+      "attr": [
+        "handled"
       ],
-      "aabb_min_cm": 1.5058,
-      "min_width_cm": 1.5916833801933574,
+      "aabb_cm": [
+        1.51,
+        5.74,
+        21.05
+      ],
+      "min_width_cm": 1.59,
       "n_sessions": 24,
-      "has_usd": true,
+      "graspable_8cm": true
+    },
+    {
+      "obj_id": "C23001",
+      "name": "contactpose_flashlight",
+      "category": "maniptools",
+      "attr": [
+        "handled",
+        "revolute"
+      ],
+      "aabb_cm": [
+        3.36,
+        3.37,
+        13.9
+      ],
+      "min_width_cm": 3.33,
+      "n_sessions": 24,
       "graspable_8cm": true
     },
     {
       "obj_id": "O21001",
-      "aabb_cm": [
-        3.412,
-        3.3822000000000005,
-        21.855200000000004
+      "name": "pittsburgh_screwdriver",
+      "category": "maniptools",
+      "attr": [
+        "handled",
+        "revolute"
       ],
-      "aabb_min_cm": 3.3822000000000005,
-      "min_width_cm": 3.3910425845985026,
+      "aabb_cm": [
+        3.41,
+        3.38,
+        21.86
+      ],
+      "min_width_cm": 3.39,
       "n_sessions": 24,
-      "has_usd": true,
+      "graspable_8cm": true
+    },
+    {
+      "obj_id": "C15001",
+      "name": "contactpose_waterbottle",
+      "category": "container",
+      "attr": [
+        "pourable",
+        "revolute"
+      ],
+      "aabb_cm": [
+        6.02,
+        6.02,
+        13.65
+      ],
+      "min_width_cm": 6.01,
+      "n_sessions": 24,
+      "graspable_8cm": true
+    },
+    {
+      "obj_id": "C28001",
+      "name": "contactpose_lightbulb",
+      "category": "maniptools",
+      "attr": [
+        "handled",
+        "revolute"
+      ],
+      "aabb_cm": [
+        6.17,
+        6.18,
+        11.02
+      ],
+      "min_width_cm": 6.17,
+      "n_sessions": 24,
       "graspable_8cm": true
     },
     {
       "obj_id": "A02031",
-      "aabb_cm": [
-        6.9494,
-        7.147300000000001,
-        22.8981
+      "name": "dispenser31",
+      "category": "container",
+      "attr": [
+        "lotion_pump"
       ],
-      "aabb_min_cm": 6.9494,
-      "min_width_cm": 6.924971866328381,
+      "aabb_cm": [
+        6.95,
+        7.15,
+        22.9
+      ],
+      "min_width_cm": 6.92,
       "n_sessions": 24,
-      "has_usd": true,
       "graspable_8cm": true
     },
     {
       "obj_id": "S20021",
-      "aabb_cm": [
-        0.642,
-        2.1386,
-        22.267400000000002
+      "name": "knife_s021",
+      "category": "maniptools",
+      "attr": [
+        "handled"
       ],
-      "aabb_min_cm": 0.642,
-      "min_width_cm": 0.7394946839535048,
+      "aabb_cm": [
+        0.64,
+        2.14,
+        22.27
+      ],
+      "min_width_cm": 0.74,
       "n_sessions": 16,
-      "has_usd": true,
+      "graspable_8cm": true
+    },
+    {
+      "obj_id": "C20001",
+      "name": "contactpose_knife",
+      "category": "maniptools",
+      "attr": [
+        "handled"
+      ],
+      "aabb_cm": [
+        1.49,
+        3.2,
+        22.19
+      ],
+      "min_width_cm": 1.58,
+      "n_sessions": 16,
       "graspable_8cm": true
     },
     {
       "obj_id": "S20001",
-      "aabb_cm": [
-        1.8572000000000002,
-        3.7998,
-        21.9802
+      "name": "knife_s001",
+      "category": "maniptools",
+      "attr": [
+        "handled"
       ],
-      "aabb_min_cm": 1.8572000000000002,
-      "min_width_cm": 1.889139795890768,
+      "aabb_cm": [
+        1.86,
+        3.8,
+        21.98
+      ],
+      "min_width_cm": 1.89,
       "n_sessions": 16,
-      "has_usd": true,
       "graspable_8cm": true
     },
     {
       "obj_id": "O36002",
-      "aabb_cm": [
-        2.8064999999999998,
-        5.6627,
-        16.3265
+      "name": "stanley_pincer_large",
+      "category": "maniptools",
+      "attr": [
+        "pincer_like"
       ],
-      "aabb_min_cm": 2.8064999999999998,
-      "min_width_cm": 2.8425737925730514,
+      "aabb_cm": [
+        2.81,
+        5.66,
+        16.33
+      ],
+      "min_width_cm": 2.84,
       "n_sessions": 16,
-      "has_usd": true,
       "graspable_8cm": true
     },
     {
       "obj_id": "S16003",
-      "aabb_cm": [
-        2.8048,
-        8.5714,
-        13.5698
+      "name": "bottle_s003",
+      "category": "container",
+      "attr": [
+        "pourable"
       ],
-      "aabb_min_cm": 2.8048,
-      "min_width_cm": 2.484292771598621,
+      "aabb_cm": [
+        2.8,
+        8.57,
+        13.57
+      ],
+      "min_width_cm": 2.48,
       "n_sessions": 8,
-      "has_usd": true,
       "graspable_8cm": true
+    },
+    {
+      "obj_id": "Y10025",
+      "name": "025_mug",
+      "category": "container",
+      "attr": [
+        "pourable",
+        "handled"
+      ],
+      "aabb_cm": [
+        9.26,
+        11.67,
+        8.28
+      ],
+      "min_width_cm": 8.28,
+      "n_sessions": 0,
+      "graspable_8cm": false
     }
   ]
 }

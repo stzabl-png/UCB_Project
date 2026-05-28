@@ -181,10 +181,23 @@ def finger_flexion(joint_3d):
     return float(np.mean(vals))
 
 
-def mano_joints_to_ee(joint_3d):
+def mano_joints_to_ee(joint_3d, pinch_finger_tip_idx=None):
     """joint_3d: (21,3) camera-frame metres → (p_ee(3), quat_wxyz(4), flex(1)) or None.
+
+    Args:
+        joint_3d: (21,3) MANO joints in camera/world frame, metres.
+        pinch_finger_tip_idx: which finger tip joint index to use as the
+            "other" pinch finger (paired with thumb tip). When None, falls
+            back to module-level J_INDEX_TIP (= 8) for DexYCB compatibility.
+            OakInk retarget overrides this to 12 (middle) — empirically 2×
+            better collection rate on palm-grasped containers; see comments
+            in Baseline1/oakink/retarget_oakink.py.
+              8  = index tip   (DexYCB default)
+              12 = middle tip  (OakInk default — palm-wrap grasps map better)
+              16 = ring tip    (most "opposite" but tip-tip > Franka 8cm in 55%)
     `flex` is the finger-curl metadata; the gripper *command* is computed later from proximity."""
-    w = joint_3d[J_WRIST]; t = joint_3d[J_THUMB_TIP]; i = joint_3d[J_INDEX_TIP]
+    finger_idx = pinch_finger_tip_idx if pinch_finger_tip_idx is not None else J_INDEX_TIP
+    w = joint_3d[J_WRIST]; t = joint_3d[J_THUMB_TIP]; i = joint_3d[finger_idx]
     pinch = i - t
     pinch_d = float(np.linalg.norm(pinch))
     if pinch_d < 1e-4 or pinch_d > MAX_PINCH_M:

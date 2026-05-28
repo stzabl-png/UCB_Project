@@ -65,6 +65,10 @@ parser.add_argument("--no-yaw-aug", dest="yaw_aug", action="store_false",
                     help="disable yaw augmentation (each source ep → only 1 trajectory)")
 parser.add_argument("--yaw-aug-seed", type=int, default=0,
                     help="seed for selecting random yaw per ep (reproducible).")
+parser.add_argument("--redo", action="store_true",
+                    help="re-run yaw attempts whose output hdf5 already exists in --out-dir. "
+                         "Default OFF — per-yaw resume skip: if <name>_yawNNN.hdf5 already exists, "
+                         "that yaw is skipped (other yaws of the same source ep still attempted).")
 args, _ = parser.parse_known_args()
 
 simulation_app = SimulationApp({"headless": args.headless})
@@ -349,6 +353,113 @@ def solve_plan_sequence(scene, start_qpos7, grasp_pos_w, grasp_quat_w_franka,
         return _pkl.load(f)
 
 
+def solve_plan_direct_fallback(scene, start_qpos7, grasp_pos_w, grasp_quat_w_franka,
+                                obj_pos_w, obj_quat):
+    """Fallback plan: HOME → grasp directly (skip pre-grasp), then lift.
+    Both phases use the NO-OBJECT-MESH world (only table + ground + self-collision),
+    because cuRobo's conservative finger collision spheres (R≈5.2 cm) + 1 cm
+    activation distance reject most grasp poses on real objects when obj mesh
+    is included; PhysX runtime collision (with full obj convexHull collider)
+    remains the final arbiter — runs that actually pass through the obj will
+    knock it over and fail the dz>3 cm success criterion, naturally filtering
+    out invalid plans.
+
+    Returns the same dict shape as solve_plan_sequence, but with phase "final"
+    set to an empty no-op trajectory so the execute loop can handle it uniformly.
+    """
+    import pickle as _pkl
+    from curobo_world import object_pose_robot_frame
+
+    T = _T_robot_world()
+    grasp_pos_w  = np.asarray(grasp_pos_w, dtype=np.float64)
+    grasp_quat_w = np.asarray(grasp_quat_w_franka, dtype=np.float64)
+    lift_pos_w   = grasp_pos_w.copy()
+    lift_pos_w[2] += LIFT_HEIGHT
+
+    grasp_in_r = object_pose_robot_frame(grasp_pos_w, grasp_quat_w, T)
+    lift_in_r  = object_pose_robot_frame(lift_pos_w,  grasp_quat_w, T)
+
+    # NO obj mesh in either phase — table + ground + self collision only.
+    world_no_mesh = _build_plan_world_dict(scene, obj_pos_w, obj_quat, include_mesh=False)
+
+    inp = dict(
+        start_qpos=np.asarray(start_qpos7, dtype=np.float64),
+        pos_tol=PLAN_POS_TOL, ori_tol=PLAN_ORI_TOL, warmup_iters=2,
+        phases=[
+            # phase "pre-grasp" but actually targeting grasp_pos directly
+            # (named so the execute loop can drive it via a_q without changes)
+            dict(name="pre-grasp",
+                 target_pos_r=np.asarray(grasp_in_r[:3], dtype=np.float32),
+                 target_quat_r=np.asarray(grasp_in_r[3:7], dtype=np.float32),
+                 world_dict=world_no_mesh,
+                 max_attempts=10),
+            dict(name="lift",
+                 target_pos_r=np.asarray(lift_in_r[:3], dtype=np.float32),
+                 target_quat_r=np.asarray(lift_in_r[3:7], dtype=np.float32),
+                 world_dict=world_no_mesh,
+                 max_attempts=10),
+        ],
+    )
+
+    tag = f"/tmp/b3fb_{os.getpid()}"
+    fin, fout = tag + "_in.pkl", tag + "_out.pkl"
+    with open(fin, "wb") as f:
+        _pkl.dump(inp, f)
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+    r = subprocess.run([sys.executable, CPLAN_SCRIPT, "--sequence", fin, fout],
+                       capture_output=True, text=True, env=env)
+    if r.returncode != 0 or not os.path.exists(fout):
+        cprint(f"  ❌ curobo_plan fallback failed (rc={r.returncode}): {r.stderr[-400:]}", "red")
+        return None
+    with open(fout, "rb") as f:
+        plan_fb = _pkl.load(f)
+
+    # Repackage as 3-phase to match solve_plan_sequence's return shape:
+    # inject an empty 'final' phase so the execute loop's `for k, qpos7 in enumerate(g_q)`
+    # is a no-op (Franka already at grasp_pos after the direct phase).
+    phases = list(plan_fb.get("phases", []))
+    if len(phases) == 2:
+        phases.insert(1, dict(name="final", success=True,
+                              qpos_traj=np.empty((0, 7), dtype=np.float32),
+                              plan_seconds=0.0, status="passthrough_fallback"))
+    plan_fb["phases"] = phases
+    plan_fb["fallback_used"] = True
+    return plan_fb
+
+
+def solve_plan_with_fallback(scene, start_qpos7, grasp_pos_w, grasp_quat_w_franka,
+                              obj_pos_w, obj_quat):
+    """Try titan-style 3-phase plan first; on pre-grasp failure, retry as a
+    2-phase direct plan WITHOUT obj mesh. Returns (plan_dict, info_dict).
+
+    info_dict keys:
+        fallback_used:    bool
+        fallback_success: bool (only when fallback was tried)
+        fail_phase:       str or None (which phase originally failed)
+    """
+    plan = solve_plan_sequence(scene, start_qpos7, grasp_pos_w, grasp_quat_w_franka,
+                               obj_pos_w, obj_quat)
+    if plan is None:
+        # subprocess crash — don't try fallback (likely PhysX pollution)
+        return None, {"fallback_used": False, "fail_phase": "subprocess"}
+    if plan.get("success", False):
+        return plan, {"fallback_used": False, "fail_phase": None}
+
+    failed_phases = [p["name"] for p in plan.get("phases", []) if not p.get("success", False)]
+    first_fail = failed_phases[0] if failed_phases else "?"
+    if first_fail != "pre-grasp":
+        # final or lift failed — fallback won't help (titan's design too)
+        return plan, {"fallback_used": False, "fail_phase": first_fail}
+
+    cprint("  ↩ pre-grasp failed → trying direct fallback (no obj mesh)...", "yellow")
+    plan_fb = solve_plan_direct_fallback(scene, start_qpos7, grasp_pos_w,
+                                          grasp_quat_w_franka, obj_pos_w, obj_quat)
+    if plan_fb is None or not plan_fb.get("success", False):
+        return plan, {"fallback_used": True, "fallback_success": False, "fail_phase": "pre-grasp"}
+    cprint("  ✅ fallback (no obj mesh) plan succeeded", "green")
+    return plan_fb, {"fallback_used": True, "fallback_success": True, "fail_phase": "pre-grasp"}
+
+
 # ============================================================
 # Synthesize the approach / lift  (clean straight-line EE waypoints)
 # ============================================================
@@ -394,7 +505,10 @@ def setup_world_b3():
     physics.set_solver_type("TGS")
 
     if args.video:                                          # close grasp-view camera
-        set_camera_view(eye=[1.05, -0.25, 1.25], target=[0.02, 0.52, 0.90],
+        # Side-view from Franka's LEFT (opposite to arm reach direction) so the
+        # gripper/object aren't occluded by the panda arm. Looks across the
+        # table at obj from x≈-0.9, slightly above obj height.
+        set_camera_view(eye=[-0.85, 0.55, 1.05], target=[0.02, 0.52, 0.92],
                         camera_prim_path="/OmniverseKit_Persp")
     else:
         set_camera_view(eye=[0.0, 4.5, 3.5], target=[0.0, 0.0, 0.0],
@@ -442,6 +556,13 @@ def setup_world_b3():
 
     cprint("✅ World + Franka ready", "green")
     return {"world": world, "franka": franka, "obj": None}
+
+
+def _usd_path_for_ep(src_attrs):
+    """Thin shim → grasp_physics.usd_path_for_ep (single source of truth shared
+    with sim/eval_dp3_baseline3.py). Returns just the path (drops obj_label)."""
+    usd, _ = grasp_physics.usd_path_for_ep(src_attrs, proj_root=PROJ_ROOT)
+    return usd
 
 
 def load_object(world, usd_path, mass):
@@ -561,12 +682,16 @@ def _execute_grasp_curobo(scene, grasp_pos_w, grasp_quat_w, obj_pos_w, obj_quat)
            f"EE@HOME pos={np.round(ee_actual_p,3).tolist()}  EE↔obj={ee_to_obj_d*100:.1f}cm  "
            f"grasp_target={np.round(grasp_pos_w,3).tolist()}", "blue")
 
-    # v4 + titan-aligned: 3 separate plan_pose calls (pre-grasp WITH mesh,
-    # final + lift WITHOUT mesh) in a single subprocess (one warmup).
-    plan = solve_plan_sequence(scene, start_qpos7, grasp_pos_w, grasp_quat_w,
-                               obj_pos_w, obj_quat)
+    # v4 + titan-aligned: 3-phase plan with NEW fallback on pre-grasp failure.
+    # solve_plan_with_fallback returns (plan_dict, info_dict). On pre-grasp
+    # failure it retries as a 2-phase direct plan WITHOUT obj mesh (see
+    # solve_plan_direct_fallback for rationale).
+    plan, fb_info = solve_plan_with_fallback(scene, start_qpos7, grasp_pos_w,
+                                              grasp_quat_w, obj_pos_w, obj_quat)
+    # Stash fallback info on scene so the main loop can read it for stats.
+    scene["_last_fallback_info"] = fb_info
     if plan is None:
-        return None  # subprocess failure — caller falls back
+        return None  # subprocess failure — caller falls back to legacy
     phases = plan.get("phases", [])
     p_by_name = {p["name"]: p for p in phases}
     pre_p   = p_by_name.get("pre-grasp", {})
@@ -864,8 +989,8 @@ def inspect_scene(ep_path):
         obj_origin_G = np.array(h.attrs["obj_origin_G"], dtype=np.float64)
         obj_quat_G = np.array(h.attrs["obj_quat_G_wxyz"], dtype=np.float64)
         action = h["action"][:]
+        usd = _usd_path_for_ep(h.attrs)   # dataset-aware USD path (dexycb / oakink)
     scene = setup_world_b3()
-    usd = os.path.join(PROJ_ROOT, "output/obj_usd_cad/ycb", f"ycb_dex_{cid:02d}.usd")
     obj = load_object(scene["world"], usd, grasp_physics.object_mass_kg(cid))
     sim_origin_W = np.array([OBJECT_XY[0] - obj_origin_G[0],
                              OBJECT_XY[1] - obj_origin_G[1], TABLE_TOP_Z])
@@ -939,6 +1064,7 @@ def main():
 
     cur_class = None
     stats = {}                                              # ycb_class_id -> [n_success, n_attempt]
+    fallback_stats = {}                                     # ycb_class_id -> {fb_used, fb_plan_ok, fb_saved}
 
     for i, ep in enumerate(eps):
         name = os.path.basename(ep)
@@ -955,13 +1081,18 @@ def main():
             src_attrs = dict(h.attrs)
 
         if cid != cur_class:
-            usd = os.path.join(PROJ_ROOT, "output/obj_usd_cad/ycb", f"ycb_dex_{cid:02d}.usd")
+            # Dataset-aware USD path: dexycb → output/obj_usd_cad/ycb/ycb_dex_NN.usd;
+            # oakink → output/obj_usd/oakink/{obj_id}.usd (e.g. A01001.usd).
+            usd = _usd_path_for_ep(src_attrs)
+            obj_label = str(src_attrs.get("obj_id", f"ycb_dex_{cid:02d}"))
             # v4 experiment: match partner main's hardcoded mass=0.05kg.
             # Hypothesis: real per-class mass (mustard 0.6kg, sugar 0.5kg) causes
             # PhysX collision force ~10x larger → solver overflow → NaN poison.
             mass = 0.05
+            # object_mass_kg only knows DexYCB cids 1-21; for OakInk it returns the default
             real_mass = grasp_physics.object_mass_kg(cid)
-            cprint(f"\n=== object ycb_dex_{cid:02d}  mass={mass}kg (real {real_mass}kg, using main's 0.05) ===", "cyan")
+            cprint(f"\n=== object {obj_label} (cid={cid})  mass={mass}kg "
+                   f"(real {real_mass}kg, using 0.05) ===", "cyan")
             if not os.path.exists(usd):
                 cprint(f"  ⚠️  USD missing: {usd} — skipping this object", "red")
                 cur_class = cid
@@ -998,6 +1129,16 @@ def main():
 
         sanity_failed_this_ep = False
         for yaw_deg, suffix in yaw_attempts:
+            # ── resume skip: per-yaw output already exists ──
+            out_name = name.replace(".hdf5", f"{suffix}.hdf5")
+            out_path = os.path.join(args.out_dir, out_name)
+            if (not args.redo) and os.path.exists(out_path):
+                lbl = f"yaw={yaw_deg}" if yaw_deg != 0 else "orig"
+                cprint(f"  [resume-skip] {lbl} already exists → {out_name}", "blue")
+                st = stats.setdefault(cid, [0, 0])
+                st[0] += 1; st[1] += 1
+                continue
+
             # ── compute target obj quat: rotate AROUND WORLD Z axis by yaw_deg ──
             # R_world_yaw composed on the LEFT of original obj_quat = rotation
             # in world frame about world-z, through obj origin.
@@ -1075,14 +1216,26 @@ def main():
             st = stats.setdefault(cid, [0, 0])
             st[1] += 1
             success = bool(ok and rec_info is not None and len(rec_info["waypoints"]) >= 3)
+            # Fallback bookkeeping — read what _execute_grasp_curobo stashed.
+            fb_info = scene.pop("_last_fallback_info", {})
+            fb_used = bool(fb_info.get("fallback_used", False))
+            fb_succ = bool(fb_info.get("fallback_success", False))
+            fb_stat = fallback_stats.setdefault(cid, {"fb_used": 0, "fb_plan_ok": 0, "fb_saved": 0})
+            if fb_used:
+                fb_stat["fb_used"] += 1
+                if fb_succ:
+                    fb_stat["fb_plan_ok"] += 1
             if success:
                 out_name = name.replace(".hdf5", f"{suffix}.hdf5")
                 out = os.path.join(args.out_dir, out_name)
                 T = save_episode_b3(out, rec_info["waypoints"], sim_origin_W, src_attrs, pc0,
                                     grasp_onset_idx=rec_info["grasp_onset_idx"])
                 st[0] += 1
+                if fb_used:
+                    fb_stat["fb_saved"] += 1
+                fb_tag = " [via fallback]" if fb_used else ""
                 cprint(f"  ✅ saved baseline_3 episode ({T} steps, grasp_onset="
-                       f"{rec_info['grasp_onset_idx']}) → {out}", "green")
+                       f"{rec_info['grasp_onset_idx']}){fb_tag} → {out}", "green")
             else:
                 cprint(f"  ❌ grasp failed ({label}) — not saved", "red")
             video_end(scene["world"], name.replace(".hdf5", f"{suffix}.mp4"),
@@ -1099,10 +1252,24 @@ def main():
     for cid in sorted(stats):
         s, a = stats[cid]
         tot_s += s; tot_a += a
-        cprint(f"  ycb_dex_{cid:02d}:  {s}/{a} grasped  ({100*s/max(a,1):.0f}%)", "cyan")
+        # cid 1-21 = dexycb, cid 1000+ = oakink (see Baseline1/oakink/class_id_map.json)
+        cprint(f"  cid {cid}:  {s}/{a} grasped  ({100*s/max(a,1):.0f}%)", "cyan")
     cprint("-" * 64, "cyan")
     cprint(f"  TOTAL: {tot_s}/{tot_a} grasped  ({100*tot_s/max(tot_a,1):.1f}%)  "
            f"→ {tot_s} episodes in {args.out_dir}", "green")
+    # Fallback summary — only print if fallback was actually triggered at least once.
+    fb_total_used = sum(d["fb_used"] for d in fallback_stats.values())
+    if fb_total_used > 0:
+        fb_total_planok = sum(d["fb_plan_ok"] for d in fallback_stats.values())
+        fb_total_saved = sum(d["fb_saved"] for d in fallback_stats.values())
+        cprint("-" * 64, "cyan")
+        cprint(f"  FALLBACK (direct, no obj mesh): used={fb_total_used}  "
+               f"plan_ok={fb_total_planok}  saved={fb_total_saved}", "magenta")
+        for cid in sorted(fallback_stats):
+            d = fallback_stats[cid]
+            if d["fb_used"]:
+                cprint(f"    cid {cid}:  used={d['fb_used']}  plan_ok={d['fb_plan_ok']}  "
+                       f"saved={d['fb_saved']}", "magenta")
     cprint("=" * 64, "cyan")
     simulation_app.close()
 

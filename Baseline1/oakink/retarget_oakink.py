@@ -64,6 +64,36 @@ from Baseline1.oakink.oakink_paths import (  # noqa: E402
 from Baseline1.oakink.oakink_meshes import get_oakink_object_points  # noqa: E402
 
 
+# ── pinch finger selection (env-var driven for ablation) ────────────────────
+# OAKINK_PINCH_FINGER = middle (default) | index | ring
+# - middle (= MANO joint 12) — DEFAULT. Smoke test (2026-05-26 A02028 + A01001):
+#     thumb+middle 12/28 = 42% vs thumb+index 6/28 = 21% (2× better).
+#     A02028 (short container) jumped from 0% to 37% — middle finger naturally
+#     wraps deeper around obj in palm-grasp, midpoint better matches Franka pinch.
+# - index  (= MANO joint 8)  — original choice. Falls behind on side-grasp obj.
+# - ring   (= MANO joint 16) — most "opposite" to thumb but tip-tip 8.3cm
+#     exceeds Franka span 55% of the time → many retargeted poses unreachable
+_PINCH_FINGER_MAP = {"index": 8, "middle": 12, "ring": 16}
+PINCH_FINGER_IDX = _PINCH_FINGER_MAP.get(
+    os.environ.get("OAKINK_PINCH_FINGER", "middle"), 12)
+
+
+# ── onset mode (env-var driven for ablation) ─────────────────────────────────
+# Default = "OLD" (d_min + 4cm, first close-approach frame).
+# Smoke test on A02028 + A01001 (2026-05-26): OLD beat lift-1 / HYBRID /
+# d_min+2cm both per-obj and aggregate (21% vs 4-14%) — empirically the most
+# Franka-friendly because the "conservative" pose (hand 16cm from obj) gives
+# cuRobo more workspace flexibility. Alternative modes kept as escape hatch
+# for future ablation but DO NOT change default without re-validation.
+#
+# OAKINK_ONSET_MODE values:
+#   OLD         (default) = argmax(d ≤ d_min+4cm) — best empirically
+#   d_min+2cm   = first frame d ≤ d_min+2cm (tighter; ~5cm closer TCP)
+#   lift-1      = lift_frames[0] - 1 (TCP closer but obj already rotated ~10°)
+#   HYBRID      = last frame hand-close AND obj-still (mathematically clean)
+ONSET_MODE = os.environ.get("OAKINK_ONSET_MODE", "OLD")
+
+
 # ── manifest ─────────────────────────────────────────────────────────────────
 def load_class_id_map() -> dict:
     with open(CLASS_ID_MAP) as f:
@@ -203,7 +233,7 @@ def build_episode_v4(seq_id, ts, sbj, cam, frames, n_points: int,
         # hand_j: camera → world. mano_joints_to_ee is frame-agnostic (just geometry).
         T_c2w = np.linalg.inv(T_c_w)
         j_world = (T_c2w @ np.concatenate([j_cam, np.ones((21, 1))], axis=1).T).T[:, :3]
-        ee_out = mano_joints_to_ee(j_world)
+        ee_out = mano_joints_to_ee(j_world, pinch_finger_tip_idx=PINCH_FINGER_IDX)
         if ee_out is None:
             n_invalid += 1; continue
         p_ee_world, q_wxyz_world, flex = ee_out
@@ -236,45 +266,113 @@ def build_episode_v4(seq_id, ts, sbj, cam, frames, n_points: int,
         if np.dot(rec[k]["q"], rec[k - 1]["q"]) < 0.0:
             rec[k]["q"] = -rec[k]["q"]
 
-    # gripper: 0 until hand reaches object (uses world-frame distances)
+    # ── grasp_onset — parameterised via OAKINK_ONSET_MODE env var ──
+    # Computed metrics across 629 OakInk subj=0 sessions (Δrot = obj rotation
+    # between frame 0 and onset; lower = T_obj_grasp more accurate):
+    #   OLD     Δrot median 0.2°  hand_dist 159mm  (obj still + TCP far)
+    #   lift-1  Δrot median 10.2° hand_dist 130mm  (obj rotated + TCP near)
+    #   HYBRID  Δrot median 5.8°  hand_dist 131mm  (best tradeoff)
     d = np.array([float(np.linalg.norm(r["p"] - r["oc"])) for r in rec])
     d_min = float(d.min())
-    onset = int(np.argmax(d <= d_min + GRASP_MARGIN))
-    gripper = np.zeros(len(rec), dtype=np.float64); gripper[onset:] = 1.0
+    oc_z = np.array([float(r["oc"][2]) for r in rec])
+    oc_z_baseline = float(oc_z[:min(5, len(oc_z))].mean())
+    lift_frames = np.where(oc_z > oc_z_baseline + 0.02)[0]
 
-    # ── G-frame conversion: origin = obj_origin_world (obj pose at frame 0) ──
-    # NOTE: we do NOT subtract PC centroid (the v2 oakink retarget did, but that
-    # discarded the world-frame anchor). Instead we use the OakInk world frame
-    # directly and define obj_origin_G := T_w_o.translation@frame0. This matches
-    # what DexYCB v4 collector expects.
-    obj_origin_G = obj_anno_frame0[:3, 3].astype(np.float64)
+    if ONSET_MODE == "OLD":
+        # first frame within d_min + GRASP_MARGIN (= 4cm)
+        onset = int(np.argmax(d <= d_min + GRASP_MARGIN))
+        onset_reason = f"OLD: d<=d_min+4cm at frame {onset}"
+    elif ONSET_MODE == "d_min+2cm":
+        # tighter version of OLD — first frame within 2cm of d_min
+        # (rationale: 5cm closer TCP than OLD, only ~15° p95 Δrot vs 1.4° OLD)
+        cand = np.where(d <= d_min + 0.02)[0]
+        if len(cand) > 0:
+            onset = int(cand[0])
+            onset_reason = f"d_min+2cm: first frame d<=d_min+2cm at {onset}"
+        else:
+            onset = int(np.argmin(d))
+            onset_reason = f"d_min+2cm fallback to argmin(d) at {onset}"
+    elif ONSET_MODE == "lift-1" and len(lift_frames) > 0:
+        # frame BEFORE +2cm obj lift
+        onset = max(0, int(lift_frames[0]) - 1)
+        onset_reason = f"lift-1: lift at {int(lift_frames[0])}, using frame {onset}"
+    elif ONSET_MODE == "HYBRID":
+        # last frame where hand close AND obj still
+        hand_close = d <= d_min + 0.04
+        obj_still  = oc_z <= oc_z_baseline + 0.005
+        cand = np.where(hand_close & obj_still)[0]
+        if len(cand) > 0:
+            onset = int(cand[-1])
+            onset_reason = f"HYBRID: last frame hand_close+obj_still = {onset}"
+        else:
+            onset = int(np.argmax(d <= d_min + GRASP_MARGIN))
+            onset_reason = f"HYBRID fallback to OLD: frame {onset}"
+    else:
+        # Fallback path (also used when ONSET_MODE='lift-1' but no obj lift)
+        flexes = np.array([float(r["flex"]) for r in rec])
+        flex_base = float(flexes[:min(5, len(flexes))].mean())
+        cand = np.where(flexes > flex_base + 0.10)[0]
+        if len(cand) > 0:
+            onset = int(cand[0]); onset_reason = f"finger flex > {flex_base+0.10:.2f} at frame {onset}"
+        else:
+            onset = int(np.argmin(d)); onset_reason = f"closest hand-obj approach at frame {onset}"
+    onset = max(onset, MIN_FRAMES)
+    onset = min(onset, len(rec) - 1)
+
+    # Note: subj=1 handover ghost annotations (hand_dist > 30cm at onset) are
+    # NOT filtered here — sim collector naturally rejects them downstream (all
+    # 207 saved sim ep from full89 came from subj=0). Re-add filter if needed:
+    #   d_at_onset = np.linalg.norm(rec[onset]["p"] - rec[onset]["oc"])
+    #   if d_at_onset > 0.30: return None, "subj=1 non-grasp"
+
+    # ── G-frame conversion (matches DexYCB build_gt_replay convention) ──
+    # G-frame origin sits on the TABLE directly under the object at frame 0:
+    #   origin_world = (obj_anno_xy@t0, 0)
+    # obj_origin_G  = obj_anno_t0 - origin_world  = (0, 0, obj_z_above_table)
+    # state[t]      = EE_world - origin_world
+    # pc[t]         = pc_world[t] - origin_world
+    obj_anno_w_t0 = obj_anno_frame0[:3, 3].astype(np.float64)
+    origin_world = np.array([obj_anno_w_t0[0], obj_anno_w_t0[1], 0.0], dtype=np.float64)
+    obj_origin_G = (obj_anno_w_t0 - origin_world).astype(np.float64)   # = (0, 0, obj_z)
     R_w_o_frame0 = obj_anno_frame0[:3, :3]
     obj_quat_xyzw = Rotation.from_matrix(R_w_o_frame0).as_quat()
     obj_quat_G_wxyz = np.array([obj_quat_xyzw[3], *obj_quat_xyzw[:3]], dtype=np.float64)
 
-    # state[t] in G-frame: pos relative to obj_origin_G, quat in world (retarget conv)
+    # Truncate to the approach segment: frames 0..onset INCLUSIVE (matches DexYCB
+    # build_gt_replay.py L457: `rec = rec[:onset + 1]`). state[-1] is then the
+    # grasp moment (obj just started rising → fingers wrapped around obj, ready
+    # to lift). sim collector then closes gripper + executes its own lift.
+    rec_kept = rec[:onset + 1]
+    gripper_kept = np.zeros(len(rec_kept), dtype=np.float64)
+    gripper_kept[-1] = 1.0   # mark final frame = "arrived, would close" (DexYCB convention)
+
     pcs, states = [], []
-    for k, r in enumerate(rec):
-        pc_centered = r["pc"] - obj_origin_G.astype(np.float32)  # object-centric PC
-        p_G = (r["p"] - obj_origin_G).astype(np.float32)
-        states.append(np.concatenate([p_G, r["q"], [gripper[k]]]).astype(np.float32))
-        pcs.append(pc_centered)
+    for k, r in enumerate(rec_kept):
+        pc_g = (r["pc"] - origin_world.astype(np.float32))
+        p_g = (r["p"] - origin_world).astype(np.float32)
+        states.append(np.concatenate([p_g, r["q"], [gripper_kept[k]]]).astype(np.float32))
+        pcs.append(pc_g)
     pcs = np.stack(pcs)
     states = np.stack(states)
     if len(states) < 2:
         return None, "too short after processing"
 
-    # Table z estimate: average object z over the early frames (before lift starts).
-    # In OakInk world frame, table top ≈ 0 and object base z ≈ +obj_thickness/2.
-    # We just report obj base z = min PC.z to give the collector a hint.
-    table_z_G = float(pcs[0][:, 2].min())   # object-centric PC, min z ≈ table relative to obj origin
+    # Table z in G-frame is 0 by construction (origin sits on the table). We
+    # still report PC min-z as a sanity-check value (object base should be ~0).
+    table_z_G = float(pcs[0][:, 2].min())
+
+    # Match DexYCB build_gt_replay convention: grasp_onset == n_steps (saved trajectory
+    # ends AT the grasp moment; sim replay closes/lifts past the end).
+    n_steps = int(states[:-1].shape[0])
+    # diagnostic: how far hand was from obj at the GRASP frame (state[-1] in saved data)
+    d_at_grasp = float(np.linalg.norm(rec_kept[-1]["p"] - rec_kept[-1]["oc"]))
 
     ep = dict(
         point_cloud=pcs[:-1],                          # (T-1, N, 3)
         state=states[:-1],
         action=states[1:],
         n_valid=len(rec), n_invalid=n_invalid,
-        grasp_onset=onset, min_hand_obj_dist_m=d_min,
+        grasp_onset=n_steps, min_hand_obj_dist_m=d_at_grasp,
         # v4-format attrs (these go into hdf5.attrs)
         obj_id=obj_id,
         ycb_class_id=int(class_id),
@@ -284,8 +382,8 @@ def build_episode_v4(seq_id, ts, sbj, cam, frames, n_points: int,
         table_z_G=table_z_G,
         mass_kg=float(mass_kg),
     )
-    return ep, (f"{len(rec)} valid frames · grasp_onset @ {onset} · "
-                f"min hand-obj dist {d_min*1000:.0f}mm")
+    return ep, (f"{len(rec)} valid frames → kept {len(rec_kept)} ({onset_reason}) · "
+                f"hand-obj dist@grasp {d_at_grasp*1000:.0f}mm")
 
 
 # ── save ─────────────────────────────────────────────────────────────────────

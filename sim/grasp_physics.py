@@ -68,6 +68,41 @@ def object_mass_kg(ycb_class_id, default=GRASP_OBJECT_MASS_KG):
         return default
 
 
+# ── Single source of truth: ep hdf5 attrs → obj USD path  ────────────────────
+# Both run_grasp_sim_baseline3_v4.py (collector) and eval_dp3_baseline3.py
+# (closed-loop eval) need to resolve "which obj USD goes with this episode".
+# Keep the mapping HERE so collector + eval can never drift.
+import os as _os
+
+# Repo layout assumed at <PROJ_ROOT>/output/obj_usd_cad/{ycb,oakink}/...
+_PROJ_ROOT = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+
+
+def usd_path_for_ep(src_attrs, proj_root=_PROJ_ROOT):
+    """Pick the obj USD path based on the source ep's `dataset` + `obj_id` / cid.
+
+    - dataset='dexycb' (default): output/obj_usd_cad/ycb/ycb_dex_{cid:02d}.usd
+    - dataset='oakink':           output/obj_usd_cad/oakink/{obj_id}.usd
+
+    `src_attrs` is the .attrs dict of an open h5py.File. Falls back to dexycb
+    semantics when `dataset` attr is missing (legacy hdf5).
+
+    Returns (usd_path, obj_label) where obj_label is a short human-readable id
+    for logs (e.g. "ycb_dex_03" or "oakink/A01001").
+    """
+    ds = str(src_attrs.get("dataset", "dexycb"))
+    cid = int(src_attrs.get("ycb_class_id", 0))
+    obj_id = str(src_attrs.get("obj_id", ""))
+    if ds == "oakink":
+        # CAD USDs (Z-up, metric, matches retarget's obj_origin_G). The legacy
+        # output/obj_usd/oakink/ contains SAM3D-derived USDs (unit-cube
+        # normalized, ~10× wrong scale) — do NOT use those for sim.
+        return (_os.path.join(proj_root, "output/obj_usd_cad/oakink", f"{obj_id}.usd"),
+                f"oakink/{obj_id}")
+    return (_os.path.join(proj_root, "output/obj_usd_cad/ycb", f"ycb_dex_{cid:02d}.usd"),
+            f"ycb_dex_{cid:02d}")
+
+
 def _make_physics_material(stage, path, mu_s, mu_d, restitution=RESTITUTION):
     from pxr import UsdPhysics, UsdShade
     UsdShade.Material.Define(stage, path)

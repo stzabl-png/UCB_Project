@@ -1,6 +1,6 @@
 {
   "_schema": "OakInk obj_id \u2194 integer class_id manifest. Integer IDs start at 1001 to not collide with DexYCB's 1-21. `use=true` flags which objects to include in the next collection batch. Add objects by appending to the dict; class_id MUST be unique and stable across all future use (do not reassign).",
-  "_version": "v2",
+  "_version": "v4",
   "_created": "2026-05-25",
   "_class_id_range_oakink": "1001-1999",
   "_class_id_range_dexycb": "1-21",
@@ -8,16 +8,14 @@
   "_graspability_threshold_cm": 8.0,
   "_graspability_meaning": "min support-width across all directions \u2264 8.0cm = Franka can fit object in some orientation. Objects with min_width > 8.0cm are filtered out (not graspable).",
   "_notes": [
-    "v2: expanded to ALL 49 graspable @ 8cm objects (Phase 1 \u2192 full graspable scan).",
-    "Original 15 (class_id 1001-1015) kept; 34 new objects appended (1016-1049).",
-    "Selection: graspable (support-function min_width <= 8cm) + has USD + n_sessions > 0.",
-    "Categories still placeholder ('unknown') \u2014 OakInk metaV2/yodaobject_cat.json not downloaded.",
-    "When adding more objects: increase class_id strictly; never reassign existing."
+    "v4: 69 (v3) + 20 partner-validated handle-graspable = 89 total obj.",
+    "Original 49 (1001-1049) + new 20 C-prefix (1050-1069) + partner-only 20 (1070-1089).",
+    "Partner-only set comprises objects where geometric min-width > 8cm but the object has a handle/spout/thin feature that's actually Franka-graspable \u2014 geometric filter alone misses these."
   ],
   "objects": {
     "O01000": {
       "class_id": 1001,
-      "category": "unknown",
+      "category": "container",
       "session_count": 60,
       "aabb_cm": [
         6.4,
@@ -27,11 +25,12 @@
       "min_width_cm": 6.36,
       "mass_kg": 0.05,
       "use": true,
-      "notes": "tall thin, most-sessions graspable"
+      "notes": "tall thin, most-sessions graspable",
+      "name": "omo_cleaner"
     },
     "S10021": {
       "class_id": 1002,
-      "category": "unknown",
+      "category": "container",
       "session_count": 60,
       "aabb_cm": [
         8.1,
@@ -41,11 +40,12 @@
       "min_width_cm": 7.87,
       "mass_kg": 0.05,
       "use": true,
-      "notes": "borderline (7.87cm); 60 sessions makes it worth including"
+      "notes": "borderline (7.87cm); 60 sessions makes it worth including",
+      "name": "mug_s021"
     },
     "A01001": {
       "class_id": 1003,
-      "category": "unknown",
+      "category": "container",
       "session_count": 56,
       "aabb_cm": [
         6.5,
@@ -55,11 +55,12 @@
       "min_width_cm": 6.24,
       "mass_kg": 0.05,
       "use": true,
-      "notes": "world-frame math verified in OakInk Phase 0"
+      "notes": "world-frame math verified in OakInk Phase 0",
+      "name": "dispenser1"
     },
     "S10011": {
       "class_id": 1004,
-      "category": "unknown",
+      "category": "container",
       "session_count": 56,
       "aabb_cm": [
         10.4,
@@ -69,11 +70,12 @@
       "min_width_cm": 7.38,
       "mass_kg": 0.05,
       "use": true,
-      "notes": "flat shape, narrow Z axis"
+      "notes": "flat shape, narrow Z axis",
+      "name": "mug_s011"
     },
     "S10001": {
       "class_id": 1005,
-      "category": "unknown",
+      "category": "container",
       "session_count": 52,
       "aabb_cm": [
         10.0,
@@ -82,12 +84,14 @@
       ],
       "min_width_cm": 6.61,
       "mass_kg": 0.05,
-      "use": true,
-      "notes": "flat, narrow Z"
+      "use": false,
+      "notes": "flat, narrow Z",
+      "name": "mug_s001",
+      "disabled_reason": "0-ep in v4 oakink89 sim collection (2026-05-26) \u2014 Franka+cuRobo can't grasp"
     },
     "S10008": {
       "class_id": 1006,
-      "category": "unknown",
+      "category": "container",
       "session_count": 52,
       "aabb_cm": [
         7.3,
@@ -97,11 +101,12 @@
       "min_width_cm": 7.23,
       "mass_kg": 0.05,
       "use": true,
-      "notes": ""
+      "notes": "",
+      "name": "mug_s008"
     },
     "A01008": {
       "class_id": 1007,
-      "category": "unknown",
+      "category": "container",
       "session_count": 52,
       "aabb_cm": [
         7.4,
@@ -111,11 +116,12 @@
       "min_width_cm": 7.38,
       "mass_kg": 0.05,
       "use": true,
-      "notes": ""
+      "notes": "",
+      "name": "dispenser8"
     },
     "A01002": {
       "class_id": 1008,
-      "category": "unknown",
+      "category": "container",
       "session_count": 48,
       "aabb_cm": [
         6.7,
@@ -125,11 +131,12 @@
       "min_width_cm": 6.6,
       "mass_kg": 0.05,
       "use": true,
-      "notes": ""
+      "notes": "",
+      "name": "dispenser2"
     },
     "A01010": {
       "class_id": 1009,
-      "category": "unknown",
+      "category": "container",
       "session_count": 48,
       "aabb_cm": [
         6.9,
@@ -139,11 +146,12 @@
       "min_width_cm": 6.87,
       "mass_kg": 0.05,
       "use": true,
-      "notes": ""
+      "notes": "",
+      "name": "dispenser10"
     },
     "S10002": {
       "class_id": 1010,
-      "category": "unknown",
+      "category": "container",
       "session_count": 48,
       "aabb_cm": [
         8.4,
@@ -152,12 +160,14 @@
       ],
       "min_width_cm": 7.68,
       "mass_kg": 0.05,
-      "use": true,
-      "notes": "borderline (7.68cm); 48 sessions"
+      "use": false,
+      "notes": "borderline (7.68cm); 48 sessions",
+      "name": "mug_s002",
+      "disabled_reason": "0-ep in v4 oakink89 sim collection (2026-05-26) \u2014 Franka+cuRobo can't grasp"
     },
     "A01005": {
       "class_id": 1011,
-      "category": "unknown",
+      "category": "container",
       "session_count": 44,
       "aabb_cm": [
         4.8,
@@ -167,11 +177,12 @@
       "min_width_cm": 4.82,
       "mass_kg": 0.05,
       "use": true,
-      "notes": "thin (4.8cm), easy"
+      "notes": "thin (4.8cm), easy",
+      "name": "dispenser5"
     },
     "A01009": {
       "class_id": 1012,
-      "category": "unknown",
+      "category": "container",
       "session_count": 44,
       "aabb_cm": [
         5.9,
@@ -181,11 +192,12 @@
       "min_width_cm": 5.92,
       "mass_kg": 0.05,
       "use": true,
-      "notes": ""
+      "notes": "",
+      "name": "dispenser9"
     },
     "A16013": {
       "class_id": 1013,
-      "category": "unknown",
+      "category": "container",
       "session_count": 40,
       "aabb_cm": [
         4.5,
@@ -195,11 +207,12 @@
       "min_width_cm": 4.65,
       "mass_kg": 0.05,
       "use": true,
-      "notes": "thin"
+      "notes": "thin",
+      "name": "bottle13"
     },
     "O03001": {
       "class_id": 1014,
-      "category": "unknown",
+      "category": "container",
       "session_count": 40,
       "aabb_cm": [
         4.9,
@@ -209,11 +222,12 @@
       "min_width_cm": 4.88,
       "mass_kg": 0.05,
       "use": true,
-      "notes": "thin"
+      "notes": "thin",
+      "name": "toilet_cleanser"
     },
     "A02015": {
       "class_id": 1015,
-      "category": "unknown",
+      "category": "container",
       "session_count": 40,
       "aabb_cm": [
         6.0,
@@ -223,11 +237,12 @@
       "min_width_cm": 6.03,
       "mass_kg": 0.05,
       "use": true,
-      "notes": "medium-narrow"
+      "notes": "medium-narrow",
+      "name": "dispenser15"
     },
     "Y29040": {
       "class_id": 1016,
-      "category": "unknown",
+      "category": "maniptools",
       "session_count": 40,
       "aabb_cm": [
         1.9,
@@ -237,11 +252,12 @@
       "min_width_cm": 1.87,
       "mass_kg": 0.05,
       "use": true,
-      "notes": "auto-added Phase 1 expansion (49 graspable @ 8cm)"
+      "notes": "auto-added Phase 1 expansion (49 graspable @ 8cm)",
+      "name": "040_large_marker"
     },
     "S16001": {
       "class_id": 1017,
-      "category": "unknown",
+      "category": "container",
       "session_count": 40,
       "aabb_cm": [
         2.5,
@@ -251,11 +267,12 @@
       "min_width_cm": 2.6,
       "mass_kg": 0.05,
       "use": true,
-      "notes": "auto-added Phase 1 expansion (49 graspable @ 8cm)"
+      "notes": "auto-added Phase 1 expansion (49 graspable @ 8cm)",
+      "name": "bottle_s001"
     },
     "O03002": {
       "class_id": 1018,
-      "category": "unknown",
+      "category": "container",
       "session_count": 40,
       "aabb_cm": [
         2.6,
@@ -265,11 +282,12 @@
       "min_width_cm": 2.63,
       "mass_kg": 0.05,
       "use": true,
-      "notes": "auto-added Phase 1 expansion (49 graspable @ 8cm)"
+      "notes": "auto-added Phase 1 expansion (49 graspable @ 8cm)",
+      "name": "deli_white_latex"
     },
     "A16026": {
       "class_id": 1019,
-      "category": "unknown",
+      "category": "container",
       "session_count": 40,
       "aabb_cm": [
         5.6,
@@ -279,11 +297,12 @@
       "min_width_cm": 5.55,
       "mass_kg": 0.05,
       "use": true,
-      "notes": "auto-added Phase 1 expansion (49 graspable @ 8cm)"
+      "notes": "auto-added Phase 1 expansion (49 graspable @ 8cm)",
+      "name": "bottle26"
     },
     "Y27035": {
       "class_id": 1020,
-      "category": "unknown",
+      "category": "maniptools",
       "session_count": 40,
       "aabb_cm": [
         5.7,
@@ -293,11 +312,12 @@
       "min_width_cm": 5.8,
       "mass_kg": 0.05,
       "use": true,
-      "notes": "auto-added Phase 1 expansion (49 graspable @ 8cm)"
+      "notes": "auto-added Phase 1 expansion (49 graspable @ 8cm)",
+      "name": "035_power_drill"
     },
     "O02001": {
       "class_id": 1021,
-      "category": "unknown",
+      "category": "container",
       "session_count": 40,
       "aabb_cm": [
         6.1,
@@ -307,11 +327,12 @@
       "min_width_cm": 6.11,
       "mass_kg": 0.05,
       "use": true,
-      "notes": "auto-added Phase 1 expansion (49 graspable @ 8cm)"
+      "notes": "auto-added Phase 1 expansion (49 graspable @ 8cm)",
+      "name": "chaoneng_handwash"
     },
     "A02011": {
       "class_id": 1022,
-      "category": "unknown",
+      "category": "container",
       "session_count": 40,
       "aabb_cm": [
         6.2,
@@ -321,11 +342,12 @@
       "min_width_cm": 6.2,
       "mass_kg": 0.05,
       "use": true,
-      "notes": "auto-added Phase 1 expansion (49 graspable @ 8cm)"
+      "notes": "auto-added Phase 1 expansion (49 graspable @ 8cm)",
+      "name": "dispenser11"
     },
     "Y03021": {
       "class_id": 1023,
-      "category": "unknown",
+      "category": "container",
       "session_count": 40,
       "aabb_cm": [
         6.8,
@@ -335,11 +357,12 @@
       "min_width_cm": 6.76,
       "mass_kg": 0.05,
       "use": true,
-      "notes": "auto-added Phase 1 expansion (49 graspable @ 8cm)"
+      "notes": "auto-added Phase 1 expansion (49 graspable @ 8cm)",
+      "name": "021_bleach_cleanser"
     },
     "A02014": {
       "class_id": 1024,
-      "category": "unknown",
+      "category": "container",
       "session_count": 40,
       "aabb_cm": [
         6.8,
@@ -349,11 +372,12 @@
       "min_width_cm": 6.89,
       "mass_kg": 0.05,
       "use": true,
-      "notes": "auto-added Phase 1 expansion (49 graspable @ 8cm)"
+      "notes": "auto-added Phase 1 expansion (49 graspable @ 8cm)",
+      "name": "dispenser14"
     },
     "A15027": {
       "class_id": 1025,
-      "category": "unknown",
+      "category": "container",
       "session_count": 40,
       "aabb_cm": [
         7.3,
@@ -363,11 +387,12 @@
       "min_width_cm": 7.24,
       "mass_kg": 0.05,
       "use": true,
-      "notes": "auto-added Phase 1 expansion (49 graspable @ 8cm)"
+      "notes": "auto-added Phase 1 expansion (49 graspable @ 8cm)",
+      "name": "bottle27"
     },
     "A02032": {
       "class_id": 1026,
-      "category": "unknown",
+      "category": "container",
       "session_count": 40,
       "aabb_cm": [
         7.2,
@@ -377,11 +402,12 @@
       "min_width_cm": 7.31,
       "mass_kg": 0.05,
       "use": true,
-      "notes": "auto-added Phase 1 expansion (49 graspable @ 8cm)"
+      "notes": "auto-added Phase 1 expansion (49 graspable @ 8cm)",
+      "name": "dispenser32"
     },
     "A15015": {
       "class_id": 1027,
-      "category": "unknown",
+      "category": "container",
       "session_count": 40,
       "aabb_cm": [
         7.7,
@@ -391,11 +417,12 @@
       "min_width_cm": 7.64,
       "mass_kg": 0.05,
       "use": true,
-      "notes": "auto-added Phase 1 expansion (49 graspable @ 8cm)"
+      "notes": "auto-added Phase 1 expansion (49 graspable @ 8cm)",
+      "name": "bottle15"
     },
     "A02029": {
       "class_id": 1028,
-      "category": "unknown",
+      "category": "container",
       "session_count": 40,
       "aabb_cm": [
         7.7,
@@ -405,11 +432,12 @@
       "min_width_cm": 7.71,
       "mass_kg": 0.05,
       "use": true,
-      "notes": "auto-added Phase 1 expansion (49 graspable @ 8cm)"
+      "notes": "auto-added Phase 1 expansion (49 graspable @ 8cm)",
+      "name": "dispenser29"
     },
     "O03003": {
       "class_id": 1029,
-      "category": "unknown",
+      "category": "container",
       "session_count": 36,
       "aabb_cm": [
         3.5,
@@ -419,11 +447,12 @@
       "min_width_cm": 3.51,
       "mass_kg": 0.05,
       "use": true,
-      "notes": "auto-added Phase 1 expansion (49 graspable @ 8cm)"
+      "notes": "auto-added Phase 1 expansion (49 graspable @ 8cm)",
+      "name": "mewon_shampoo"
     },
     "Y03006": {
       "class_id": 1030,
-      "category": "unknown",
+      "category": "container",
       "session_count": 36,
       "aabb_cm": [
         5.9,
@@ -433,11 +462,12 @@
       "min_width_cm": 5.83,
       "mass_kg": 0.05,
       "use": true,
-      "notes": "auto-added Phase 1 expansion (49 graspable @ 8cm)"
+      "notes": "auto-added Phase 1 expansion (49 graspable @ 8cm)",
+      "name": "006_mustard_bottle"
     },
     "A02030": {
       "class_id": 1031,
-      "category": "unknown",
+      "category": "container",
       "session_count": 36,
       "aabb_cm": [
         7.4,
@@ -447,11 +477,12 @@
       "min_width_cm": 5.92,
       "mass_kg": 0.05,
       "use": true,
-      "notes": "auto-added Phase 1 expansion (49 graspable @ 8cm)"
+      "notes": "auto-added Phase 1 expansion (49 graspable @ 8cm)",
+      "name": "dispenser30"
     },
     "S15004": {
       "class_id": 1032,
-      "category": "unknown",
+      "category": "container",
       "session_count": 36,
       "aabb_cm": [
         7.0,
@@ -461,11 +492,12 @@
       "min_width_cm": 6.84,
       "mass_kg": 0.05,
       "use": true,
-      "notes": "auto-added Phase 1 expansion (49 graspable @ 8cm)"
+      "notes": "auto-added Phase 1 expansion (49 graspable @ 8cm)",
+      "name": "bottle_s004"
     },
     "A02012": {
       "class_id": 1033,
-      "category": "unknown",
+      "category": "container",
       "session_count": 36,
       "aabb_cm": [
         6.6,
@@ -475,11 +507,12 @@
       "min_width_cm": 6.97,
       "mass_kg": 0.05,
       "use": true,
-      "notes": "auto-added Phase 1 expansion (49 graspable @ 8cm)"
+      "notes": "auto-added Phase 1 expansion (49 graspable @ 8cm)",
+      "name": "dispenser12"
     },
     "Y35037": {
       "class_id": 1034,
-      "category": "unknown",
+      "category": "maniptools",
       "session_count": 32,
       "aabb_cm": [
         1.6,
@@ -489,11 +522,12 @@
       "min_width_cm": 1.7,
       "mass_kg": 0.05,
       "use": true,
-      "notes": "auto-added Phase 1 expansion (49 graspable @ 8cm)"
+      "notes": "auto-added Phase 1 expansion (49 graspable @ 8cm)",
+      "name": "037_scissors"
     },
     "O36001": {
       "class_id": 1035,
-      "category": "unknown",
+      "category": "maniptools",
       "session_count": 32,
       "aabb_cm": [
         2.7,
@@ -503,11 +537,12 @@
       "min_width_cm": 2.74,
       "mass_kg": 0.05,
       "use": true,
-      "notes": "auto-added Phase 1 expansion (49 graspable @ 8cm)"
+      "notes": "auto-added Phase 1 expansion (49 graspable @ 8cm)",
+      "name": "stanley_pincer"
     },
     "S16005": {
       "class_id": 1036,
-      "category": "unknown",
+      "category": "container",
       "session_count": 32,
       "aabb_cm": [
         4.9,
@@ -517,11 +552,12 @@
       "min_width_cm": 4.63,
       "mass_kg": 0.05,
       "use": true,
-      "notes": "auto-added Phase 1 expansion (49 graspable @ 8cm)"
+      "notes": "auto-added Phase 1 expansion (49 graspable @ 8cm)",
+      "name": "bottle_s005"
     },
     "A02021": {
       "class_id": 1037,
-      "category": "unknown",
+      "category": "container",
       "session_count": 32,
       "aabb_cm": [
         6.3,
@@ -531,11 +567,12 @@
       "min_width_cm": 6.22,
       "mass_kg": 0.05,
       "use": true,
-      "notes": "auto-added Phase 1 expansion (49 graspable @ 8cm)"
+      "notes": "auto-added Phase 1 expansion (49 graspable @ 8cm)",
+      "name": "dispenser21"
     },
     "A02028": {
       "class_id": 1038,
-      "category": "unknown",
+      "category": "container",
       "session_count": 32,
       "aabb_cm": [
         6.3,
@@ -545,11 +582,12 @@
       "min_width_cm": 6.26,
       "mass_kg": 0.05,
       "use": true,
-      "notes": "auto-added Phase 1 expansion (49 graspable @ 8cm)"
+      "notes": "auto-added Phase 1 expansion (49 graspable @ 8cm)",
+      "name": "dispenser28"
     },
     "S16002": {
       "class_id": 1039,
-      "category": "unknown",
+      "category": "container",
       "session_count": 32,
       "aabb_cm": [
         6.9,
@@ -559,11 +597,12 @@
       "min_width_cm": 6.83,
       "mass_kg": 0.05,
       "use": true,
-      "notes": "auto-added Phase 1 expansion (49 graspable @ 8cm)"
+      "notes": "auto-added Phase 1 expansion (49 graspable @ 8cm)",
+      "name": "bottle_s002"
     },
     "O93001": {
       "class_id": 1040,
-      "category": "unknown",
+      "category": "geometry",
       "session_count": 28,
       "aabb_cm": [
         9.7,
@@ -573,11 +612,12 @@
       "min_width_cm": 4.76,
       "mass_kg": 0.05,
       "use": true,
-      "notes": "auto-added Phase 1 expansion (49 graspable @ 8cm)"
+      "notes": "auto-added Phase 1 expansion (49 graspable @ 8cm)",
+      "name": "donut"
     },
     "S20005": {
       "class_id": 1041,
-      "category": "unknown",
+      "category": "maniptools",
       "session_count": 24,
       "aabb_cm": [
         2.3,
@@ -587,11 +627,12 @@
       "min_width_cm": 1.29,
       "mass_kg": 0.05,
       "use": true,
-      "notes": "auto-added Phase 1 expansion (49 graspable @ 8cm)"
+      "notes": "auto-added Phase 1 expansion (49 graspable @ 8cm)",
+      "name": "knife_s005"
     },
     "S20022": {
       "class_id": 1042,
-      "category": "unknown",
+      "category": "maniptools",
       "session_count": 24,
       "aabb_cm": [
         1.5,
@@ -601,11 +642,12 @@
       "min_width_cm": 1.51,
       "mass_kg": 0.05,
       "use": true,
-      "notes": "auto-added Phase 1 expansion (49 graspable @ 8cm)"
+      "notes": "auto-added Phase 1 expansion (49 graspable @ 8cm)",
+      "name": "knife_s022"
     },
     "O24001": {
       "class_id": 1043,
-      "category": "unknown",
+      "category": "maniptools",
       "session_count": 24,
       "aabb_cm": [
         1.5,
@@ -615,11 +657,12 @@
       "min_width_cm": 1.59,
       "mass_kg": 0.05,
       "use": true,
-      "notes": "auto-added Phase 1 expansion (49 graspable @ 8cm)"
+      "notes": "auto-added Phase 1 expansion (49 graspable @ 8cm)",
+      "name": "stanley_wrench"
     },
     "O21001": {
       "class_id": 1044,
-      "category": "unknown",
+      "category": "maniptools",
       "session_count": 24,
       "aabb_cm": [
         3.4,
@@ -629,11 +672,12 @@
       "min_width_cm": 3.39,
       "mass_kg": 0.05,
       "use": true,
-      "notes": "auto-added Phase 1 expansion (49 graspable @ 8cm)"
+      "notes": "auto-added Phase 1 expansion (49 graspable @ 8cm)",
+      "name": "pittsburgh_screwdriver"
     },
     "A02031": {
       "class_id": 1045,
-      "category": "unknown",
+      "category": "container",
       "session_count": 24,
       "aabb_cm": [
         6.9,
@@ -643,11 +687,12 @@
       "min_width_cm": 6.92,
       "mass_kg": 0.05,
       "use": true,
-      "notes": "auto-added Phase 1 expansion (49 graspable @ 8cm)"
+      "notes": "auto-added Phase 1 expansion (49 graspable @ 8cm)",
+      "name": "dispenser31"
     },
     "S20021": {
       "class_id": 1046,
-      "category": "unknown",
+      "category": "maniptools",
       "session_count": 16,
       "aabb_cm": [
         0.6,
@@ -657,11 +702,12 @@
       "min_width_cm": 0.74,
       "mass_kg": 0.05,
       "use": true,
-      "notes": "auto-added Phase 1 expansion (49 graspable @ 8cm)"
+      "notes": "auto-added Phase 1 expansion (49 graspable @ 8cm)",
+      "name": "knife_s021"
     },
     "S20001": {
       "class_id": 1047,
-      "category": "unknown",
+      "category": "maniptools",
       "session_count": 16,
       "aabb_cm": [
         1.9,
@@ -671,11 +717,12 @@
       "min_width_cm": 1.89,
       "mass_kg": 0.05,
       "use": true,
-      "notes": "auto-added Phase 1 expansion (49 graspable @ 8cm)"
+      "notes": "auto-added Phase 1 expansion (49 graspable @ 8cm)",
+      "name": "knife_s001"
     },
     "O36002": {
       "class_id": 1048,
-      "category": "unknown",
+      "category": "maniptools",
       "session_count": 16,
       "aabb_cm": [
         2.8,
@@ -685,11 +732,12 @@
       "min_width_cm": 2.84,
       "mass_kg": 0.05,
       "use": true,
-      "notes": "auto-added Phase 1 expansion (49 graspable @ 8cm)"
+      "notes": "auto-added Phase 1 expansion (49 graspable @ 8cm)",
+      "name": "stanley_pincer_large"
     },
     "S16003": {
       "class_id": 1049,
-      "category": "unknown",
+      "category": "container",
       "session_count": 8,
       "aabb_cm": [
         2.8,
@@ -699,7 +747,613 @@
       "min_width_cm": 2.48,
       "mass_kg": 0.05,
       "use": true,
-      "notes": "auto-added Phase 1 expansion (49 graspable @ 8cm)"
+      "notes": "auto-added Phase 1 expansion (49 graspable @ 8cm)",
+      "name": "bottle_s003"
+    },
+    "C14001": {
+      "class_id": 1050,
+      "name": "contactpose_wineglass",
+      "category": "container",
+      "session_count": 48,
+      "aabb_cm": [
+        7.07,
+        7.07,
+        17.2
+      ],
+      "min_width_cm": 7.05,
+      "mass_kg": 0.05,
+      "use": true,
+      "notes": "auto-added v3 expansion (OakInkObjectsV2 + metaV2 download)"
+    },
+    "C40001": {
+      "class_id": 1051,
+      "name": "contactpose_eyeglasses",
+      "category": "wearable",
+      "session_count": 40,
+      "aabb_cm": [
+        13.41,
+        4.42,
+        13.62
+      ],
+      "min_width_cm": 4.42,
+      "mass_kg": 0.05,
+      "use": true,
+      "notes": "auto-added v3 expansion (OakInkObjectsV2 + metaV2 download)"
+    },
+    "C12001": {
+      "class_id": 1052,
+      "name": "contactpose_bowl",
+      "category": "container",
+      "session_count": 40,
+      "aabb_cm": [
+        14.89,
+        14.9,
+        7.66
+      ],
+      "min_width_cm": 7.92,
+      "mass_kg": 0.05,
+      "use": true,
+      "notes": "auto-added v3 expansion (OakInkObjectsV2 + metaV2 download)"
+    },
+    "C35001": {
+      "class_id": 1053,
+      "name": "contactpose_scissors",
+      "category": "maniptools",
+      "session_count": 32,
+      "aabb_cm": [
+        1.46,
+        7.39,
+        13.0
+      ],
+      "min_width_cm": 1.45,
+      "mass_kg": 0.05,
+      "use": true,
+      "notes": "auto-added v3 expansion (OakInkObjectsV2 + metaV2 download)"
+    },
+    "C52001": {
+      "class_id": 1054,
+      "name": "contactpose_phone",
+      "category": "misc",
+      "session_count": 32,
+      "aabb_cm": [
+        4.95,
+        2.44,
+        14.84
+      ],
+      "min_width_cm": 2.38,
+      "mass_kg": 0.05,
+      "use": true,
+      "notes": "auto-added v3 expansion (OakInkObjectsV2 + metaV2 download)"
+    },
+    "C22001": {
+      "class_id": 1055,
+      "name": "contactpose_hammer",
+      "category": "maniptools",
+      "session_count": 32,
+      "aabb_cm": [
+        2.32,
+        11.83,
+        20.67
+      ],
+      "min_width_cm": 2.8,
+      "mass_kg": 0.05,
+      "use": true,
+      "notes": "auto-added v3 expansion (OakInkObjectsV2 + metaV2 download)"
+    },
+    "C37001": {
+      "class_id": 1056,
+      "name": "contactpose_stapler",
+      "category": "maniptools",
+      "session_count": 32,
+      "aabb_cm": [
+        3.0,
+        4.11,
+        12.29
+      ],
+      "min_width_cm": 3.1,
+      "mass_kg": 0.05,
+      "use": true,
+      "notes": "auto-added v3 expansion (OakInkObjectsV2 + metaV2 download)"
+    },
+    "C26001": {
+      "class_id": 1057,
+      "name": "contactpose_fryingpan",
+      "category": "maniptools",
+      "session_count": 32,
+      "aabb_cm": [
+        14.99,
+        3.65,
+        23.55
+      ],
+      "min_width_cm": 3.41,
+      "mass_kg": 0.05,
+      "use": false,
+      "notes": "auto-added v3 expansion (OakInkObjectsV2 + metaV2 download)",
+      "disabled_reason": "0-ep in v4 oakink89 sim collection (2026-05-26) \u2014 Franka+cuRobo can't grasp"
+    },
+    "C03001": {
+      "class_id": 1058,
+      "name": "contactpose_toothpaste",
+      "category": "container",
+      "session_count": 32,
+      "aabb_cm": [
+        3.8,
+        5.26,
+        20.2
+      ],
+      "min_width_cm": 3.8,
+      "mass_kg": 0.05,
+      "use": true,
+      "notes": "auto-added v3 expansion (OakInkObjectsV2 + metaV2 download)"
+    },
+    "C50001": {
+      "class_id": 1059,
+      "name": "contactpose_camera",
+      "category": "misc",
+      "session_count": 32,
+      "aabb_cm": [
+        11.67,
+        6.86,
+        4.85
+      ],
+      "min_width_cm": 4.76,
+      "mass_kg": 0.05,
+      "use": true,
+      "notes": "auto-added v3 expansion (OakInkObjectsV2 + metaV2 download)"
+    },
+    "C42001": {
+      "class_id": 1060,
+      "name": "contactpose_binoculars",
+      "category": "wearable",
+      "session_count": 32,
+      "aabb_cm": [
+        14.16,
+        4.76,
+        10.88
+      ],
+      "min_width_cm": 4.96,
+      "mass_kg": 0.05,
+      "use": true,
+      "notes": "auto-added v3 expansion (OakInkObjectsV2 + metaV2 download)"
+    },
+    "C41001": {
+      "class_id": 1061,
+      "name": "contactpose_headphones",
+      "category": "wearable",
+      "session_count": 32,
+      "aabb_cm": [
+        12.62,
+        6.37,
+        13.2
+      ],
+      "min_width_cm": 6.08,
+      "mass_kg": 0.05,
+      "use": true,
+      "notes": "auto-added v3 expansion (OakInkObjectsV2 + metaV2 download)"
+    },
+    "C51001": {
+      "class_id": 1062,
+      "name": "contactpose_mouse",
+      "category": "misc",
+      "session_count": 28,
+      "aabb_cm": [
+        6.26,
+        4.09,
+        11.7
+      ],
+      "min_width_cm": 4.0,
+      "mass_kg": 0.05,
+      "use": true,
+      "notes": "auto-added v3 expansion (OakInkObjectsV2 + metaV2 download)"
+    },
+    "C91001": {
+      "class_id": 1063,
+      "name": "contactpose_banana",
+      "category": "geometry",
+      "session_count": 28,
+      "aabb_cm": [
+        4.2,
+        8.51,
+        20.71
+      ],
+      "min_width_cm": 4.17,
+      "mass_kg": 0.05,
+      "use": false,
+      "notes": "auto-added v3 expansion (OakInkObjectsV2 + metaV2 download)",
+      "disabled_reason": "0-ep in v4 oakink89 sim collection (2026-05-26) \u2014 Franka+cuRobo can't grasp"
+    },
+    "C43001": {
+      "class_id": 1064,
+      "name": "contactpose_gamecontroller",
+      "category": "wearable",
+      "session_count": 28,
+      "aabb_cm": [
+        15.49,
+        5.14,
+        9.69
+      ],
+      "min_width_cm": 5.12,
+      "mass_kg": 0.05,
+      "use": true,
+      "notes": "auto-added v3 expansion (OakInkObjectsV2 + metaV2 download)"
+    },
+    "C25001": {
+      "class_id": 1065,
+      "name": "contactpose_toothbrush",
+      "category": "maniptools",
+      "session_count": 24,
+      "aabb_cm": [
+        1.18,
+        2.29,
+        16.49
+      ],
+      "min_width_cm": 1.23,
+      "mass_kg": 0.05,
+      "use": false,
+      "notes": "auto-added v3 expansion (OakInkObjectsV2 + metaV2 download)",
+      "disabled_reason": "0-ep in v4 oakink89 sim collection (2026-05-26) \u2014 Franka+cuRobo can't grasp"
+    },
+    "C23001": {
+      "class_id": 1066,
+      "name": "contactpose_flashlight",
+      "category": "maniptools",
+      "session_count": 24,
+      "aabb_cm": [
+        3.36,
+        3.37,
+        13.9
+      ],
+      "min_width_cm": 3.33,
+      "mass_kg": 0.05,
+      "use": false,
+      "notes": "auto-added v3 expansion (OakInkObjectsV2 + metaV2 download)",
+      "disabled_reason": "0-ep in v4 oakink89 sim collection (2026-05-26) \u2014 Franka+cuRobo can't grasp"
+    },
+    "C15001": {
+      "class_id": 1067,
+      "name": "contactpose_waterbottle",
+      "category": "container",
+      "session_count": 24,
+      "aabb_cm": [
+        6.02,
+        6.02,
+        13.65
+      ],
+      "min_width_cm": 6.01,
+      "mass_kg": 0.05,
+      "use": true,
+      "notes": "auto-added v3 expansion (OakInkObjectsV2 + metaV2 download)"
+    },
+    "C28001": {
+      "class_id": 1068,
+      "name": "contactpose_lightbulb",
+      "category": "maniptools",
+      "session_count": 24,
+      "aabb_cm": [
+        6.17,
+        6.18,
+        11.02
+      ],
+      "min_width_cm": 6.17,
+      "mass_kg": 0.05,
+      "use": true,
+      "notes": "auto-added v3 expansion (OakInkObjectsV2 + metaV2 download)"
+    },
+    "C20001": {
+      "class_id": 1069,
+      "name": "contactpose_knife",
+      "category": "maniptools",
+      "session_count": 16,
+      "aabb_cm": [
+        1.49,
+        3.2,
+        22.19
+      ],
+      "min_width_cm": 1.58,
+      "mass_kg": 0.05,
+      "use": false,
+      "notes": "auto-added v3 expansion (OakInkObjectsV2 + metaV2 download)",
+      "disabled_reason": "0-ep in v4 oakink89 sim collection (2026-05-26) \u2014 Franka+cuRobo can't grasp"
+    },
+    "A01006": {
+      "class_id": 1070,
+      "name": "dispenser6",
+      "category": "container",
+      "session_count": 52,
+      "aabb_cm": [
+        10.93,
+        11.23,
+        21.26
+      ],
+      "min_width_cm": 9.59,
+      "mass_kg": 0.05,
+      "use": true,
+      "notes": "v4 added per partner-validated list (min_w 9.59cm > 8cm geom filter, but partner confirmed graspable via handle/spout)"
+    },
+    "A01023": {
+      "class_id": 1071,
+      "name": "dispenser23",
+      "category": "container",
+      "session_count": 52,
+      "aabb_cm": [
+        8.48,
+        11.36,
+        22.35
+      ],
+      "min_width_cm": 8.47,
+      "mass_kg": 0.05,
+      "use": true,
+      "notes": "v4 added per partner-validated list (min_w 8.47cm > 8cm geom filter, but partner confirmed graspable via handle/spout)"
+    },
+    "A01026": {
+      "class_id": 1072,
+      "name": "dispenser26",
+      "category": "container",
+      "session_count": 48,
+      "aabb_cm": [
+        8.48,
+        10.74,
+        21.36
+      ],
+      "min_width_cm": 8.46,
+      "mass_kg": 0.05,
+      "use": true,
+      "notes": "v4 added per partner-validated list (min_w 8.46cm > 8cm geom filter, but partner confirmed graspable via handle/spout)"
+    },
+    "A01027": {
+      "class_id": 1073,
+      "name": "dispenser27",
+      "category": "container",
+      "session_count": 52,
+      "aabb_cm": [
+        8.62,
+        11.46,
+        31.76
+      ],
+      "min_width_cm": 8.59,
+      "mass_kg": 0.05,
+      "use": true,
+      "notes": "v4 added per partner-validated list (min_w 8.59cm > 8cm geom filter, but partner confirmed graspable via handle/spout)"
+    },
+    "A02018": {
+      "class_id": 1074,
+      "name": "dispenser18",
+      "category": "container",
+      "session_count": 40,
+      "aabb_cm": [
+        12.05,
+        23.23,
+        26.95
+      ],
+      "min_width_cm": 11.96,
+      "mass_kg": 0.05,
+      "use": true,
+      "notes": "v4 added per partner-validated list (min_w 11.96cm > 8cm geom filter, but partner confirmed graspable via handle/spout)"
+    },
+    "A16012": {
+      "class_id": 1075,
+      "name": "bottle12",
+      "category": "container",
+      "session_count": 40,
+      "aabb_cm": [
+        8.76,
+        8.69,
+        19.06
+      ],
+      "min_width_cm": 8.52,
+      "mass_kg": 0.05,
+      "use": false,
+      "notes": "v4 added per partner-validated list (min_w 8.52cm > 8cm geom filter, but partner confirmed graspable via handle/spout) [excluded 2026-05-26: min_width > 8cm, not parallel-jaw graspable]"
+    },
+    "C10001": {
+      "class_id": 1076,
+      "name": "contactpose_mug",
+      "category": "container",
+      "session_count": 52,
+      "aabb_cm": [
+        8.21,
+        11.63,
+        10.56
+      ],
+      "min_width_cm": 8.21,
+      "mass_kg": 0.05,
+      "use": false,
+      "notes": "v4 added per partner-validated list (min_w 8.21cm > 8cm geom filter, but partner confirmed graspable via handle/spout) [excluded 2026-05-26: min_width > 8cm, not parallel-jaw graspable]"
+    },
+    "C13001": {
+      "class_id": 1077,
+      "name": "contactpose_utah_teapot",
+      "category": "container",
+      "session_count": 40,
+      "aabb_cm": [
+        14.5,
+        23.22,
+        11.15
+      ],
+      "min_width_cm": 11.19,
+      "mass_kg": 0.05,
+      "use": false,
+      "notes": "v4 added per partner-validated list (min_w 11.19cm > 8cm geom filter, but partner confirmed graspable via handle/spout) [excluded 2026-05-26: min_width > 8cm, not parallel-jaw graspable]"
+    },
+    "C90001": {
+      "class_id": 1078,
+      "name": "contactpose_apple",
+      "category": "geometry",
+      "session_count": 28,
+      "aabb_cm": [
+        8.66,
+        8.17,
+        9.78
+      ],
+      "min_width_cm": 8.14,
+      "mass_kg": 0.05,
+      "use": true,
+      "notes": "v4 added per partner-validated list (min_w 8.14cm > 8cm geom filter, but partner confirmed graspable via handle/spout)"
+    },
+    "O50001": {
+      "class_id": 1079,
+      "name": "nikon_d610_camera",
+      "category": "misc",
+      "session_count": 48,
+      "aabb_cm": [
+        14.22,
+        11.63,
+        20.77
+      ],
+      "min_width_cm": 11.69,
+      "mass_kg": 0.05,
+      "use": true,
+      "notes": "v4 added per partner-validated list (min_w 11.69cm > 8cm geom filter, but partner confirmed graspable via handle/spout)"
+    },
+    "O50002": {
+      "class_id": 1080,
+      "name": "fuji_instax_camera",
+      "category": "misc",
+      "session_count": 32,
+      "aabb_cm": [
+        12.22,
+        12.65,
+        9.62
+      ],
+      "min_width_cm": 9.16,
+      "mass_kg": 0.05,
+      "use": true,
+      "notes": "v4 added per partner-validated list (min_w 9.16cm > 8cm geom filter, but partner confirmed graspable via handle/spout)"
+    },
+    "S10005": {
+      "class_id": 1081,
+      "name": "mug_s005",
+      "category": "container",
+      "session_count": 52,
+      "aabb_cm": [
+        8.11,
+        10.39,
+        11.72
+      ],
+      "min_width_cm": 8.04,
+      "mass_kg": 0.05,
+      "use": true,
+      "notes": "v4 added per partner-validated list (min_w 8.04cm > 8cm geom filter, but partner confirmed graspable via handle/spout)"
+    },
+    "S10007": {
+      "class_id": 1082,
+      "name": "mug_s007",
+      "category": "container",
+      "session_count": 52,
+      "aabb_cm": [
+        7.66,
+        11.49,
+        10.97
+      ],
+      "min_width_cm": 8.01,
+      "mass_kg": 0.05,
+      "use": false,
+      "notes": "v4 added per partner-validated list (min_w 8.01cm > 8cm geom filter, but partner confirmed graspable via handle/spout) [excluded 2026-05-26: min_width > 8cm, not parallel-jaw graspable]"
+    },
+    "S10010": {
+      "class_id": 1083,
+      "name": "mug_s010",
+      "category": "container",
+      "session_count": 48,
+      "aabb_cm": [
+        9.11,
+        11.7,
+        9.53
+      ],
+      "min_width_cm": 8.65,
+      "mass_kg": 0.05,
+      "use": false,
+      "notes": "v4 added per partner-validated list (min_w 8.65cm > 8cm geom filter, but partner confirmed graspable via handle/spout) [excluded 2026-05-26: min_width > 8cm, not parallel-jaw graspable]"
+    },
+    "S10013": {
+      "class_id": 1084,
+      "name": "mug_s013",
+      "category": "container",
+      "session_count": 48,
+      "aabb_cm": [
+        8.53,
+        12.08,
+        9.58
+      ],
+      "min_width_cm": 8.47,
+      "mass_kg": 0.05,
+      "use": true,
+      "notes": "v4 added per partner-validated list (min_w 8.47cm > 8cm geom filter, but partner confirmed graspable via handle/spout)"
+    },
+    "S10014": {
+      "class_id": 1085,
+      "name": "mug_s014",
+      "category": "container",
+      "session_count": 52,
+      "aabb_cm": [
+        8.56,
+        11.95,
+        9.71
+      ],
+      "min_width_cm": 8.56,
+      "mass_kg": 0.05,
+      "use": false,
+      "notes": "v4 added per partner-validated list (min_w 8.56cm > 8cm geom filter, but partner confirmed graspable via handle/spout) [excluded 2026-05-26: min_width > 8cm, not parallel-jaw graspable]"
+    },
+    "S10015": {
+      "class_id": 1086,
+      "name": "mug_s015",
+      "category": "container",
+      "session_count": 52,
+      "aabb_cm": [
+        8.87,
+        11.95,
+        9.46
+      ],
+      "min_width_cm": 8.82,
+      "mass_kg": 0.05,
+      "use": false,
+      "notes": "v4 added per partner-validated list (min_w 8.82cm > 8cm geom filter, but partner confirmed graspable via handle/spout) [excluded 2026-05-26: min_width > 8cm, not parallel-jaw graspable]"
+    },
+    "S10017": {
+      "class_id": 1087,
+      "name": "mug_s017",
+      "category": "container",
+      "session_count": 52,
+      "aabb_cm": [
+        8.2,
+        11.13,
+        10.95
+      ],
+      "min_width_cm": 8.12,
+      "mass_kg": 0.05,
+      "use": true,
+      "notes": "v4 added per partner-validated list (min_w 8.12cm > 8cm geom filter, but partner confirmed graspable via handle/spout)"
+    },
+    "S10018": {
+      "class_id": 1088,
+      "name": "mug_s018",
+      "category": "container",
+      "session_count": 64,
+      "aabb_cm": [
+        8.34,
+        10.94,
+        11.02
+      ],
+      "min_width_cm": 8.27,
+      "mass_kg": 0.05,
+      "use": true,
+      "notes": "v4 added per partner-validated list (min_w 8.27cm > 8cm geom filter, but partner confirmed graspable via handle/spout)"
+    },
+    "S10020": {
+      "class_id": 1089,
+      "name": "mug_s020",
+      "category": "container",
+      "session_count": 52,
+      "aabb_cm": [
+        8.33,
+        12.6,
+        10.06
+      ],
+      "min_width_cm": 8.47,
+      "mass_kg": 0.05,
+      "use": false,
+      "notes": "v4 added per partner-validated list (min_w 8.47cm > 8cm geom filter, but partner confirmed graspable via handle/spout) [excluded 2026-05-26: min_width > 8cm, not parallel-jaw graspable]"
     }
   }
 }

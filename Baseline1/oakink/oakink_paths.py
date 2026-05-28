@@ -27,7 +27,11 @@ OAKINK_GENERAL_INFO   = os.path.join(OAKINK_ANNO, "general_info")
 #   hand_anno (dict with hand_tsl in world, hand_pose 16x4 quat, hand_shape 10x1)
 
 # ── Our generated assets ──────────────────────────────────────────────────────
-OAKINK_USD_DIR = os.path.join(PROJ_ROOT, "output", "obj_usd", "oakink")  # ycb-dex parallel
+# CAD-derived USDs (Z-up, metric, matches retarget's obj_origin_G/quat_G).
+# Built by Baseline1/oakink/convert_oakink_cad_usd.py (CPU-only).
+# Legacy output/obj_usd/oakink/ contains SAM3D-derived USDs (unit-cube
+# normalized, ~10× wrong scale for our pipeline) — DO NOT use those for sim.
+OAKINK_USD_DIR = os.path.join(PROJ_ROOT, "output", "obj_usd_cad", "oakink")
 
 # ── Manifest + outputs ────────────────────────────────────────────────────────
 CLASS_ID_MAP = os.path.join(_THIS, "class_id_map.json")
