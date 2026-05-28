@@ -17,6 +17,7 @@ PROJ = Path(__file__).resolve().parents[1]
 if str(PROJ) not in sys.path:
     sys.path.insert(0, str(PROJ))
 
+from evaluation.affordance_ckpt import add_affordance_checkpoint_args, resolve_affordance_checkpoint
 from evaluation.candidate_batch import build_candidate_tasks, run_candidate_batch_generation
 from evaluation.episode import discover_obj_ids
 from evaluation.eval_single import resolve_generate_mesh
@@ -138,18 +139,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=str(PROJ / "output" / "pdm" / "checkpoints_yaw_v6cond" / "pose_stats.pt"),
         help="Pose normalization stats if not embedded in --pdm-checkpoint.",
     )
-    p.add_argument(
-        "--affordance-checkpoint",
-        default=str(
-            PROJ
-            / "output"
-            / "affordance_no_rot_executed"
-            / "min20"
-            / "checkpoints_v6"
-            / "best_v6_model.pth"
-        ),
-        help="Affordance v6 checkpoint used during batch candidate generation.",
-    )
+    add_affordance_checkpoint_args(p)
     p.add_argument(
         "--no-hard-gate",
         action="store_true",
@@ -239,6 +229,8 @@ def _build_eval_summary(
             "z_yaw_grid": args.z_yaw_grid,
             "z_yaw_random": bool(args.z_yaw_random),
             "generate_candidate_each_trial": bool(args.generate_candidate_each_trial),
+            "hp_affordance": bool(args.hp_affordance),
+            "affordance_checkpoint": args.affordance_checkpoint,
             "candidate_gpus": args.candidate_gpu_ids or args.sim_gpu_ids,
             "sim_gpus": args.sim_gpu_ids,
             "sim_per_gpu": args.sim_per_gpu,
@@ -529,6 +521,12 @@ def main() -> None:
         raise SystemExit("Use only one of --log-only or --loud")
     maybe_reexec_with_xvfb(args)
 
+    aff_ckpt = resolve_affordance_checkpoint(
+        hp_affordance=bool(args.hp_affordance),
+        affordance_checkpoint=args.affordance_checkpoint,
+    )
+    args.affordance_checkpoint = str(aff_ckpt)
+
     result_dir = Path(args.result_dir).expanduser().resolve()
     result_dir.mkdir(parents=True, exist_ok=True)
 
@@ -554,6 +552,11 @@ def main() -> None:
     if args.candidates_only:
         if args.dry_run:
             raise SystemExit("--candidates-only does not support --dry-run yet")
+        _important(
+            args,
+            f"[pool] affordance checkpoint: {aff_ckpt}"
+            + (" (hp-affordance)" if args.hp_affordance else ""),
+        )
         pool_size = _trials_per_obj_yaw(args)
         yaw_values_by_obj = {
             oid: resolve_yaw_values(
@@ -605,6 +608,11 @@ def main() -> None:
         return
 
     _important(args, f"[pool] generating/loading solutions for {len(obj_ids)} object(s)")
+    _important(
+        args,
+        f"[pool] affordance checkpoint: {aff_ckpt}"
+        + (" (hp-affordance)" if args.hp_affordance else ""),
+    )
     manifest = generate_solutions(
         obj_ids=obj_ids,
         result_dir=result_dir,

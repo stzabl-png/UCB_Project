@@ -22,6 +22,8 @@ PROJ = Path(__file__).resolve().parents[1]
 if str(PROJ) not in sys.path:
     sys.path.insert(0, str(PROJ))
 
+from evaluation.affordance_ckpt import add_affordance_checkpoint_args, resolve_affordance_checkpoint
+
 DEFAULT_CANDIDATE_PYTHON = "/home/vision/miniconda3/envs/bundlesdf/bin/python"
 
 
@@ -120,6 +122,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Directory for --log-only/--loud logs (default: <result-dir>/logs).",
     )
+    add_affordance_checkpoint_args(parser)
     return parser
 
 
@@ -227,9 +230,15 @@ def maybe_generate_candidate(args: argparse.Namespace) -> str | None:
     ]
     if is_rotated_sam3d:
         cmd.append("--sam3d-rotated-mesh")
+    aff_ckpt = resolve_affordance_checkpoint(
+        hp_affordance=bool(getattr(args, "hp_affordance", False)),
+        affordance_checkpoint=getattr(args, "affordance_checkpoint", None),
+    )
+    cmd.extend(["--affordance-checkpoint", str(aff_ckpt)])
     print(
         "[eval] generating candidate HDF5 "
-        f"obj={args.obj_id} yaw={float(args.z_yaw_deg):.1f} -> {out_path}"
+        f"obj={args.obj_id} yaw={float(args.z_yaw_deg):.1f} "
+        f"aff_ckpt={aff_ckpt.name} -> {out_path}"
     )
     proc = subprocess.run(
         cmd,

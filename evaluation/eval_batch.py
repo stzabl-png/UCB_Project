@@ -35,6 +35,7 @@ PROJ = Path(__file__).resolve().parents[1]
 if str(PROJ) not in sys.path:
     sys.path.insert(0, str(PROJ))
 
+from evaluation.affordance_ckpt import add_affordance_checkpoint_args, resolve_affordance_checkpoint
 from evaluation.episode import (
     build_episode_id,
     default_candidate_hdf5,
@@ -141,6 +142,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Randomize object order (fresh RNG, no fixed seed)",
     )
+    add_affordance_checkpoint_args(p)
     return p
 
 
@@ -240,6 +242,10 @@ def build_eval_single_cmd(
         )
         if mesh.name == "mesh.ply" and mesh.parent.name == obj_id:
             cmd.append("--sam3d-rotated-mesh")
+        if getattr(args, "affordance_checkpoint", None):
+            cmd.extend(["--affordance-checkpoint", str(args.affordance_checkpoint)])
+        if getattr(args, "hp_affordance", False):
+            cmd.append("--hp-affordance")
     elif candidate_hdf5:
         cmd.extend(["--candidate-hdf5", candidate_hdf5])
     else:
@@ -252,6 +258,12 @@ def main() -> None:
     args = build_parser().parse_args()
     if args.log_only and args.loud:
         raise SystemExit("Use only one of --log-only or --loud")
+
+    aff_ckpt = resolve_affordance_checkpoint(
+        hp_affordance=bool(args.hp_affordance),
+        affordance_checkpoint=args.affordance_checkpoint,
+    )
+    args.affordance_checkpoint = str(aff_ckpt)
 
     def important(message: str = "") -> None:
         if not args.log_only:

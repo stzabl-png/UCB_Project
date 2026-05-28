@@ -447,6 +447,8 @@ output/evaluation/pool_smoke/
 |------|------|
 | `--trials-per-obj-yaw 2` | 每个物体每个 yaw 跑 2 次；两个 yaw 就是每物体 4 次 |
 | `--candidate-gpu-ids 0,1` | 在线 batch candidate generation 使用的 GPU；默认跟随 `--sim-gpu-ids` |
+| `--hp-affordance` | 默认 off；开启后用 `output/affordance_hp_v6/.../best_v6_model.pth` 作 affordance（ablation）；否则 `affordance_no_rot_executed/.../best_v6_model.pth` |
+| `--affordance-checkpoint PATH` | 显式覆盖 affordance 权重（优先于 `--hp-affordance`） |
 | `--candidate-batch-multiplier 2` | 每个 obj×yaw 每轮采样 `2 * trials-per-obj-yaw` 个 PDM pose |
 | `--candidate-max-batches 10` | 每个 obj×yaw 最多采样 10 轮，硬门通过不够时用 forced-fill 补齐 |
 | `--sim-gpu-ids 0,1` | worker 分配到这些 `CUDA_VISIBLE_DEVICES` |

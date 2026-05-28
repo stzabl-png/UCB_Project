@@ -26,6 +26,10 @@ PROJ = Path(__file__).resolve().parents[1]
 if str(PROJ) not in sys.path:
     sys.path.insert(0, str(PROJ))
 
+from evaluation.affordance_ckpt import (  # noqa: E402
+    add_affordance_checkpoint_args,
+    resolve_affordance_checkpoint,
+)
 from model.inference_v6 import default_threshold, load_model, predict_heatmap_batch  # noqa: E402
 from model.pdm.dataset import yaw_feature_from_deg  # noqa: E402
 from model.pdm.model import PDM  # noqa: E402
@@ -662,7 +666,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Dataset for scale.json lookup (oakink/ycb/...). Omit to infer per obj_id.",
     )
-    p.add_argument("--affordance-checkpoint", type=Path, default=DEFAULT_AFF_CKPT)
+    add_affordance_checkpoint_args(p)
     p.add_argument("--pdm-checkpoint", type=Path, default=DEFAULT_PDM_CKPT)
     p.add_argument("--pose-stats", type=Path, default=None)
     p.add_argument("--dataset-dir", type=Path, default=None)
@@ -709,7 +713,10 @@ def main() -> None:
     args = build_parser().parse_args()
     tasks = _load_json(args.tasks_json).get("tasks", [])
     device = torch.device("cpu" if args.cpu or not torch.cuda.is_available() else "cuda")
-    aff_ckpt = args.affordance_checkpoint.expanduser().resolve()
+    aff_ckpt = resolve_affordance_checkpoint(
+        hp_affordance=bool(args.hp_affordance),
+        affordance_checkpoint=args.affordance_checkpoint,
+    )
     dataset_dir = args.dataset_dir or aff_ckpt.parents[1]
     threshold = default_threshold(str(aff_ckpt), str(dataset_dir.expanduser().resolve()))
     affordance_model, _ = load_model(str(aff_ckpt), device)

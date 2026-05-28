@@ -55,6 +55,10 @@ DEFAULT_AFF_OUT_DIR = PROJ / "output" / "real_machine" / "affordance"
 
 sys.path.insert(0, str(PROJ))
 
+from evaluation.affordance_ckpt import (  # noqa: E402
+    add_affordance_checkpoint_args,
+    resolve_affordance_checkpoint,
+)
 from model.inference_v6 import (  # noqa: E402
     default_threshold,
     load_model,
@@ -353,7 +357,7 @@ def main() -> None:
     p.add_argument("--output-dir", type=Path, default=DEFAULT_OUT_DIR)
     p.add_argument("--dataset", default="real_machine", help="metadata.dataset in HDF5")
   # checkpoints
-    p.add_argument("--affordance-checkpoint", type=Path, default=DEFAULT_AFF_CKPT)
+    add_affordance_checkpoint_args(p)
     p.add_argument("--pdm-checkpoint", type=Path, default=DEFAULT_PDM_CKPT)
     p.add_argument("--pose-stats", type=Path, default=None, help="If PDM ckpt lacks pose_stats")
     p.add_argument("--dataset-dir", type=Path, default=None, help="For affordance default threshold")
@@ -440,10 +444,11 @@ def main() -> None:
     if args.obj_id and len(mesh_paths) != 1:
         raise SystemExit("--obj-id can only be used with exactly one --mesh")
 
-    aff_ckpt = args.affordance_checkpoint.expanduser().resolve()
+    aff_ckpt = resolve_affordance_checkpoint(
+        hp_affordance=bool(args.hp_affordance),
+        affordance_checkpoint=args.affordance_checkpoint,
+    )
     pdm_ckpt = args.pdm_checkpoint.expanduser().resolve()
-    if not aff_ckpt.is_file():
-        raise SystemExit(f"Affordance checkpoint not found: {aff_ckpt}")
     if not pdm_ckpt.is_file():
         raise SystemExit(f"PDM checkpoint not found: {pdm_ckpt}")
 
