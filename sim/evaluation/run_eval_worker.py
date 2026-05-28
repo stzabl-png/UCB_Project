@@ -83,6 +83,7 @@ from evaluation.results import append_episode_jsonl, build_episode_record, write
 from evaluation.specs import ExecutionResult, OpenLoopGraspCommand, PolicyOutput  # noqa: E402
 from evaluation.solution_gen import load_json  # noqa: E402
 from sim.evaluation.curobo_executor import (  # noqa: E402
+    execute_closed_loop_actions,
     execute_open_loop_grasp,
     reset_motion_gen,
     write_robot_gt_hdf5,
@@ -136,8 +137,15 @@ def _write_progress(path: Path, chunk_id: str, results: list[dict], total: int) 
 def _execute_task(scene, task: dict, chunk: dict, result_dir: Path):
     solution = load_json(Path(task["solution_path"]))
     policy_output = _policy_output_from_solution(solution)
-    if policy_output.kind != "open_loop_grasp" or policy_output.command is None:
-        raise RuntimeError(f"unsupported policy output: {policy_output.kind}")
+    # Dispatch by PolicyKind. open_loop_grasp: partner a2g_pdm path.
+    # closed_loop_actions: online policies (DP3, GraspVLA) — see
+    #   evaluation/policies/dp3_online.py + curobo_executor.execute_closed_loop_actions.
+    if policy_output.kind not in ("open_loop_grasp", "closed_loop_actions"):
+        raise RuntimeError(f"unsupported policy output kind: {policy_output.kind}")
+    if policy_output.kind == "open_loop_grasp" and policy_output.command is None:
+        raise RuntimeError("open_loop_grasp policy_output missing command")
+    if policy_output.kind == "closed_loop_actions" and policy_output.actions is None:
+        raise RuntimeError("closed_loop_actions policy_output missing actions payload")
 
     spec = build_scene_spec(
         obj_id=task["obj_id"],
@@ -175,7 +183,19 @@ def _execute_task(scene, task: dict, chunk: dict, result_dir: Path):
             recorder.attach_world(scene.world)
             recorder.start()
 
-        execution = execute_open_loop_grasp(scene, policy_output.command)
+        if policy_output.kind == "open_loop_grasp":
+            execution = execute_open_loop_grasp(scene, policy_output.command)
+        else:
+            # closed_loop_actions — pc0_world / origin_world supplied by task
+            # (caller can pre-sample mesh once per (obj_id, yaw) and pass)
+            payload = dict(policy_output.actions)
+            pc0_world    = task.get("pc0_world")
+            origin_world = task.get("origin_world")
+            execution = execute_closed_loop_actions(
+                scene, payload,
+                pc0_world=np.asarray(pc0_world, dtype=np.float32) if pc0_world is not None else None,
+                origin_world=np.asarray(origin_world, dtype=np.float64) if origin_world is not None else None,
+            )
         if recorder is not None:
             video_path = recorder.stop()
             execution.video_path = video_path
@@ -197,7 +217,10 @@ def _execute_task(scene, task: dict, chunk: dict, result_dir: Path):
     json_path = write_episode_json(record, str(ep_dir))
     append_episode_jsonl(record, str(result_dir))
     h5_path = ""
-    if chunk.get("save_hdf5"):
+    if chunk.get("save_hdf5") and policy_output.kind == "open_loop_grasp":
+        # closed_loop_actions does not produce a single grasp command, so the
+        # candidate-style HDF5 writer is N/A for it. (DP3 / VLA per-ep results
+        # are captured in episode JSONs instead.)
         h5_path = write_robot_gt_hdf5(
             result_dir=str(ep_dir),
             scene=spec,

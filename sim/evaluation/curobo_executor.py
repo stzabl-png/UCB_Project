@@ -525,3 +525,294 @@ def write_robot_gt_hdf5(
             _write_snapshot_group(gi, "executed_panda_hand_post_lift", execution.executed_post_lift)
     return path
 
+
+
+# ============================================================
+# Closed-loop online policy executor (DP3 / VLA / any chunked policy)
+# ============================================================
+# Ported from gate3-curobo-ik branch sim/eval_dp3_baseline3.py:rollout_chunked.
+# Key differences from execute_open_loop_grasp:
+#   - obs constructed each chunk (live PC + EE state) and sent to remote server
+#   - server returns next ``n_action_steps`` EE waypoints
+#   - we IK them and execute via teleport (gripper open) or PD (gripper closed)
+#   - early-stop when lift > success_dz_m; retry on PhysX NaN
+#   - reset_scene_pose is the CALLER's responsibility (run_eval_worker does it)
+def _read_panda_hand_pose(stage):
+    """Read live panda_hand world-frame pose. Returns (pos_w, quat_wxyz)."""
+    from pxr import UsdGeom, Gf
+    prim = stage.GetPrimAtPath("/World/Franka/panda_hand")
+    xform = UsdGeom.Xformable(prim)
+    M = xform.ComputeLocalToWorldTransform(0)
+    pos = np.array([M[3][0], M[3][1], M[3][2]], dtype=np.float64)
+    R3 = np.array([[M[i][j] for j in range(3)] for i in range(3)], dtype=np.float64)
+    q_xyzw = Rotation.from_matrix(R3).as_quat()
+    return pos, np.array([q_xyzw[3], q_xyzw[0], q_xyzw[1], q_xyzw[2]])
+
+
+def _franka_to_retarget_quat(q_franka_wxyz):
+    """Convert Franka panda_hand world quat → retarget-frame convention quat.
+    See sim/eval_dp3_baseline3.py for the exact rotation; the trained DP3
+    model expects this transformed quaternion."""
+    R = Rotation.from_quat([q_franka_wxyz[1], q_franka_wxyz[2], q_franka_wxyz[3], q_franka_wxyz[0]])
+    R_flip = Rotation.from_matrix(np.array([[1,0,0],[0,-1,0],[0,0,-1]], dtype=np.float64))
+    R_re = R * R_flip
+    q = R_re.as_quat()
+    return np.array([q[3], q[0], q[1], q[2]])
+
+
+def _retarget_to_franka_quat(q_retarget_wxyz):
+    R = Rotation.from_quat([q_retarget_wxyz[1], q_retarget_wxyz[2], q_retarget_wxyz[3], q_retarget_wxyz[0]])
+    R_flip = Rotation.from_matrix(np.array([[1,0,0],[0,-1,0],[0,0,-1]], dtype=np.float64))
+    R_fr = R * R_flip.inv()
+    q = R_fr.as_quat()
+    return np.array([q[3], q[0], q[1], q[2]])
+
+
+def _query_dp3_server(url, pc_obs, ap_obs, timeout):
+    """HTTP call to DP3 inference server. Returns (n_action_steps, 8) np.array."""
+    import requests
+    r = requests.post(
+        f"{url}/predict",
+        json={"point_cloud": pc_obs.tolist(), "agent_pos": ap_obs.tolist()},
+        timeout=timeout,
+    ).json()
+    return np.asarray(r["action"], dtype=np.float32)
+
+
+def _get_server_info(url, timeout=10):
+    import requests
+    return requests.get(f"{url}/info", timeout=timeout).json()
+
+
+def execute_closed_loop_actions(scene, payload: dict, pc0_world: np.ndarray | None = None,
+                                origin_world: np.ndarray | None = None) -> ExecutionResult:
+    """Execute a chunked receding-horizon online policy (e.g. DP3).
+
+    Args:
+        scene: titan SimEvaluationContext (has world, franka, obj, stage).
+        payload: from DP3OnlinePolicy.predict().actions — dict with
+            server_url, max_chunks, success_dz_m, retry_physx, n_pc_points,
+            request_timeout.
+        pc0_world: (N, 3) point cloud in world frame. If None, sample from the
+            spawned obj's mesh. Either CALLER must provide or scene.obj must
+            expose a usable mesh.
+        origin_world: (3,) world position of the G-frame origin. If None,
+            inferred from scene.object_placement.
+
+    Returns:
+        ExecutionResult with success, z_delta_m, planning details, metadata
+        containing per-chunk debug info (chunk count, retry count, grip-close idx).
+    """
+    from omni.isaac.core.utils.types import ArticulationAction
+
+    server_url      = payload["server_url"]
+    max_chunks      = int(payload.get("max_chunks", 5))
+    success_dz_m    = float(payload.get("success_dz_m", 0.03))
+    retry_physx     = int(payload.get("retry_physx", 1))
+    n_pc_points     = int(payload.get("n_pc_points", 4096))
+    request_timeout = int(payload.get("request_timeout", 60))
+
+    franka = scene.franka
+    world  = scene.world
+    obj    = scene.obj
+    stage  = scene.stage
+
+    # ── /info handshake to get n_obs, n_action_steps ────────────────
+    try:
+        info = _get_server_info(server_url, timeout=10)
+    except Exception as e:
+        res = ExecutionResult(success=False, failure_stage="server_info")
+        res.metadata["error"] = f"server /info failed: {e}"
+        return res
+    n_obs    = int(info.get("n_obs_steps", 2))
+    n_action = int(info.get("n_action_steps", 8))
+
+    # ── derive pc0 / origin_world if not given ──────────────────────
+    if pc0_world is None or origin_world is None:
+        # Fallback: sample mesh + use placement
+        from sim.evaluation.scene_builder import OBJECT_POSITION
+        placement = scene.object_placement
+        pos_w = np.array(placement.get("position", OBJECT_POSITION), dtype=np.float64)
+        if origin_world is None:
+            origin_world = pos_w
+        if pc0_world is None:
+            # caller MUST provide PC in production; this fallback uses curobo mesh
+            mesh_v = scene.curobo_mesh_vertices
+            if mesh_v is None:
+                res = ExecutionResult(success=False, failure_stage="pc_unavailable")
+                res.metadata["error"] = "pc0_world not given and scene has no curobo mesh"
+                return res
+            # sample N points from mesh vertices (degraded; for true CAD sample,
+            # caller should pre-compute via trimesh.sample.sample_surface)
+            idx = np.random.default_rng(0).integers(0, len(mesh_v), size=n_pc_points)
+            pc0_world = (np.asarray(mesh_v)[idx] + pos_w).astype(np.float32)
+    pc0_G = (pc0_world - origin_world).astype(np.float32)
+
+    initial_obj_pos, _ = obj.get_obj_pos()
+    initial_z = float(initial_obj_pos[2])
+
+    def _build_obs(gripper_state: float):
+        ee_pos_w, ee_q_w = _read_panda_hand_pose(stage)
+        ee_pos_G = (ee_pos_w - origin_world).astype(np.float32)
+        ee_q_G_retarget = _franka_to_retarget_quat(ee_q_w).astype(np.float32)
+        agent_pos = np.concatenate([ee_pos_G, ee_q_G_retarget,
+                                    [np.float32(gripper_state)]]).astype(np.float32)
+        return pc0_G.astype(np.float32), agent_pos
+
+    def _qpos_corrupt() -> bool:
+        try:
+            qa = np.asarray(franka.get_joint_positions(), dtype=np.float64)
+            return (not np.isfinite(qa).all()) or (np.max(np.abs(qa)) > 10.0)
+        except Exception:
+            return True
+
+    # ── reset franka HOME + open gripper (caller already did scene reset) ──
+    franka.open_gripper()
+    for _ in range(5):
+        world.step(render=scene.render)
+
+    obs0 = _build_obs(gripper_state=0.0)
+    obs_window = [obs0] * n_obs
+    last_qpos = np.asarray(franka.get_joint_positions()[:7], dtype=np.float64)
+    executed = []
+    grip_signal_idx = None
+    gripper_closed = False
+    grip_close_initial_z = None
+
+    for chunk in range(max_chunks):
+        # update obs window's gripper-state channel to reflect current physics
+        cur_obs = _build_obs(gripper_state=(1.0 if gripper_closed else 0.0))
+        obs_window[-1] = cur_obs
+        pc_obs = np.stack([o[0] for o in obs_window])
+        ap_obs = np.stack([o[1] for o in obs_window])
+        try:
+            action = _query_dp3_server(server_url, pc_obs, ap_obs, request_timeout)
+        except Exception as e:
+            cprint(f"  ❌ DP3 server error chunk {chunk}: {e}", "red")
+            res = ExecutionResult(success=False, failure_stage="server_predict")
+            res.metadata["error"] = str(e); res.metadata["chunk"] = chunk
+            return res
+
+        # convert each action to world target pose
+        chunk_wps = []
+        chunk_grips = []
+        for a in action:
+            pos_w = a[:3].astype(np.float64) + origin_world
+            q_franka = _retarget_to_franka_quat(a[3:7].astype(np.float64))
+            chunk_wps.append((pos_w, q_franka))
+            chunk_grips.append(float(a[7]))
+
+        # ── IK chain (TODO: titan branch may have its own IK helper; this is a
+        # placeholder. For first pass, port solve_ik_chain from gate3 branch.) ──
+        # For now, use cuRobo motion gen to get joint positions per waypoint:
+        global _CUROBO_MG
+        if _CUROBO_MG is None:
+            _CUROBO_MG = init_curobo(scene)
+        qpos = []
+        ok = []
+        for wp_pos, wp_quat in chunk_wps:
+            try:
+                traj = plan_trajectory(
+                    _CUROBO_MG, scene, wp_pos, wp_quat,
+                    label=f"dp3_chunk{chunk}",
+                    use_object_mesh=False,
+                )
+                if traj is not None and len(traj) > 0:
+                    qpos.append(traj[-1])
+                    ok.append(True)
+                else:
+                    qpos.append(last_qpos.copy())
+                    ok.append(False)
+            except Exception:
+                qpos.append(last_qpos.copy()); ok.append(False)
+        qpos = np.asarray(qpos, dtype=np.float64)
+        ok = np.asarray(ok, dtype=bool)
+        cprint(f"  [chunk {chunk}] IK {ok.sum()}/{n_action} reachable, "
+               f"grip [{min(chunk_grips):.2f}, {max(chunk_grips):.2f}], closed={gripper_closed}",
+               "cyan")
+
+        # ── execute waypoints ──
+        for k in range(n_action):
+            if not ok[k]:
+                continue
+            grip = chunk_grips[k]
+            if not gripper_closed and grip > 0.5:
+                grip_signal_idx = len(executed)
+                grip_close_initial_z = float(obj.get_obj_pos()[0][2])
+                cprint(f"  ◉ DP3 grip≥0.5 @ chunk {chunk} step {k}", "magenta")
+                franka.close_gripper()
+                for _ in range(80):
+                    world.step(render=scene.render)
+                gripper_closed = True
+            if gripper_closed:
+                franka.close_gripper()
+                franka.apply_action(ArticulationAction(
+                    joint_positions=np.concatenate([qpos[k], np.array([None, None])])))
+                for _ in range(3):
+                    world.step(render=scene.render)
+            else:
+                grip_finger = franka.get_joint_positions()[7:9]
+                full_q = np.concatenate([qpos[k], grip_finger])
+                franka.set_joint_positions(full_q)
+                franka.apply_action(ArticulationAction(joint_positions=full_q))
+                for _ in range(2):
+                    world.step(render=scene.render)
+
+            if _qpos_corrupt():
+                cprint(f"  ⚠️ PhysX corrupted Franka qpos at chunk {chunk} step {k}", "red")
+                res = ExecutionResult(success=False, failure_stage="physx_corrupt")
+                res.metadata["chunk"] = chunk; res.metadata["step"] = k
+                return res
+
+            executed.append((chunk_wps[k][0].copy(), chunk_wps[k][1].copy()))
+            last_qpos = qpos[k].copy()
+
+        # ★ early stop: if gripper closed AND obj lifted enough → done
+        if gripper_closed and grip_close_initial_z is not None:
+            obj_pos_now, _ = obj.get_obj_pos()
+            dz_now = float(obj_pos_now[2]) - grip_close_initial_z
+            if dz_now > success_dz_m:
+                cprint(f"  🎯 EARLY STOP @ chunk {chunk}: dz={dz_now*100:.1f}cm", "green")
+                res = ExecutionResult(
+                    success=True, z_delta_m=dz_now,
+                    initial_object_position_world=list(initial_obj_pos),
+                    final_object_position_world=list(obj.get_obj_pos()[0]),
+                )
+                res.metadata.update({
+                    "policy": "dp3_online", "n_chunks": chunk + 1,
+                    "grip_signal_idx": grip_signal_idx,
+                    "n_executed": len(executed), "early_stop": True,
+                })
+                return res
+
+        # roll obs window
+        new_obs = _build_obs(gripper_state=(1.0 if gripper_closed else 0.0))
+        obs_window = obs_window[1:] + [new_obs]
+
+    # ── exited loop without early stop ──
+    for _ in range(80):
+        world.step(render=scene.render)
+    if grip_close_initial_z is None:
+        cprint(f"  ⚠️ no grip-close signal across {max_chunks} chunks", "yellow")
+        res = ExecutionResult(success=False, failure_stage="no_grip_signal")
+        res.metadata.update({"policy": "dp3_online", "n_chunks": max_chunks,
+                             "n_executed": len(executed)})
+        return res
+    obj_after, _ = obj.get_obj_pos()
+    dz = float(obj_after[2]) - grip_close_initial_z
+    success = dz > success_dz_m
+    cprint(f"  object Z Δ = {dz*100:+.1f}cm → "
+           f"{'GRASPED + LIFTED' if success else 'not lifted'}",
+           "green" if success else "red")
+    res = ExecutionResult(
+        success=bool(success), z_delta_m=dz,
+        failure_stage=None if success else "not_lifted",
+        initial_object_position_world=list(initial_obj_pos),
+        final_object_position_world=list(obj_after),
+    )
+    res.metadata.update({
+        "policy": "dp3_online", "n_chunks": max_chunks,
+        "grip_signal_idx": grip_signal_idx,
+        "n_executed": len(executed), "early_stop": False,
+    })
+    return res
