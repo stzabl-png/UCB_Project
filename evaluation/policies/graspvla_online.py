@@ -49,6 +49,10 @@ class GraspVLAOnlinePolicyConfig:
     request_timeout_ms: int = 60_000
     # proprio history buffer length (server uses [-4] and [-1])
     proprio_history: int = 4
+    # GraspVLA model expects EE = panda_EE + REAL_EEF_TO_SIM_EEF offset.
+    # Standard Franka finger → identity (no shift). Extended finger → +3cm Z.
+    # Source: franka_ros_controller.py:35-46. Our setup uses standard finger.
+    extended_finger: bool = False
 
 
 class GraspVLAOnlinePolicy(EvaluationPolicy):
@@ -82,6 +86,7 @@ class GraspVLAOnlinePolicy(EvaluationPolicy):
                 "side_view_quat":    list(self.config.side_view_quat_wxyz),
                 "request_timeout_ms": self.config.request_timeout_ms,
                 "proprio_history":   self.config.proprio_history,
+                "extended_finger":   self.config.extended_finger,
             },
             metadata={
                 "policy_name": self.name,                  # ← dispatcher discriminator

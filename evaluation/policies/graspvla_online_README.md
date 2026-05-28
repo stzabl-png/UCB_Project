@@ -56,10 +56,14 @@ def execute_closed_loop_actions(scene, payload):
 
 2. **Proprio history buffer** (length 4):
    - Per chunk, read EE pose → 7D `[x, y, z, roll, pitch, yaw, gripper]`
-   - **IN ROBOT BASE FRAME** — compute `T_base_world` once at setup,
-     transform `ee_world` via `T_base_world @ ee_world`
-   - gripper convention: **-1=open, +1=close** (negate of our usual)
-   - Append to ring buffer; pass list of last 4
+   - **IN panda_link0 (Franka base) FRAME** — compute `T_base_world` once at
+     setup, transform `ee_world` via `T_base_world @ ee_world`
+   - **EE point**: `panda_EE + REAL_EEF_TO_SIM_EEF`. Our standard finger →
+     identity, no shift. If using extended finger, add +3cm Z (EE local).
+   - rpy axes: **transforms3d 'sxyz'** (extrinsic XYZ)
+   - **gripper: +1 = OPEN, -1 = CLOSE** (verified in 3 source files —
+     opposite of what we initially thought!)
+   - Append to ring buffer; pass list of last 4 (server uses [-4] and [-1])
 
 3. **ZMQ client**:
    ```python
@@ -70,38 +74,53 @@ def execute_closed_loop_actions(scene, payload):
    sock.setsockopt(zmq.RCVTIMEO, payload["request_timeout_ms"])
    ```
 
-4. **Per-chunk loop**:
+4. **Per-chunk loop** (verified against grasp_mode.py:_run_once):
    ```python
+   import transforms3d as t3d
    for chunk in range(max_chunks):
-       front_img = front_cam.get_rgb()   # (H, W, 3) uint8
+       front_img = front_cam.get_rgb()  # (256, 256, 3) uint8
        side_img  = side_cam.get_rgb()
-       ee_pose_base = read_panda_hand_in_robot_base_frame(stage)
-       proprio_buffer.append(ee_pose_base)
 
+       # Read EE pose in base frame as [x,y,z, roll,pitch,yaw, gripper]
+       ee_pose_base = read_eef_pose_in_base_frame(stage, panda_link0_pose,
+                                                   extended_finger=False)
+
+       proprio_buffer.append(ee_pose_base)
        req = {
            "text": payload["instruction"],
            "front_view_image": [front_img],
            "side_view_image": [side_img],
-           "proprio_array": proprio_buffer[-4:],
+           # NOTE: real-world-controller uses [prev_eef_pose * 3, eef_pose]
+           # to fill a length-4 buffer when no history. We do same:
+           "proprio_array": [proprio_buffer[-2]] * 3 + [proprio_buffer[-1]]
+                            if len(proprio_buffer) >= 2 else [ee_pose_base]*4,
        }
        sock.send_pyobj(req)
        resp = sock.recv_pyobj()
-       deltas = resp["result"]  # (16, 7) after server's 2× interpolation
+       deltas = resp["result"]  # (16, 7) — 8 model × 2× interpolation
 
-       # integrate deltas in robot-base frame
-       current_ee_base = ee_pose_base
+       # Integrate deltas in BASE FRAME (left-multiply for rotation!)
+       # Verified against grasp_mode.py:109-115:
+       current_pos = ee_pose_base[:3]
+       current_rot_mat = t3d.euler.euler2mat(*ee_pose_base[3:6])  # sxyz
        for delta in deltas:
-           target_xyz = current_ee_base[:3] + delta[:3]
-           target_rpy = current_ee_base[3:6] + delta[3:6]
-           grip = delta[6]  # -1=open, +1=close
-           if grip > 0.5: franka.close_gripper()
-           elif grip < -0.5: franka.open_gripper()
-           # IK + execute (transform target back to world for IK)
-           target_world_xyz = T_world_base @ target_xyz
-           qpos = ik_solve(target_world_xyz, target_world_quat, ...)
+           assert delta[6] in [-1, 0, +1]
+           target_pos = current_pos + delta[:3]               # pure add
+           target_rot_mat = (t3d.euler.euler2mat(*delta[3:6]) @ current_rot_mat)
+           # ★ LEFT-multiply (base frame composition), NOT EE-local right-mult ★
+           grip = delta[6]
+           if grip > 0:    franka.open_gripper()    # +1 = OPEN!
+           elif grip < 0:  franka.close_gripper()   # -1 = CLOSE!
+           # else (0): no change
+
+           # Transform target back to world frame for IK
+           target_world_pos = panda_link0_pose @ np.append(target_pos, 1.0)
+           target_world_quat = t3d.quaternions.mat2quat(R_world_base @ target_rot_mat)
+           qpos = ik_solve(target_world_pos[:3], target_world_quat, ...)
            franka.set_joint_positions(qpos)
            world.step()
-           current_ee_base += delta  # update accumulator
+           current_pos = target_pos
+           current_rot_mat = target_rot_mat
 
        # check early-stop
        obj_z = obj.get_obj_pos()[0][2]
