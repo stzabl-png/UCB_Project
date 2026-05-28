@@ -140,6 +140,38 @@ def scan_merged_objects(merged_dir: str) -> dict[str, int]:
     return counts
 
 
+def is_trusted_grasp_group(g: h5py.Group) -> bool:
+    """Same rules as prepare_affordance_executed.is_trusted_grasp."""
+    if "gripper_tips_loc" not in g:
+        return False
+    if bool(g.attrs.get("gripper_tips_trusted", False)):
+        return True
+    if str(g.attrs.get("gripper_tips_source", "")) == "legacy_post_lift":
+        return False
+    return str(g.attrs.get("gripper_tips_snapshot", "at_close")) == "at_close"
+
+
+def count_trusted_grasps_in_merged(path: str) -> int:
+    if not os.path.isfile(path):
+        return 0
+    with h5py.File(path, "r") as f:
+        if "successful_grasps" not in f:
+            return 0
+        grp = f["successful_grasps"]
+        return sum(1 for key in grp.keys() if is_trusted_grasp_group(grp[key]))
+
+
+def scan_merged_trusted_objects(merged_dir: str) -> dict[str, int]:
+    """obj_id -> trusted successful_grasps count in merged/{obj}_robot_gt_merged.hdf5."""
+    counts: dict[str, int] = {}
+    pattern = os.path.join(os.path.abspath(merged_dir), "*_robot_gt_merged.hdf5")
+    for path in sorted(glob.glob(pattern)):
+        base = os.path.basename(path)
+        obj_id = base[: -len("_robot_gt_merged.hdf5")]
+        counts[obj_id] = count_trusted_grasps_in_merged(path)
+    return counts
+
+
 def load_registry(path: str) -> dict:
     if not os.path.isfile(path):
         return {"version": 1, "candidates": {}}
