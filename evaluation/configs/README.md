@@ -22,6 +22,29 @@ python tools/package_eval_ge30_usd_bundle.py
 # → output/eval_objects_ge30_sim_bundle/
 ```
 
+## Multi-round ablation (`tools/run_round_eval.py`)
+
+Setups **1a–3b** × **10 rounds** (default): each run is full `eval_pool` (candidate gen + sim), 5 trials/object, results under `output/round_eval/{round}_{setup}/`, summary CSV at `output/round_eval/round_eval_summary.csv`.
+
+```bash
+python tools/run_round_eval.py \
+  --candidate-gpu-ids 0,1 --candidate-workers 6 \
+  --sim-gpu-ids 0,1 --sim-per-gpu 4
+```
+
+Each setup runs `eval_pool` with **`--loud`** by default (`--no-loud` for quiet `--log-only`).
+
+```bash
+# Only 2a and 3b
+python tools/run_round_eval.py --setups 2a,3b ...
+
+# From 2a through 3b each round (skip 1a,1b)
+python tools/run_round_eval.py --start-setup 2a ...
+
+# Round 5 onward, only unseen ablations
+python tools/run_round_eval.py --start-round 5 --setups 1b,2b,3b --resume
+```
+
 ## Unseen sim bundle (`eval_unseen_all.csv`)
 
 ```bash
