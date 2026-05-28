@@ -55,14 +55,33 @@ PIPELINE_INSTRUCTIONS.md
 /checkpoints
 
 # ---------------------------------------------------------------------------
-# Local eval "bundle" artifacts (do not commit)
+# Local eval sim bundles (HF distribution — not source; do not commit)
 # ---------------------------------------------------------------------------
-# Bundled USD/candidates packs and local staging directories (generated data)
+# Bundle directories (also under output/, listed explicitly for clarity)
+output/eval_unseen_sim_bundle/
+output/eval_objects_ge30_sim_bundle/
+# Pool HDF5 used to build bundle candidates/
+output/evaluation/unseen_yaw0_n500_poolgen/
+output/evaluation/ge30_v6cond_yaw0_n500/
+# Archives / HF upload staging
+eval_unseen_sim_bundle.tar.gz
+eval_objects_ge30_sim_bundle.tar.gz
+*a2g_eval_assets_unseen*/
+# Any other *bundle* output trees
 *bundle*/
 *Bundle*/
 apple_001/
 
-# Bundle helper scripts (local packaging / migration utilities)
+# Bundle packaging / migration scripts (local utilities; live on HF with assets)
+tools/package_eval_unseen_sim_bundle.py
+tools/migrate_eval_unseen_pool_candidates_to_bundle.py
+tools/package_eval_ge30_usd_bundle.py
+tools/migrate_eval_pool_candidates_to_bundle.py
+tools/convert_bundle_candidates_hdf5_to_json.py
+tools/check_bundle_consistency.py
+tools/slim_eval_ge30_bundle.py
+tools/strip_bundle_scale_and_scores.py
+tools/scene_layout_reference_bundle.py
 tools/*bundle*.py
 tools/*Bundle*.py
 
