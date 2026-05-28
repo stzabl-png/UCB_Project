@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import json
-import os
 import shlex
 import subprocess
 from pathlib import Path
 
-from evaluation.eval_single import default_candidate_python, resolve_generate_mesh
+from evaluation.eval_single import (
+    candidate_generation_env,
+    default_candidate_python,
+    resolve_generate_mesh,
+)
 
 PROJ = Path(__file__).resolve().parents[1]
 
@@ -84,6 +87,7 @@ def run_candidate_batch_generation(
     max_batches: int,
     object_scale: float,
     no_hard_gate: bool = False,
+    no_filtering: bool = False,
     pdm_checkpoint: str | Path | None = None,
     pose_stats: str | Path | None = None,
     affordance_checkpoint: str | Path | None = None,
@@ -131,6 +135,8 @@ def run_candidate_batch_generation(
             cmd.extend(["--dataset", str(dataset)])
         if no_hard_gate:
             cmd.append("--no-hard-gate")
+        if no_filtering:
+            cmd.append("--no-filtering")
         if pdm_checkpoint:
             cmd.extend(["--pdm-checkpoint", str(Path(pdm_checkpoint).expanduser().resolve())])
         if pose_stats:
@@ -139,7 +145,7 @@ def run_candidate_batch_generation(
             cmd.extend(
                 ["--affordance-checkpoint", str(Path(affordance_checkpoint).expanduser().resolve())]
             )
-        env = os.environ.copy()
+        env = candidate_generation_env()
         env["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
         env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
         log_f = log_path.open("w", encoding="utf-8")

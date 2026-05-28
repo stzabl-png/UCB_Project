@@ -156,6 +156,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Skip grasp hard gates in batch_pdm_candidates (accept raw PDM samples).",
     )
     p.add_argument(
+        "--no-filtering",
+        action="store_true",
+        help="Disable candidate filtering (hard gates + scoring) during batch PDM generation.",
+    )
+    p.add_argument(
         "--stop-after-solutions",
         action="store_true",
         help="Only generate candidates + solutions; do not launch Isaac workers.",
@@ -568,6 +573,8 @@ def main() -> None:
         )
         if not args.no_hard_gate:
             _important(args, "[pool] hard gate ON (pass --no-hard-gate to disable)")
+        if not args.no_filtering:
+            _important(args, "[pool] filtering ON (pass --no-filtering to disable)")
         tasks = build_candidate_tasks(
             obj_ids=obj_ids,
             yaw_values_by_obj=yaw_values_by_obj,
@@ -587,6 +594,7 @@ def main() -> None:
             max_batches=int(args.candidate_max_batches),
             object_scale=float(args.object_scale),
             no_hard_gate=bool(args.no_hard_gate),
+            no_filtering=bool(args.no_filtering),
             pdm_checkpoint=args.pdm_checkpoint,
             pose_stats=args.pose_stats,
             affordance_checkpoint=args.affordance_checkpoint,
@@ -621,6 +629,7 @@ def main() -> None:
         candidate_max_batches=args.candidate_max_batches,
         object_scale=args.object_scale,
         no_hard_gate=bool(args.no_hard_gate),
+        no_filtering=bool(args.no_filtering),
         pdm_checkpoint=args.pdm_checkpoint,
         pose_stats=args.pose_stats,
         affordance_checkpoint=args.affordance_checkpoint,

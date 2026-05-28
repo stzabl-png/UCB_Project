@@ -22,6 +22,28 @@ python tools/package_eval_ge30_usd_bundle.py
 # → output/eval_objects_ge30_sim_bundle/
 ```
 
+## Unseen sim bundle (`eval_unseen_all.csv`)
+
+```bash
+# 1) USD + manifest
+python tools/package_eval_unseen_sim_bundle.py
+
+# 2) 500 pool candidates per object (HDF5 only)
+python evaluation/eval_pool.py \
+  --obj-list evaluation/configs/eval_unseen_all.csv \
+  --generate-candidate-each-trial \
+  --candidates-only \
+  --trials-per-obj-yaw 500 \
+  --z-yaw-deg 0 \
+  --no-filtering \
+  --result-dir output/evaluation/unseen_yaw0_n500_poolgen \
+  --candidate-gpu-ids 0,1 \
+  --candidate-workers 6
+
+# 3) HDF5 → candidates/{obj_id}.json in bundle
+python tools/migrate_eval_unseen_pool_candidates_to_bundle.py
+```
+
 ## Deprecated lists
 
 - **`eval_objects_merged_success_ge20.csv`** — round≥3, success≥20 (97 objects).

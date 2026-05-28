@@ -24,7 +24,7 @@ def resolve_mesh_path(obj_id: str, mesh_root: str | Path, dataset: str | None = 
         root / ds_guess / obj_id / "mesh.ply",
         root / obj_id / "mesh.ply",
     ]
-    for ds in ("oakink", "ycb", "arctic", "dexycb", "egocentric", "ho3d_v3"):
+    for ds in ("unseen", "oakink", "ycb", "arctic", "dexycb", "egocentric", "ho3d_v3"):
         candidates.append(root / ds / obj_id / "mesh.ply")
     for path in candidates:
         if path.is_file():

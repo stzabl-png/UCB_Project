@@ -94,9 +94,12 @@ rsync -a /tmp/a2g_eval_assets/ ./
 
 ```text
 data_hub/meshes/SAM3DMesh/rotated_mesh/                 # batch candidate generation 输入 mesh
-data_hub/ProcessedData/obj_meshes/{oakink,ycb}/{obj_id}/scale.json
+data_hub/meshes/SAM3DMesh/rotated_mesh/unseen/{obj_id}/mesh.ply
+                                                        # unseen 物体（obj_id 如 unseen_000）
+data_hub/ProcessedData/obj_meshes/{oakink,ycb,unseen}/{obj_id}/scale.json
                                                         # 仅 metric scale；eval 不读 obj_meshes/mesh.ply 或 rotation.json
 output/obj_usd/                                         # IsaacSim object USD + *_meta.json
+output/obj_usd/unseen/                                  # unseen USD + *_meta.json
 output/affordance_no_rot_executed/min20/checkpoints_v6/best_v6_model.pth
 output/pdm/checkpoints_yaw/best_model.pth
 sim/assets_scene/                                       # 可视背景/scene assets

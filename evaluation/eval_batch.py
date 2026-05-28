@@ -151,7 +151,7 @@ def find_mesh_for_obj(mesh_root: Path, obj_id: str, glob_pat: str) -> Path | Non
     nested = mesh_root / obj_id / "mesh.ply"
     if nested.is_file():
         return nested
-    for ds in ("oakink", "ycb", "arctic", "dexycb", "egocentric", "ho3d_v3"):
+    for ds in ("unseen", "oakink", "ycb", "arctic", "dexycb", "egocentric", "ho3d_v3"):
         nested = mesh_root / ds / obj_id / "mesh.ply"
         if nested.is_file():
             return nested

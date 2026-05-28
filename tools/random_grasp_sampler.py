@@ -118,6 +118,8 @@ def load_canonical_rotations():
 def infer_obj_dataset(obj_id: str, dataset: str | None = None) -> str:
     if dataset:
         return dataset
+    if obj_id.startswith('unseen_'):
+        return 'unseen'
     if obj_id.startswith('ycb_dex_'):
         return 'dexycb'
     if obj_id.startswith('arctic_'):

@@ -146,6 +146,8 @@ def generated_candidate_output_name(obj_id: str, z_yaw_deg: float) -> str:
 def infer_rotated_mesh_dataset(obj_id: str, dataset: str | None) -> str:
     if dataset:
         return "ycb" if dataset == "dexycb" else dataset
+    if obj_id.startswith("unseen_"):
+        return "unseen"
     if obj_id.startswith("ycb_dex_"):
         return "ycb"
     if obj_id.startswith("arctic_"):
@@ -167,7 +169,7 @@ def resolve_generate_mesh(args: argparse.Namespace) -> tuple[Path, bool]:
         mesh_root / ds / args.obj_id / "mesh.ply",
         mesh_root / args.obj_id / "mesh.ply",
     ]
-    for extra_ds in ("oakink", "ycb", "arctic", "dexycb", "egocentric", "ho3d_v3"):
+    for extra_ds in ("unseen", "oakink", "ycb", "arctic", "dexycb", "egocentric", "ho3d_v3"):
         candidates.append(mesh_root / extra_ds / args.obj_id / "mesh.ply")
     for path in candidates:
         if path.is_file():
@@ -220,6 +222,7 @@ def maybe_generate_candidate(args: argparse.Namespace) -> str | None:
         "--z-yaw-deg",
         str(float(args.z_yaw_deg)),
         "--no-vis",
+        "--no-affordance-output",
         "--random-seed",
     ]
     if is_rotated_sam3d:
@@ -356,10 +359,27 @@ def maybe_reexec_with_xvfb(args: argparse.Namespace, *, headless: bool) -> None:
     """For video recording on headless machines, restart under xvfb-run once."""
     if not args.record_video or headless:
         return
-    if args.no_auto_xvfb or os.environ.get("DISPLAY"):
+    if args.no_auto_xvfb:
         return
     if os.environ.get("A2G_EVAL_XVFB_ACTIVE") == "1":
         return
+
+    display = os.environ.get("DISPLAY")
+    if display:
+        # DISPLAY can be set but unusable (e.g. stale SSH forwarding). In that
+        # case Isaac may start and then immediately shut down when the first
+        # UI tick runs. Prefer to fall back to Xvfb automatically.
+        try:
+            subprocess.run(
+                ["xdpyinfo"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=1.0,
+                check=True,
+            )
+            return
+        except Exception:
+            pass
 
     xvfb_run = shutil.which("xvfb-run")
     if xvfb_run is None:
@@ -376,9 +396,9 @@ def maybe_reexec_with_xvfb(args: argparse.Namespace, *, headless: bool) -> None:
     env = os.environ.copy()
     env["A2G_EVAL_XVFB_ACTIVE"] = "1"
     if not args.log_only:
-        print("[eval] --record-video: DISPLAY is missing; restarting under xvfb-run")
+        print("[eval] --record-video: DISPLAY is missing; restarting under xvfb-run", flush=True)
         if args.loud:
-            print("[eval] " + " ".join(cmd))
+            print("[eval] " + " ".join(cmd), flush=True)
     os.execvpe(xvfb_run, cmd, env)
 
 
@@ -386,7 +406,10 @@ def main() -> None:
     parser = build_parser()
     args, _ = parser.parse_known_args()
 
-    headless = bool(args.headless)
+    # If DISPLAY is missing, Isaac may start without creating a default window,
+    # while still loading viewport UI extensions; that can immediately trigger
+    # UI-related errors and an early shutdown. Default to headless in that case.
+    headless = bool(args.headless) or (not os.environ.get("DISPLAY") and not args.record_video)
     if args.record_video and headless:
         if not args.log_only:
             print("[eval] --record-video: forcing headed mode (viewport capture needs DISPLAY / Xvfb)")
