@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run multi-round evaluation ablations (1a–3b) via eval_pool and aggregate results to CSV."""
+"""Run multi-round evaluation ablations (1a–4b) via eval_pool and aggregate results to CSV."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ DEFAULT_ROOT = PROJ / "output" / "round_eval"
 DEFAULT_SUMMARY_CSV = "round_eval_summary.csv"
 DEFAULT_ROUNDS = 10
 DEFAULT_TRIALS = 5
-SETUP_ORDER = ("1a", "1b", "2a", "2b", "3a", "3b")
+SETUP_ORDER = ("1a", "1b", "2a", "2b", "3a", "3b", "4a", "4b")
 
 GE30_CSV = PROJ / "evaluation" / "configs" / "eval_objects_merged_success_ge30.csv"
 UNSEEN_CSV = PROJ / "evaluation" / "configs" / "eval_unseen_all.csv"
@@ -101,6 +101,20 @@ SETUPS: dict[str, SetupSpec] = {
         hp_affordance=False,
         no_filtering=True,
         description="default affordance, no filter, unseen",
+    ),
+    "4a": SetupSpec(
+        "4a",
+        GE30_CSV,
+        hp_affordance=True,
+        no_filtering=False,
+        description="HP affordance, with filter, GE30",
+    ),
+    "4b": SetupSpec(
+        "4b",
+        UNSEEN_CSV,
+        hp_affordance=True,
+        no_filtering=False,
+        description="HP affordance, with filter, unseen",
     ),
 }
 
@@ -341,7 +355,7 @@ def _run_one(
 
 
 def _parse_setups(text: str | None) -> list[str]:
-    """Return setup ids in canonical order (1a … 3b)."""
+    """Return setup ids in canonical order (1a … 4b)."""
     if not text:
         return list(SETUP_ORDER)
     requested = [s.strip() for s in text.split(",") if s.strip()]
@@ -369,7 +383,7 @@ def _apply_start_setup(setup_ids: list[str], start_setup: str | None) -> list[st
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        description="Multi-round eval_pool runner for setups 1a–3b with CSV summary",
+        description="Multi-round eval_pool runner for setups 1a–4b with CSV summary",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument(
@@ -384,8 +398,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="IDS",
         help=(
-            "Comma-separated subset to run, e.g. 2a,3b (order ignored; always 1a→3b). "
-            "Default: all six setups."
+            "Comma-separated subset to run, e.g. 2a,4b (order ignored; always 1a→4b). "
+            "Default: all eight setups."
         ),
     )
     p.add_argument(
@@ -393,7 +407,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="ID",
         help=(
-            "Start each round from this setup onward (inclusive), e.g. 2a runs 2a,2b,3a,3b "
+            "Start each round from this setup onward (inclusive), e.g. 2a runs 2a…4b "
             "when --setups is omitted. Must appear in the active --setups list."
         ),
     )
