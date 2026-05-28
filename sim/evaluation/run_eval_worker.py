@@ -186,16 +186,12 @@ def _execute_task(scene, task: dict, chunk: dict, result_dir: Path):
         if policy_output.kind == "open_loop_grasp":
             execution = execute_open_loop_grasp(scene, policy_output.command)
         else:
-            # closed_loop_actions — pc0_world / origin_world supplied by task
-            # (caller can pre-sample mesh once per (obj_id, yaw) and pass)
+            # closed_loop_actions — PC is sampled from rotated_mesh PLY inside
+            # the executor (via model.pdm.mesh_points.prepare_metric_point_cloud,
+            # added in titan 188ff39). pc0_world/origin_world args remain
+            # optional overrides for advanced callers.
             payload = dict(policy_output.actions)
-            pc0_world    = task.get("pc0_world")
-            origin_world = task.get("origin_world")
-            execution = execute_closed_loop_actions(
-                scene, payload,
-                pc0_world=np.asarray(pc0_world, dtype=np.float32) if pc0_world is not None else None,
-                origin_world=np.asarray(origin_world, dtype=np.float64) if origin_world is not None else None,
-            )
+            execution = execute_closed_loop_actions(scene, payload)
         if recorder is not None:
             video_path = recorder.stop()
             execution.video_path = video_path

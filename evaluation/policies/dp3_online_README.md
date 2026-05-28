@@ -60,10 +60,15 @@ schema but not yet implemented.
    The server file lives in the **gate3-curobo-ik** branch; verify it's
    accessible from this worktree (cross-branch shared file).
 
-2. **Tasks must include `pc0_world` and `origin_world`** in the task dict
-   (the executor cannot infer these robustly from the SceneSpec alone for
-   arbitrary obj). Suggested: pre-sample the obj mesh once per (obj_id, yaw)
-   and embed in the task spec.
+2. **PC sampling is automatic** (since titan 188ff39's `model/pdm/mesh_points.py`).
+   The executor calls `prepare_metric_point_cloud(obj_id, mesh_root, dataset)`
+   to sample 4096 surface points from the rotated_mesh PLY. The default
+   `mesh_root="data_hub/meshes/SAM3DMesh/rotated_mesh"` works after running
+   the eval_assets bundle download. Override via `payload["mesh_root"]`.
+
+3. **No partner task-spec changes needed** — same task JSON format as
+   a2g_pdm. Just change `policy_output.kind` to `closed_loop_actions` (use
+   `dp3_solution_gen.py`).
 
 ## Per-ep policy behavior (matches gate3-curobo-ik DP3 eval)
 

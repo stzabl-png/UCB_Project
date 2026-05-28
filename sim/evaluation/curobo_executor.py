@@ -627,26 +627,40 @@ def execute_closed_loop_actions(scene, payload: dict, pc0_world: np.ndarray | No
     n_obs    = int(info.get("n_obs_steps", 2))
     n_action = int(info.get("n_action_steps", 8))
 
-    # ── derive pc0 / origin_world if not given ──────────────────────
-    if pc0_world is None or origin_world is None:
-        # Fallback: sample mesh + use placement
-        from sim.evaluation.scene_builder import OBJECT_POSITION
-        placement = scene.object_placement
-        pos_w = np.array(placement.get("position", OBJECT_POSITION), dtype=np.float64)
-        if origin_world is None:
-            origin_world = pos_w
-        if pc0_world is None:
-            # caller MUST provide PC in production; this fallback uses curobo mesh
-            mesh_v = scene.curobo_mesh_vertices
-            if mesh_v is None:
-                res = ExecutionResult(success=False, failure_stage="pc_unavailable")
-                res.metadata["error"] = "pc0_world not given and scene has no curobo mesh"
-                return res
-            # sample N points from mesh vertices (degraded; for true CAD sample,
-            # caller should pre-compute via trimesh.sample.sample_surface)
-            idx = np.random.default_rng(0).integers(0, len(mesh_v), size=n_pc_points)
-            pc0_world = (np.asarray(mesh_v)[idx] + pos_w).astype(np.float32)
-    pc0_G = (pc0_world - origin_world).astype(np.float32)
+    # ── sample PC from rotated_mesh PLY (partner's prepare_metric_point_cloud,
+    # added in titan 188ff39) ───────────────────────────────────────────────
+    # Priority: caller-supplied pc0_world > mesh-sampled from obj_id.
+    from sim.evaluation.scene_builder import OBJECT_POSITION
+    placement = scene.object_placement
+    pos_w = np.array(placement.get("position", OBJECT_POSITION), dtype=np.float64)
+    if origin_world is None:
+        origin_world = pos_w
+    if pc0_world is None:
+        try:
+            from model.pdm.mesh_points import prepare_metric_point_cloud
+        except ImportError as e:
+            res = ExecutionResult(success=False, failure_stage="pc_unavailable")
+            res.metadata["error"] = f"model.pdm.mesh_points import failed: {e}"
+            return res
+        mesh_root = payload.get("mesh_root", "data_hub/meshes/SAM3DMesh/rotated_mesh")
+        dataset   = getattr(scene.spec, "dataset", None) or "oakink"
+        obj_id    = scene.spec.obj_id
+        try:
+            pts_canonical, _, mesh_path = prepare_metric_point_cloud(
+                obj_id, mesh_root=mesh_root, dataset=dataset,
+                num_points=n_pc_points, seed=0,
+            )
+        except Exception as e:
+            res = ExecutionResult(success=False, failure_stage="mesh_sample")
+            res.metadata["error"] = f"prepare_metric_point_cloud({obj_id}, {dataset}): {e}"
+            return res
+        # mesh canonical → world: apply obj quat (yaw aug) + spawn translation
+        obj_quat_wxyz = np.array(placement.get("quat_wxyz", [1, 0, 0, 0]), dtype=np.float64)
+        R_obj = Rotation.from_quat([obj_quat_wxyz[1], obj_quat_wxyz[2],
+                                    obj_quat_wxyz[3], obj_quat_wxyz[0]]).as_matrix()
+        pc0_world = (pts_canonical @ R_obj.T + pos_w).astype(np.float32)
+        cprint(f"  📍 sampled PC from {mesh_path} ({n_pc_points} pts, dataset={dataset})", "cyan")
+    pc0_G = (np.asarray(pc0_world, dtype=np.float32) - origin_world).astype(np.float32)
 
     initial_obj_pos, _ = obj.get_obj_pos()
     initial_z = float(initial_obj_pos[2])
