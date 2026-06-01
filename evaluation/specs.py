@@ -43,6 +43,7 @@ class SceneSpec:
     object_orientation_euler_deg: list[float] = field(default_factory=list)
     object_quat_wxyz: list[float] | None = None
     sim_z_yaw_deg: float = 0.0
+    obj_xy_offset: list[float] = field(default_factory=lambda: [0.0, 0.0])
     seed: int = 0
     robot_position: list[float] = field(default_factory=list)
     robot_orientation_euler_deg: list[float] = field(default_factory=list)

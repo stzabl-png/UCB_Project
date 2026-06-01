@@ -17,6 +17,7 @@ from evaluation.eval_single import (
 )
 from evaluation.policies.a2g_pdm import A2GPDMPolicy, A2GPDMPolicyConfig
 from evaluation.randomness import fresh_rng, resolve_policy_seed
+from evaluation.placement import resolve_obj_xy_offset
 from evaluation.yaw import resolve_z_yaw_deg
 
 
@@ -102,8 +103,17 @@ def make_solution(
     selection: str,
     candidate_index: int,
     policy_seed: int | None,
+    random_obj_xy: bool = False,
+    obj_xy_jitter_m: float = 0.05,
 ) -> dict[str, Any]:
     episode_id = build_episode_id(obj_id, policy, trial, z_yaw_deg)
+    dx, dy = resolve_obj_xy_offset(
+        random_obj_xy=bool(random_obj_xy),
+        obj_xy_jitter_m=float(obj_xy_jitter_m),
+        obj_id=obj_id,
+        trial=int(trial),
+        sim_z_yaw_deg=float(z_yaw_deg),
+    )
     if policy != "a2g_pdm":
         raise ValueError(f"unsupported policy: {policy}")
     seed = None if policy_seed is None else resolve_policy_seed(policy_seed, trial=trial)
@@ -123,6 +133,9 @@ def make_solution(
         "policy": policy,
         "trial": int(trial),
         "z_yaw_deg": float(z_yaw_deg),
+        "obj_xy_offset": [float(dx), float(dy)],
+        "random_obj_xy": bool(random_obj_xy),
+        "obj_xy_jitter_m": float(obj_xy_jitter_m),
         "candidate_hdf5": os.path.abspath(candidate_hdf5),
         "selection": selection,
         "candidate_index": int(candidate_index),
@@ -196,6 +209,8 @@ def generate_solutions(
     candidate_per_gpu: int | None = None,
     reuse_existing: bool = True,
     dry_run: bool = False,
+    random_obj_xy: bool = False,
+    obj_xy_jitter_m: float = 0.05,
 ) -> dict:
     sol_dir = result_dir / "solutions"
     sol_dir.mkdir(parents=True, exist_ok=True)
@@ -266,6 +281,9 @@ def generate_solutions(
                         "policy": policy,
                         "trial": int(trial),
                         "z_yaw_deg": float(yaw),
+                        "obj_xy_offset": [0.0, 0.0],
+                        "random_obj_xy": bool(random_obj_xy),
+                        "obj_xy_jitter_m": float(obj_xy_jitter_m),
                         "candidate_hdf5": "",
                         "selection": selection,
                         "candidate_index": int(candidate_index),
@@ -302,6 +320,8 @@ def generate_solutions(
                         selection=solution_selection,
                         candidate_index=solution_index,
                         policy_seed=policy_seed,
+                        random_obj_xy=bool(random_obj_xy),
+                        obj_xy_jitter_m=float(obj_xy_jitter_m),
                     )
                     write_json(sol_path, sol)
                     obj_new += 1

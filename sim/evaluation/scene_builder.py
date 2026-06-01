@@ -62,7 +62,12 @@ def find_obj_usd_path(obj_id: str) -> str | None:
     return next((str(p) for p in usd_search_paths if p.exists()), None)
 
 
-def resolve_object_placement(obj_id: str, object_scale: float, sim_z_yaw_deg: float = 0.0) -> dict:
+def resolve_object_placement(
+    obj_id: str,
+    object_scale: float,
+    sim_z_yaw_deg: float = 0.0,
+    obj_xy_offset: tuple[float, float] | list[float] | None = None,
+) -> dict:
     """Resolve table placement using the same conventions as run_grasp_sim.py."""
     override = OBJECT_ROTATION_OVERRIDES.get(obj_id, None)
     obj_orientation = list(OBJECT_ORIENTATION)
@@ -88,12 +93,19 @@ def resolve_object_placement(obj_id: str, object_scale: float, sim_z_yaw_deg: fl
     if abs(yaw) > 1e-9:
         obj_orientation[2] = float(obj_orientation[2]) + yaw
 
+    dx, dy = 0.0, 0.0
+    if obj_xy_offset is not None:
+        off = np.asarray(obj_xy_offset, dtype=np.float64).reshape(2)
+        dx, dy = float(off[0]), float(off[1])
     obj_pos = list(OBJECT_POSITION)
+    obj_pos[0] += dx
+    obj_pos[1] += dy
     obj_pos[2] += obj_z_offset
     return {
         "pos": obj_pos,
         "ori": obj_orientation,
         "z_offset": obj_z_offset,
+        "obj_xy_offset": [dx, dy],
         "sim_z_yaw_deg": yaw,
         "usd_path": usd_path,
     }
@@ -113,8 +125,26 @@ def build_scene_spec(
     sim_z_yaw_deg: float,
     seed: int,
     candidate_hdf5: str | None = None,
+    obj_xy_offset: list[float] | tuple[float, float] | None = None,
+    random_obj_xy: bool = False,
+    obj_xy_jitter_m: float = 0.05,
 ) -> SceneSpec:
-    placement = resolve_object_placement(obj_id, object_scale, sim_z_yaw_deg)
+    from evaluation.placement import resolve_obj_xy_offset
+
+    dx, dy = resolve_obj_xy_offset(
+        random_obj_xy=bool(random_obj_xy),
+        obj_xy_jitter_m=float(obj_xy_jitter_m),
+        obj_id=obj_id,
+        trial=int(seed),
+        sim_z_yaw_deg=float(sim_z_yaw_deg),
+        obj_xy_offset=obj_xy_offset,
+    )
+    placement = resolve_object_placement(
+        obj_id,
+        object_scale,
+        sim_z_yaw_deg,
+        obj_xy_offset=(dx, dy),
+    )
     return SceneSpec(
         episode_id=episode_id,
         obj_id=obj_id,
@@ -125,6 +155,7 @@ def build_scene_spec(
         object_orientation_euler_deg=[float(x) for x in placement["ori"]],
         object_quat_wxyz=_euler_xyz_deg_to_wxyz(placement["ori"]),
         sim_z_yaw_deg=float(sim_z_yaw_deg),
+        obj_xy_offset=[float(dx), float(dy)],
         seed=int(seed),
         robot_position=list(ROBOT_POSITION),
         robot_orientation_euler_deg=list(ROBOT_ORIENTATION),
@@ -134,6 +165,9 @@ def build_scene_spec(
         metadata={
             "candidate_hdf5": os.path.abspath(candidate_hdf5) if candidate_hdf5 else "",
             "z_offset": float(placement["z_offset"]),
+            "obj_xy_offset": [float(dx), float(dy)],
+            "random_obj_xy": bool(random_obj_xy),
+            "obj_xy_jitter_m": float(obj_xy_jitter_m),
         },
     )
 
@@ -225,7 +259,12 @@ def _reset_franka_home(scene: SimEvaluationContext) -> None:
 
 
 def _spawn_rigid_object(world, spec: SceneSpec, *, render: bool):
-    placement = resolve_object_placement(spec.obj_id, spec.object_scale, spec.sim_z_yaw_deg)
+    placement = resolve_object_placement(
+        spec.obj_id,
+        spec.object_scale,
+        spec.sim_z_yaw_deg,
+        obj_xy_offset=spec.obj_xy_offset,
+    )
     obj = RigidObject(
         world,
         usd_path=placement["usd_path"],
@@ -263,7 +302,12 @@ def _update_context_object(
 
 def reset_scene_pose(scene: SimEvaluationContext, spec: SceneSpec) -> None:
     """Reset same object to a new placement/yaw and home the robot."""
-    placement = resolve_object_placement(spec.obj_id, spec.object_scale, spec.sim_z_yaw_deg)
+    placement = resolve_object_placement(
+        spec.obj_id,
+        spec.object_scale,
+        spec.sim_z_yaw_deg,
+        obj_xy_offset=spec.obj_xy_offset,
+    )
     scene.spec = spec
     scene.object_placement = placement
     scene.obj.set_obj_pose(

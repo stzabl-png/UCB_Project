@@ -23,6 +23,7 @@ if str(PROJ) not in sys.path:
     sys.path.insert(0, str(PROJ))
 
 from evaluation.affordance_ckpt import add_affordance_checkpoint_args, resolve_affordance_checkpoint
+from evaluation.placement import add_random_obj_xy_args
 
 DEFAULT_CANDIDATE_PYTHON = "/home/vision/miniconda3/envs/bundlesdf/bin/python"
 
@@ -81,6 +82,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--trial", type=int, default=0, help="Trial index (episode id suffix).")
     parser.add_argument("--object-scale", type=float, default=1.0)
+    add_random_obj_xy_args(parser)
     parser.add_argument("--z-yaw-deg", type=float, default=0.0)
     parser.add_argument("--headless", action="store_true")
     parser.add_argument(
@@ -467,9 +469,20 @@ def main() -> None:
             sim_z_yaw_deg=args.z_yaw_deg,
             seed=int(args.trial),
             candidate_hdf5=candidate_hdf5,
+            random_obj_xy=bool(args.random_obj_xy),
+            obj_xy_jitter_m=float(args.obj_xy_jitter_m),
         )
         render = not headless
         scene = setup_scene(scene_spec, render=render)
+        if args.random_obj_xy:
+            dx, dy = scene_spec.obj_xy_offset
+            output.important(
+                f"[eval] random_obj_xy jitter={args.obj_xy_jitter_m:.3f}m "
+                f"offset=({dx:+.4f}, {dy:+.4f}) "
+                f"spawn=({scene_spec.object_position_world[0]:.4f}, "
+                f"{scene_spec.object_position_world[1]:.4f}, "
+                f"{scene_spec.object_position_world[2]:.4f})"
+            )
         output.important("[eval] scene ready")
 
         if args.record_video:

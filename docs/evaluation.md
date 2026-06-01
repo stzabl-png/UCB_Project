@@ -146,7 +146,7 @@ $ISAAC_SIM_PATH/python.sh evaluation/eval_single.py \
 4. 查找 `A16013.usd`：
    - `output/obj_usd/{oakink,ycb,arctic,dexycb,egocentric,ho3d_v3}/A16013.usd`
    - `sim/assets/A16013.usd`
-5. 按 `sim/run_grasp_sim.py` 的默认场景放置 Franka、桌子和物体。
+5. 按 `sim/run_grasp_sim.py` 的默认场景放置 Franka、桌子和物体。可选 `--random-obj-xy` 在基准 XY `(0, 0.55)` 附近均匀抖动（默认 ±5cm），Z 仍用 `z_offset`。
 6. 从 Isaac stage 提取物体 mesh，加入 cuRobo collision world。
 7. 将 candidate 的 object-mesh grasp pose 转成 world pose，并适配到 Franka `panda_hand` frame。
 8. cuRobo 规划并执行：
@@ -593,6 +593,8 @@ command.frame == "object_mesh"
 | `--trial` | 0 | episode_id 的 `t{trial:03d}` |
 | `--z-yaw-deg` | 0 | Sim 放置 + 生成 candidate 时的 yaw |
 | `--object-scale` | 1.0 | |
+| `--random-obj-xy` | off | 在默认物体 XY `(0, 0.55)` 上均匀随机平移 |
+| `--obj-xy-jitter-m` | `0.05` | 随机半宽 (m)：`dx,dy ~ U[-jitter,+jitter]` |
 | `--headless` | off | 与 `--record-video` 互斥（录像会强制 headed） |
 | `--result-dir` | `output/evaluation/single` | |
 | `--episode-id` | 自动 | 覆盖默认 id |

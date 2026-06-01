@@ -20,6 +20,7 @@ if str(PROJ) not in sys.path:
 from evaluation.affordance_ckpt import add_affordance_checkpoint_args, resolve_affordance_checkpoint
 from evaluation.candidate_batch import build_candidate_tasks, run_candidate_batch_generation
 from evaluation.episode import discover_obj_ids
+from evaluation.placement import add_random_obj_xy_args
 from evaluation.eval_single import resolve_generate_mesh
 from evaluation.solution_gen import generate_solutions, resolve_yaw_values
 from evaluation.task_queue import build_task_queue, load_json, write_chunks, write_json
@@ -73,6 +74,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--dataset", default=None)
     p.add_argument("--object-scale", type=float, default=1.0)
+    add_random_obj_xy_args(p)
     p.add_argument("--headless", action="store_true")
     p.add_argument("--result-dir", default=str(PROJ / "output" / "evaluation" / "pool"))
     p.add_argument("--save-hdf5", action="store_true")
@@ -645,7 +647,15 @@ def main() -> None:
         candidate_per_gpu=args.candidate_per_gpu,
         reuse_existing=bool(args.resume),
         dry_run=bool(args.dry_run),
+        random_obj_xy=bool(args.random_obj_xy),
+        obj_xy_jitter_m=float(args.obj_xy_jitter_m),
     )
+    if args.random_obj_xy:
+        _important(
+            args,
+            f"[pool] random_obj_xy ON jitter=±{float(args.obj_xy_jitter_m):.3f}m "
+            "(offsets stored per solution JSON)",
+        )
     queue = build_task_queue(manifest)
     write_json(result_dir / "task_queue.json", queue)
 

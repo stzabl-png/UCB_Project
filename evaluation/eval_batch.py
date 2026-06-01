@@ -43,6 +43,7 @@ from evaluation.episode import (
     pick_record_trials,
 )
 from evaluation.randomness import fresh_rng
+from evaluation.placement import add_random_obj_xy_args
 from evaluation.yaw import parse_yaw_pool, resolve_z_yaw_deg
 
 
@@ -105,6 +106,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--mesh-glob", default="*.glb")
     p.add_argument("--dataset", default=None)
     p.add_argument("--object-scale", type=float, default=1.0)
+    add_random_obj_xy_args(p)
     p.add_argument("--headless", action="store_true")
     p.add_argument(
         "--result-dir",
@@ -217,6 +219,9 @@ def build_eval_single_cmd(
         cmd.append("--log-only")
     if args.loud:
         cmd.append("--loud")
+    if args.random_obj_xy:
+        cmd.append("--random-obj-xy")
+        cmd.extend(["--obj-xy-jitter-m", str(float(args.obj_xy_jitter_m))])
     if args.log_dir:
         cmd.extend(["--log-dir", str(Path(args.log_dir).expanduser().resolve())])
 

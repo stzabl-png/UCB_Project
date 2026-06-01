@@ -147,6 +147,7 @@ def _execute_task(scene, task: dict, chunk: dict, result_dir: Path):
         sim_z_yaw_deg=float(task["z_yaw_deg"]),
         seed=int(task.get("trial", 0)),
         candidate_hdf5=solution.get("candidate_hdf5"),
+        obj_xy_offset=solution.get("obj_xy_offset"),
     )
 
     if scene is None:
@@ -158,7 +159,12 @@ def _execute_task(scene, task: dict, chunk: dict, result_dir: Path):
         swap_scene_object(scene, spec)
         reset_motion_gen()
     else:
-        cprint(f"[worker] reset {spec.obj_id} yaw={spec.sim_z_yaw_deg:.0f}", "cyan")
+        dx, dy = spec.obj_xy_offset
+        cprint(
+            f"[worker] reset {spec.obj_id} yaw={spec.sim_z_yaw_deg:.0f} "
+            f"xy_offset=({dx:+.3f},{dy:+.3f})",
+            "cyan",
+        )
         reset_scene_pose(scene, spec)
 
     recorder = None
