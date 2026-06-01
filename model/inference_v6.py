@@ -29,8 +29,8 @@ from matplotlib.colors import Normalize
 
 PROJ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# Shared affordance heatmap: blue (low) → red (high).
-AFFORDANCE_CMAP_NAME = "coolwarm"
+# Shared affordance heatmap: blue (low) → cyan → green → yellow → red (high).
+AFFORDANCE_CMAP_NAME = "jet"
 
 
 def affordance_vmax(values: np.ndarray, *, floor: float = 0.05) -> float:

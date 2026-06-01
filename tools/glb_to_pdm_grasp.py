@@ -29,7 +29,7 @@ Default writes:
   - grasp HDF5 under ``--output-dir``
   - PDM overlay PNGs under ``<output-dir>/../vis/`` (``--vis``)
 
-Both affordance and PDM point clouds use the same blue→red colormap (``coolwarm``).
+Both affordance and PDM point clouds use the shared ``jet`` colormap.
 Affordance PNG/PDM overlay use max-normalized predictions (peak → 1); PDM conditioning
 uses raw v6 outputs. Normalized arrays are also written under ``affordance/npz_norm/``.
 """
@@ -65,7 +65,6 @@ from model.inference_v6 import (  # noqa: E402
     normalize_affordance_pred,
     predict_heatmap_batch,
     save_inference_montage,
-    save_vis_png,
 )
 from model.pdm.dataset import yaw_feature_from_deg  # noqa: E402
 from model.pdm.model import PDM  # noqa: E402
@@ -84,6 +83,7 @@ from tools.infer_mesh_v6 import (  # noqa: E402
     rescale_mesh_for_v6,
     sample_mesh_points,
 )
+from tools.affordance_pointcloud_vis import save_scalar_pointcloud_png  # noqa: E402
 
 
 def build_condition_tensor(
@@ -306,20 +306,12 @@ def save_affordance_outputs(
 
     png_path = ""
     if not no_aff_vis:
-        title_suffix = (
-            f"  scale×{srep.scale_applied:.3f}"
-            if not srep.skipped_scale
-            else "  scale=1 (in band)"
-        )
         png_path = str(png_dir / f"{oid}.png")
-        save_vis_png(
-            png_path,
+        save_scalar_pointcloud_png(
+            Path(png_path),
             item["points"],
-            None,
-            pred,
-            f"{oid}{title_suffix}",
-            threshold,
-            pred_vis=pred_norm,
+            pred_norm,
+            vmax=1.0,
         )
     return raw_npz_path, norm_npz_path, png_path
 
