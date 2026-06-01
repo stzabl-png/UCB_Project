@@ -62,6 +62,9 @@ PIPELINE_INSTRUCTIONS.md
 third_party/FoundationPose/
 third_party/sam-3d-objects/
 third_party/sam2/
+third_party/GraspVLA/
+third_party/GraspVLA-playground/
+third_party/GraspVLA-real-world-controller/
 
 # Local Baseline1 training output (gigantic, push to HF instead)
 Baseline1/dp3_runs/
@@ -71,3 +74,9 @@ NvStreamer-*.etli
 
 # partner handoff package (contains 4GB ckpt) — do not track
 dp3_aug_handoff/
+
+# Sim replay / eval video & frame dumps (data, push to HF not GitHub)
+*.mp4
+replay_video_check/
+tem_replay_video_and_frames/
+partner_trial_data/
