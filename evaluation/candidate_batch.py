@@ -29,6 +29,90 @@ def parse_gpu_ids(text: str | None) -> list[str]:
     return [part.strip() for part in str(text).split(",") if part.strip()] or ["0"]
 
 
+def _task_key(obj_id: str, z_yaw_deg: float) -> tuple[str, float]:
+    return str(obj_id), float(z_yaw_deg)
+
+
+def _manifest_rows_valid(rows: list[dict]) -> bool:
+    if not rows:
+        return False
+    for row in rows:
+        path = Path(str(row.get("output_hdf5", "")))
+        if not path.is_file():
+            return False
+    return True
+
+
+def _rows_to_mapping(rows: list[dict]) -> dict[tuple[str, float], str]:
+    mapping: dict[tuple[str, float], str] = {}
+    for row in rows:
+        key = _task_key(row["obj_id"], row["z_yaw_deg"])
+        mapping[key] = str(Path(row["output_hdf5"]).resolve())
+    return mapping
+
+
+def _expected_keys(tasks: list[dict]) -> set[tuple[str, float]]:
+    return {_task_key(t["obj_id"], t["z_yaw_deg"]) for t in tasks}
+
+
+def _load_existing_candidate_map(
+    result_dir: Path,
+    tasks: list[dict],
+) -> dict[tuple[str, float], str] | None:
+    """Reuse completed chunk/merged manifests so a crashed worker exit does not force regen."""
+    work_dir = result_dir / "candidate_generation"
+    expected = _expected_keys(tasks)
+    if not expected:
+        return {}
+
+    merged_path = work_dir / "candidate_manifest.json"
+    if merged_path.is_file():
+        try:
+            payload = json.loads(merged_path.read_text(encoding="utf-8"))
+            rows = payload.get("tasks", [])
+            mapping = _rows_to_mapping(rows)
+            if expected <= set(mapping.keys()) and all(Path(p).is_file() for p in mapping.values()):
+                return {k: mapping[k] for k in expected}
+        except (OSError, json.JSONDecodeError, KeyError):
+            pass
+
+    mapping: dict[tuple[str, float], str] = {}
+    for manifest_path in sorted(work_dir.glob("candidate_chunk_*_manifest.json")):
+        try:
+            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        rows = payload.get("tasks", [])
+        if not _manifest_rows_valid(rows):
+            continue
+        mapping.update(_rows_to_mapping(rows))
+
+    if expected <= set(mapping.keys()):
+        return {k: mapping[k] for k in expected}
+    return None
+
+
+def _emit_mapping_logs(mapping: dict[tuple[str, float], str], manifest_rows: list[dict]) -> None:
+    row_by_key = {_task_key(r["obj_id"], r["z_yaw_deg"]): r for r in manifest_rows}
+    for key in sorted(mapping.keys()):
+        row = row_by_key.get(key)
+        if row is None:
+            print(
+                f"[candidate-batch] reuse obj={key[0]} yaw={key[1]:.0f} "
+                f"path={mapping[key]}",
+                flush=True,
+            )
+            continue
+        print(
+            "[candidate-batch] done "
+            f"obj={row['obj_id']} yaw={float(row['z_yaw_deg']):.0f} "
+            f"selected={row.get('n_selected', '?')} pass={row.get('hard_gate_pass_count', '?')} "
+            f"forced={row.get('forced_fill_count', '?')} batches={row.get('n_batches_used', '?')} "
+            f"rejects={row.get('reject_counts', {})}",
+            flush=True,
+        )
+
+
 def _split_even(items: list[dict], n_chunks: int) -> list[list[dict]]:
     chunks = [[] for _ in range(max(1, n_chunks))]
     for idx, item in enumerate(items):
@@ -93,9 +177,38 @@ def run_candidate_batch_generation(
     affordance_checkpoint: str | Path | None = None,
     candidate_workers: int | None = None,
     candidate_per_gpu: int | None = None,
+    eval_seed: int | None = None,
 ) -> dict[tuple[str, float], str]:
     if not tasks:
         return {}
+    existing = _load_existing_candidate_map(result_dir, tasks)
+    if existing is not None:
+        print(
+            f"[candidate-batch] reusing {len(existing)} existing candidate pool(s) "
+            f"under {result_dir / 'candidate_generation'}",
+            flush=True,
+        )
+        work_dir = result_dir / "candidate_generation"
+        all_rows: list[dict] = []
+        for manifest_path in sorted(work_dir.glob("candidate_chunk_*_manifest.json")):
+            try:
+                payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+                all_rows.extend(payload.get("tasks", []))
+            except (OSError, json.JSONDecodeError):
+                pass
+        _emit_mapping_logs(existing, all_rows)
+        write_json(
+            work_dir / "candidate_manifest.json",
+            {
+                "version": 1,
+                "tasks": [
+                    {"obj_id": k[0], "z_yaw_deg": k[1], "candidate_hdf5": v}
+                    for k, v in sorted(existing.items())
+                ],
+            },
+        )
+        return existing
+
     gpu_ids = parse_gpu_ids(candidate_gpu_ids)
     if candidate_workers is not None:
         n_workers = max(1, int(candidate_workers))
@@ -145,6 +258,8 @@ def run_candidate_batch_generation(
             cmd.extend(
                 ["--affordance-checkpoint", str(Path(affordance_checkpoint).expanduser().resolve())]
             )
+        if eval_seed is not None:
+            cmd.extend(["--eval-seed", str(int(eval_seed))])
         env = candidate_generation_env()
         env["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
         env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
@@ -167,25 +282,42 @@ def run_candidate_batch_generation(
     for idx, proc, log_f, manifest_path, log_path in procs:
         rc = proc.wait()
         log_f.close()
-        if rc != 0:
-            tail = ""
+        manifest_rows: list[dict] = []
+        if manifest_path.is_file():
             try:
-                tail = "\n".join(log_path.read_text(encoding="utf-8").splitlines()[-80:])
-            except Exception:
-                pass
-            raise RuntimeError(f"candidate batch worker {idx} failed rc={rc}\nLog tail:\n{tail}")
-        with manifest_path.open(encoding="utf-8") as f:
-            manifest = json.load(f)
-        for row in manifest.get("tasks", []):
-            mapping[(str(row["obj_id"]), float(row["z_yaw_deg"]))] = str(row["output_hdf5"])
-            print(
-                "[candidate-batch] done "
-                f"obj={row['obj_id']} yaw={float(row['z_yaw_deg']):.0f} "
-                f"selected={row['n_selected']} pass={row['hard_gate_pass_count']} "
-                f"forced={row['forced_fill_count']} batches={row['n_batches_used']} "
-                f"rejects={row.get('reject_counts', {})}",
-                flush=True,
+                with manifest_path.open(encoding="utf-8") as f:
+                    manifest_rows = list(json.load(f).get("tasks", []))
+            except (OSError, json.JSONDecodeError):
+                manifest_rows = []
+
+        if rc != 0:
+            if _manifest_rows_valid(manifest_rows):
+                print(
+                    f"[candidate-batch] worker {idx} exited rc={rc} but manifest is complete; "
+                    "treating as success (often CUDA teardown SIGSEGV)",
+                    flush=True,
+                )
+            else:
+                tail = ""
+                try:
+                    tail = "\n".join(log_path.read_text(encoding="utf-8").splitlines()[-80:])
+                except Exception:
+                    pass
+                raise RuntimeError(
+                    f"candidate batch worker {idx} failed rc={rc}\nLog tail:\n{tail}"
+                )
+
+        if not manifest_rows:
+            raise RuntimeError(f"candidate batch worker {idx} produced no manifest: {manifest_path}")
+
+        for row in manifest_rows:
+            mapping[_task_key(row["obj_id"], row["z_yaw_deg"])] = str(
+                Path(row["output_hdf5"]).resolve()
             )
+        _emit_mapping_logs(
+            {_task_key(r["obj_id"], r["z_yaw_deg"]): str(r["output_hdf5"]) for r in manifest_rows},
+            manifest_rows,
+        )
     write_json(
         work_dir / "candidate_manifest.json",
         {
