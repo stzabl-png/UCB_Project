@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import secrets
 
 DEFAULT_EVAL_SEED = 42
@@ -23,13 +24,19 @@ def add_eval_seed_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _tag_to_int(tag: str) -> int:
+    """Process-stable string tag → 32-bit int (do not use built-in hash())."""
+
+    return int(hashlib.sha256(tag.encode("utf-8")).hexdigest()[:8], 16)
+
+
 def mix_eval_seed(base: int, *parts) -> int:
     """Deterministically mix base seed with string/int tags into a 32-bit seed."""
 
     h = int(base) & 0xFFFFFFFF
     for part in parts:
         if isinstance(part, str):
-            h ^= hash(part) & 0xFFFFFFFF
+            h ^= _tag_to_int(part) & 0xFFFFFFFF
         else:
             h ^= (int(part) * 2654435761) & 0xFFFFFFFF
     return int(h % (2**32))
