@@ -401,6 +401,14 @@ def _postprocess_hdf5(path: Path, stats: dict, selected_meta: list[dict]) -> Non
                     ci.attrs["hard_gate_reject_reason"] = str(row["hard_gate_reject_reason"])
 
 
+def _task_eval_seed(args: argparse.Namespace, obj_id: str, yaw: float) -> int | None:
+    if getattr(args, "eval_seed", None) is None:
+        return None
+    from evaluation.randomness import mix_eval_seed
+
+    return mix_eval_seed(int(args.eval_seed), "pdm_task", obj_id, int(round(float(yaw))) % 360)
+
+
 def _generate_one(task: dict, args: argparse.Namespace, models: dict, device: torch.device) -> dict:
     obj_id = str(task["obj_id"])
     yaw = float(task["z_yaw_deg"])
@@ -408,7 +416,8 @@ def _generate_one(task: dict, args: argparse.Namespace, models: dict, device: to
     out_path = Path(task["output_hdf5"]).expanduser().resolve()
     metric_ds = _resolve_metric_dataset(obj_id, args.dataset)
     mesh_path = Path(task.get("mesh_path") or _resolve_mesh_path(obj_id, args.mesh_root, metric_ds))
-    seed = secrets.randbits(31)
+    task_seed = _task_eval_seed(args, obj_id, yaw)
+    seed = int(task_seed) if task_seed is not None else secrets.randbits(31)
     prepared = _prepare_mesh(
         obj_id=obj_id,
         mesh_path=mesh_path,
@@ -451,6 +460,10 @@ def _generate_one(task: dict, args: argparse.Namespace, models: dict, device: to
             flush=True,
         )
         t_pdm0 = time.perf_counter()
+        if task_seed is not None:
+            torch.manual_seed(int(task_seed) % (2**31 - 1))
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(int(task_seed) % (2**31 - 1))
         poses = _sample_pdm_batch(
             models["pdm"],
             models["stats"],
@@ -513,7 +526,7 @@ def _generate_one(task: dict, args: argparse.Namespace, models: dict, device: to
         if len(accepted) >= pool_target:
             break
 
-    rng = np.random.default_rng()
+    rng = np.random.default_rng(task_seed) if task_seed is not None else np.random.default_rng()
     chosen: list[tuple[np.ndarray, dict]] = []
     if not filtering_enabled:
         # Legacy behavior: do not filter or score; take the first target poses.
@@ -682,6 +695,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--auto-extent-hi", type=float, default=0.80)
     p.add_argument("--min-scale-factor", type=float, default=1e-6)
     p.add_argument("--cpu", action="store_true")
+    p.add_argument(
+        "--eval-seed",
+        type=int,
+        default=None,
+        help="When set, derive per-task mesh/PDM/forced-fill seeds from this eval master seed.",
+    )
     p.add_argument(
         "--no-hard-gate",
         action="store_true",

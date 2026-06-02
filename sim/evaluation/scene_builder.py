@@ -128,6 +128,7 @@ def build_scene_spec(
     obj_xy_offset: list[float] | tuple[float, float] | None = None,
     random_obj_xy: bool = False,
     obj_xy_jitter_m: float = 0.05,
+    eval_seed: int = 42,
 ) -> SceneSpec:
     from evaluation.placement import resolve_obj_xy_offset
 
@@ -138,6 +139,7 @@ def build_scene_spec(
         trial=int(seed),
         sim_z_yaw_deg=float(sim_z_yaw_deg),
         obj_xy_offset=obj_xy_offset,
+        eval_seed=int(eval_seed),
     )
     placement = resolve_object_placement(
         obj_id,
@@ -168,6 +170,7 @@ def build_scene_spec(
             "obj_xy_offset": [float(dx), float(dy)],
             "random_obj_xy": bool(random_obj_xy),
             "obj_xy_jitter_m": float(obj_xy_jitter_m),
+            "eval_seed": int(eval_seed),
         },
     )
 

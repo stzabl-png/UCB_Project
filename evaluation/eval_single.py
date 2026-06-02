@@ -24,6 +24,7 @@ if str(PROJ) not in sys.path:
 
 from evaluation.affordance_ckpt import add_affordance_checkpoint_args, resolve_affordance_checkpoint
 from evaluation.placement import add_random_obj_xy_args
+from evaluation.randomness import add_eval_seed_args
 
 DEFAULT_CANDIDATE_PYTHON = "/home/vision/miniconda3/envs/bundlesdf/bin/python"
 
@@ -74,12 +75,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--selection", choices=("top", "index", "sample"), default="top")
     parser.add_argument("--candidate-index", type=int, default=0)
-    parser.add_argument(
-        "--policy-seed",
-        type=int,
-        default=None,
-        help="Seed for --selection sample; omit for fresh random draw each run.",
-    )
+    add_eval_seed_args(parser)
     parser.add_argument("--trial", type=int, default=0, help="Trial index (episode id suffix).")
     parser.add_argument("--object-scale", type=float, default=1.0)
     add_random_obj_xy_args(parser)
@@ -228,7 +224,8 @@ def maybe_generate_candidate(args: argparse.Namespace) -> str | None:
         str(float(args.z_yaw_deg)),
         "--no-vis",
         "--no-affordance-output",
-        "--random-seed",
+        "--seed",
+        str(int(getattr(args, "seed", 42))),
     ]
     if is_rotated_sam3d:
         cmd.append("--sam3d-rotated-mesh")
@@ -455,10 +452,10 @@ def main() -> None:
         from sim.evaluation.scene_builder import build_scene_spec, setup_scene
         from sim.evaluation.video_recorder import EpisodeVideoRecorder
 
-        policy_seed_val = (
-            None
-            if args.policy_seed is None
-            else resolve_policy_seed(args.policy_seed, trial=args.trial)
+        policy_seed_val = resolve_policy_seed(
+            eval_seed=int(args.seed),
+            policy_seed=args.policy_seed,
+            trial=args.trial,
         )
 
         scene_spec = build_scene_spec(
@@ -471,6 +468,7 @@ def main() -> None:
             candidate_hdf5=candidate_hdf5,
             random_obj_xy=bool(args.random_obj_xy),
             obj_xy_jitter_m=float(args.obj_xy_jitter_m),
+            eval_seed=int(args.seed),
         )
         render = not headless
         scene = setup_scene(scene_spec, render=render)

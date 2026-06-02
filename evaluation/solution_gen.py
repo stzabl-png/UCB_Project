@@ -16,7 +16,7 @@ from evaluation.eval_single import (
     maybe_generate_candidate,
 )
 from evaluation.policies.a2g_pdm import A2GPDMPolicy, A2GPDMPolicyConfig
-from evaluation.randomness import fresh_rng, resolve_policy_seed
+from evaluation.randomness import DEFAULT_EVAL_SEED, record_trials_rng, resolve_policy_seed
 from evaluation.placement import resolve_obj_xy_offset
 from evaluation.yaw import resolve_z_yaw_deg
 
@@ -103,6 +103,7 @@ def make_solution(
     selection: str,
     candidate_index: int,
     policy_seed: int | None,
+    eval_seed: int = DEFAULT_EVAL_SEED,
     random_obj_xy: bool = False,
     obj_xy_jitter_m: float = 0.05,
 ) -> dict[str, Any]:
@@ -113,10 +114,11 @@ def make_solution(
         obj_id=obj_id,
         trial=int(trial),
         sim_z_yaw_deg=float(z_yaw_deg),
+        eval_seed=int(eval_seed),
     )
     if policy != "a2g_pdm":
         raise ValueError(f"unsupported policy: {policy}")
-    seed = None if policy_seed is None else resolve_policy_seed(policy_seed, trial=trial)
+    seed = resolve_policy_seed(eval_seed=eval_seed, policy_seed=policy_seed, trial=trial)
     output = A2GPDMPolicy(
         A2GPDMPolicyConfig(
             candidate_hdf5=candidate_hdf5,
@@ -132,6 +134,7 @@ def make_solution(
         "obj_id": obj_id,
         "policy": policy,
         "trial": int(trial),
+        "eval_seed": int(eval_seed),
         "z_yaw_deg": float(z_yaw_deg),
         "obj_xy_offset": [float(dx), float(dy)],
         "random_obj_xy": bool(random_obj_xy),
@@ -211,10 +214,10 @@ def generate_solutions(
     dry_run: bool = False,
     random_obj_xy: bool = False,
     obj_xy_jitter_m: float = 0.05,
+    eval_seed: int = DEFAULT_EVAL_SEED,
 ) -> dict:
     sol_dir = result_dir / "solutions"
     sol_dir.mkdir(parents=True, exist_ok=True)
-    rng = fresh_rng()
     rows: list[dict] = []
     yaw_values_by_obj = {
         obj_id: resolve_yaw_values(
@@ -253,6 +256,7 @@ def generate_solutions(
             affordance_checkpoint=affordance_checkpoint,
             candidate_workers=candidate_workers,
             candidate_per_gpu=candidate_per_gpu,
+            eval_seed=int(eval_seed),
         )
 
     n_objs = len(obj_ids)
@@ -262,7 +266,7 @@ def generate_solutions(
         record_trials = pick_record_trials(
             n_obj_episodes,
             record_count_per_object if record_video else 0,
-            rng,
+            record_trials_rng(eval_seed=eval_seed, obj_id=obj_id),
         )
         obj_new = 0
         for yaw_idx, yaw in enumerate(yaw_values):
@@ -280,6 +284,7 @@ def generate_solutions(
                         "obj_id": obj_id,
                         "policy": policy,
                         "trial": int(trial),
+                        "eval_seed": int(eval_seed),
                         "z_yaw_deg": float(yaw),
                         "obj_xy_offset": [0.0, 0.0],
                         "random_obj_xy": bool(random_obj_xy),
@@ -320,6 +325,7 @@ def generate_solutions(
                         selection=solution_selection,
                         candidate_index=solution_index,
                         policy_seed=policy_seed,
+                        eval_seed=int(eval_seed),
                         random_obj_xy=bool(random_obj_xy),
                         obj_xy_jitter_m=float(obj_xy_jitter_m),
                     )

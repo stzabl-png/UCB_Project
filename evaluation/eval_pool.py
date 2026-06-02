@@ -21,6 +21,7 @@ from evaluation.affordance_ckpt import add_affordance_checkpoint_args, resolve_a
 from evaluation.candidate_batch import build_candidate_tasks, run_candidate_batch_generation
 from evaluation.episode import discover_obj_ids
 from evaluation.placement import add_random_obj_xy_args
+from evaluation.randomness import add_eval_seed_args
 from evaluation.eval_single import resolve_generate_mesh
 from evaluation.solution_gen import generate_solutions, resolve_yaw_values
 from evaluation.task_queue import build_task_queue, load_json, write_chunks, write_json
@@ -62,7 +63,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--policy", choices=("a2g_pdm",), default="a2g_pdm")
     p.add_argument("--selection", choices=("top", "index", "sample"), default="sample")
     p.add_argument("--candidate-index", type=int, default=0)
-    p.add_argument("--policy-seed", type=int, default=None)
+    add_eval_seed_args(p)
     p.add_argument("--z-yaw-deg", type=float, default=None)
     p.add_argument("--z-yaw-grid", default=None)
     p.add_argument("--z-yaw-random", action="store_true")
@@ -227,6 +228,7 @@ def _build_eval_summary(
             "objects": obj_ids,
             "obj_list": args.obj_list,
             "trials_per_obj_yaw": _trials_per_obj_yaw(args),
+            "eval_seed": int(args.seed),
             "z_yaw_deg": args.z_yaw_deg,
             "z_yaw_grid": args.z_yaw_grid,
             "z_yaw_random": bool(args.z_yaw_random),
@@ -605,6 +607,7 @@ def main() -> None:
             affordance_checkpoint=args.affordance_checkpoint,
             candidate_workers=args.candidate_workers,
             candidate_per_gpu=args.candidate_per_gpu,
+            eval_seed=int(args.seed),
         )
         _important(args, f"[pool] done -> {result_dir}/candidates/{{obj_id}}/*_pool_grasp.hdf5")
         return
@@ -623,6 +626,7 @@ def main() -> None:
         selection=args.selection,
         candidate_index=args.candidate_index,
         policy_seed=args.policy_seed,
+        eval_seed=int(args.seed),
         z_yaw_deg=args.z_yaw_deg,
         z_yaw_grid=yaw_grid,
         z_yaw_random_pool=yaw_pool,

@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import secrets
 from typing import Sequence
+
+from evaluation.randomness import DEFAULT_EVAL_SEED, mix_eval_seed
 
 
 def parse_yaw_pool(text: str | None) -> list[float]:
@@ -17,6 +18,12 @@ def parse_yaw_pool(text: str | None) -> list[float]:
     return out or [0.0]
 
 
+def np_random_for_draw(obj_id: str, trial: int, *, eval_seed: int = DEFAULT_EVAL_SEED):
+    import numpy as np
+
+    return np.random.default_rng(mix_eval_seed(eval_seed, "yaw_draw", obj_id, int(trial)))
+
+
 def resolve_z_yaw_deg(
     *,
     trial: int,
@@ -25,6 +32,7 @@ def resolve_z_yaw_deg(
     z_yaw_grid: Sequence[float] | None = None,
     z_yaw_random_pool: Sequence[float] | None = None,
     z_yaw_random: bool = False,
+    eval_seed: int = DEFAULT_EVAL_SEED,
 ) -> float:
     """Pick sim / PDM conditioning yaw for one episode."""
     if z_yaw_deg is not None:
@@ -34,12 +42,6 @@ def resolve_z_yaw_deg(
         return grid[int(trial) % len(grid)]
     if z_yaw_random:
         pool = list(z_yaw_random_pool or [0.0, 90.0, 180.0, 270.0])
-        rng = np_random_for_draw(obj_id, trial)
+        rng = np_random_for_draw(obj_id, trial, eval_seed=eval_seed)
         return float(pool[int(rng.integers(0, len(pool)))])
     return 0.0
-
-
-def np_random_for_draw(obj_id: str, trial: int):
-    import numpy as np
-
-    return np.random.default_rng(secrets.randbits(128) ^ (hash(obj_id) & 0xFFFFFFFF) ^ trial)

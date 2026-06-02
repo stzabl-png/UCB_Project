@@ -12,7 +12,7 @@
 | Policy | `a2g_pdm` | 从 candidate HDF5 选一个 open-loop grasp |
 | 可选生成 candidate | `--generate-candidate` | 调 `tools/glb_to_pdm_grasp.py`（real-machine GLB / rotated SAM3D mesh 等） |
 | Sim z-yaw | `--z-yaw-deg` / batch 网格·随机 | 物体绕世界 Z 放置；与 yaw-conditioned PDM 对齐 |
-| 随机抽解 | `--selection sample`，不传 `--policy-seed` | 同场景多次 trial 用不同 candidate |
+| 随机抽解 | `--selection sample`，`--seed 42`（默认） | 同场景多次 trial 用可复现的 candidate 抽样 |
 | 可选录像 | `--record-video` | viewport → `{episode_id}.mp4` |
 | 批量选择性录像 | `--record-video --record-count-per-object K` | 每物体 N 次 trial 中随机录 K 段（K≥N 则全录） |
 
@@ -217,7 +217,7 @@ $ISAAC_SIM_PATH/python.sh evaluation/eval_single.py \
   --headless
 ```
 
-不传 `--policy-seed` 时，每次运行用新的随机数抽 candidate。传 `--policy-seed 123` 可复现抽样序列（batch 中会按 trial 偏移：`seed + trial * 10007`）。
+不传 `--policy-seed` 时，policy 抽样使用 `--seed`（默认 42），并按 trial 偏移：`seed + trial * 10007`。显式 `--policy-seed N` 可只覆盖 policy 抽样。
 
 `eval_single` 也可用 `--trial 2` 区分 episode_id 后缀；batch 会自动传入。
 
@@ -385,7 +385,8 @@ python evaluation/eval_batch.py \
 |------|------|------|
 | `--trials-per-object` | 1 | 每物体跑几次 eval（场景相同，解可不同） |
 | `--selection` | `sample` | 与 eval_single 相同 |
-| `--policy-seed` | 无 | 省略则每次 trial 随机抽 candidate |
+| `--policy-seed` | 无 | 仅覆盖 `--selection sample`；默认用 `--seed` |
+| `--seed` | `42` | 统一 eval 随机种子 |
 | `--z-yaw-deg` | 无 | 全部 episode 固定 yaw |
 | `--z-yaw-grid` | 无 | 如 `0,90,180,270`，按 trial 下标循环 |
 | `--z-yaw-random` | off | 每 trial 从 `--z-yaw-pool` 抽一个 |
@@ -593,6 +594,7 @@ command.frame == "object_mesh"
 | `--trial` | 0 | episode_id 的 `t{trial:03d}` |
 | `--z-yaw-deg` | 0 | Sim 放置 + 生成 candidate 时的 yaw |
 | `--object-scale` | 1.0 | |
+| `--seed` | `42` | 统一 eval 随机种子 |
 | `--random-obj-xy` | off | 在默认物体 XY `(0, 0.55)` 上均匀随机平移 |
 | `--obj-xy-jitter-m` | `0.05` | 随机半宽 (m)：`dx,dy ~ U[-jitter,+jitter]` |
 | `--headless` | off | 与 `--record-video` 互斥（录像会强制 headed） |

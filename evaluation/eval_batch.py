@@ -42,8 +42,8 @@ from evaluation.episode import (
     discover_obj_ids,
     pick_record_trials,
 )
-from evaluation.randomness import fresh_rng
 from evaluation.placement import add_random_obj_xy_args
+from evaluation.randomness import add_eval_seed_args, shuffle_objects_rng, record_trials_rng
 from evaluation.yaw import parse_yaw_pool, resolve_z_yaw_deg
 
 
@@ -75,12 +75,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--policy", choices=("a2g_pdm",), default="a2g_pdm")
     p.add_argument("--selection", choices=("top", "index", "sample"), default="sample")
     p.add_argument("--candidate-index", type=int, default=0)
-    p.add_argument(
-        "--policy-seed",
-        type=int,
-        default=None,
-        help="Fixed base seed for --selection sample; omit for fresh random each trial",
-    )
+    add_eval_seed_args(p)
     p.add_argument("--z-yaw-deg", type=float, default=None, help="Fixed sim/PDM z-yaw for all episodes")
     p.add_argument(
         "--z-yaw-grid",
@@ -200,6 +195,8 @@ def build_eval_single_cmd(
         str(args.object_scale),
         "--result-dir",
         str(Path(args.result_dir).expanduser().resolve()),
+        "--seed",
+        str(int(args.seed)),
     ]
     if args.dataset:
         cmd.extend(["--dataset", args.dataset])
@@ -290,7 +287,7 @@ def main() -> None:
     if args.obj_limit is not None:
         obj_ids = obj_ids[: max(0, int(args.obj_limit))]
 
-    rng = fresh_rng()
+    rng = shuffle_objects_rng(eval_seed=int(args.seed))
     if args.shuffle_objects:
         order = rng.permutation(len(obj_ids))
         obj_ids = [obj_ids[i] for i in order]
@@ -307,7 +304,11 @@ def main() -> None:
         record_cap = None if args.record_video else 0
         if args.record_video:
             record_cap = args.record_count_per_object
-        record_trials = pick_record_trials(args.trials_per_object, record_cap, rng)
+        record_trials = pick_record_trials(
+            args.trials_per_object,
+            record_cap,
+            record_trials_rng(eval_seed=int(args.seed), obj_id=obj_id),
+        )
         for trial in range(args.trials_per_object):
             z_yaw = resolve_z_yaw_deg(
                 trial=trial,
@@ -316,6 +317,7 @@ def main() -> None:
                 z_yaw_grid=yaw_grid,
                 z_yaw_random_pool=yaw_pool,
                 z_yaw_random=bool(args.z_yaw_random),
+                eval_seed=int(args.seed),
             )
             episode_id = build_episode_id(obj_id, args.policy, trial, z_yaw)
             cand_path = None
