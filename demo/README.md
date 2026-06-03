@@ -538,6 +538,9 @@ Uses affordance v6 + PDM checkpoints (see `demo/scripts/T6/README.md`). Does **n
 
 Always write status last (atomic: write to `status.json.tmp` then rename).
 
+**Script:** `demo/scripts/T7/write_status.py` — checks T2–T6 artifacts, aggregates warnings, writes `status.json`.  
+**Titan output package (for Razor):** [demo/TITAN_OUTPUT.md](TITAN_OUTPUT.md)
+
 ```json
 {
   "schema_version": "1.1",
@@ -592,7 +595,6 @@ output/
     ├── T3_sam3d_mesh_preview.png
     ├── T4_scale_scene_preview.png
     ├── T5_foundationpose_overlay.png
-    ├── T5_foundationpose_fp_track.png   # optional
     └── T6_grasp_vis.png
 ```
 
