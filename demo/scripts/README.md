@@ -11,5 +11,8 @@ Per-step debug scripts live under `T1/`, `T2/`, … Model weights stay in repo d
 | T4 | [T4/](T4/) | `scale_from_depth.py` → `object_scaled.glb` |
 | T5 | [T5/](T5/) | `register_foundationpose.py` → `T_cam_mesh`, overlay |
 | T6 | [T6/](T6/) | `run_pdm_grasp.py` — PDM → `candidates.json` |
+| T7 | [T7/](T7/) | `write_status.py` — finalize `output/status.json` for Razor |
+
+**Titan → Razor package doc:** [TITAN_OUTPUT.md](../TITAN_OUTPUT.md)
 
 Spec: [demo/README.md](../README.md).
