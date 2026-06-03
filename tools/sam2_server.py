@@ -43,6 +43,13 @@ def load_model():
     from sam2.sam2_image_predictor import SAM2ImagePredictor
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    autocast_dtype = (
+        torch.bfloat16
+        if device == "cuda" and torch.cuda.is_bf16_supported()
+        else torch.float16
+        if device == "cuda"
+        else torch.float32
+    )
     GlobalHydra.instance().clear()
     with initialize_config_dir(config_dir=SAM2_CFGDIR, version_base="1.2"):
         cfg = compose(config_name=SAM2_CFGNAME)
@@ -76,7 +83,7 @@ def main():
             if cmd == "set_image":
                 path = msg["path"]
                 img = np.array(Image.open(path).convert("RGB"))
-                with torch.inference_mode(), torch.autocast(device, dtype=torch.bfloat16):
+                with torch.inference_mode(), torch.autocast(device, dtype=autocast_dtype):
                     predictor.set_image(img)
                 current_path = path
                 send({"status": "ok", "shape": list(img.shape[:2])})
@@ -89,7 +96,7 @@ def main():
                     continue
                 pts = np.array(fg + bg, dtype=np.float32)
                 lbs = np.array([1]*len(fg) + [0]*len(bg), dtype=np.int32)
-                with torch.inference_mode(), torch.autocast(device, dtype=torch.bfloat16):
+                with torch.inference_mode(), torch.autocast(device, dtype=autocast_dtype):
                     masks, scores, _ = predictor.predict(
                         point_coords=pts, point_labels=lbs, multimask_output=True)
                 best = int(np.argmax(scores))
