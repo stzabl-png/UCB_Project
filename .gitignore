@@ -2,6 +2,8 @@
 output/
 data_hub/
 _DATA/
+# Demo: per-capture session trees (local only; not versioned)
+demo/sessions/
 # Binary files
 *.pth
 *.ckpt
