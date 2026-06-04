@@ -12,6 +12,7 @@ from evaluation.eval_single import (
     default_candidate_python,
     resolve_generate_mesh,
 )
+from evaluation.random_candidate_backend import is_random_candidate_backend
 
 PROJ = Path(__file__).resolve().parents[1]
 
@@ -103,14 +104,24 @@ def _emit_mapping_logs(mapping: dict[tuple[str, float], str], manifest_rows: lis
                 flush=True,
             )
             continue
-        print(
-            "[candidate-batch] done "
-            f"obj={row['obj_id']} yaw={float(row['z_yaw_deg']):.0f} "
-            f"selected={row.get('n_selected', '?')} pass={row.get('hard_gate_pass_count', '?')} "
-            f"forced={row.get('forced_fill_count', '?')} batches={row.get('n_batches_used', '?')} "
-            f"rejects={row.get('reject_counts', {})}",
-            flush=True,
-        )
+        backend = row.get("candidate_backend", "pdm")
+        if is_random_candidate_backend(str(backend)):
+            print(
+                "[candidate-batch] done "
+                f"obj={row['obj_id']} yaw={float(row['z_yaw_deg']):.0f} "
+                f"backend={backend} selected={row.get('n_selected', '?')} "
+                f"batches={row.get('n_batches_used', '?')}",
+                flush=True,
+            )
+        else:
+            print(
+                "[candidate-batch] done "
+                f"obj={row['obj_id']} yaw={float(row['z_yaw_deg']):.0f} "
+                f"selected={row.get('n_selected', '?')} pass={row.get('hard_gate_pass_count', '?')} "
+                f"forced={row.get('forced_fill_count', '?')} batches={row.get('n_batches_used', '?')} "
+                f"rejects={row.get('reject_counts', {})}",
+                flush=True,
+            )
 
 
 def _split_even(items: list[dict], n_chunks: int) -> list[list[dict]]:
@@ -170,6 +181,7 @@ def run_candidate_batch_generation(
     batch_multiplier: int,
     max_batches: int,
     object_scale: float,
+    candidate_backend: str = "pdm",
     no_hard_gate: bool = False,
     no_filtering: bool = False,
     pdm_checkpoint: str | Path | None = None,
@@ -228,32 +240,46 @@ def run_candidate_batch_generation(
         manifest_path = work_dir / f"candidate_chunk_{idx:03d}_manifest.json"
         log_path = work_dir / f"candidate_chunk_{idx:03d}.log"
         write_json(chunk_path, {"tasks": chunk})
+        use_random = is_random_candidate_backend(candidate_backend)
+        script = (
+            PROJ / "tools" / "batch_random_candidates.py"
+            if use_random
+            else PROJ / "tools" / "batch_pdm_candidates.py"
+        )
         cmd = [
             *shlex.split(python_cmd),
-            str(PROJ / "tools" / "batch_pdm_candidates.py"),
+            str(script),
             "--tasks-json",
             str(chunk_path),
             "--output-manifest",
             str(manifest_path),
             "--mesh-root",
             str(mesh_root),
-            "--batch-multiplier",
-            str(int(batch_multiplier)),
             "--max-batches",
             str(int(max_batches)),
-            "--object-scale",
-            str(float(object_scale)),
         ]
+        if use_random:
+            cmd.extend(["--candidate-backend", str(candidate_backend)])
+        else:
+            cmd.extend(
+                [
+                    "--batch-multiplier",
+                    str(int(batch_multiplier)),
+                    "--object-scale",
+                    str(float(object_scale)),
+                ]
+            )
         if dataset:
             cmd.extend(["--dataset", str(dataset)])
-        if no_hard_gate:
-            cmd.append("--no-hard-gate")
-        if no_filtering:
-            cmd.append("--no-filtering")
-        if pdm_checkpoint:
-            cmd.extend(["--pdm-checkpoint", str(Path(pdm_checkpoint).expanduser().resolve())])
-        if pose_stats:
-            cmd.extend(["--pose-stats", str(Path(pose_stats).expanduser().resolve())])
+        if not use_random:
+            if no_hard_gate:
+                cmd.append("--no-hard-gate")
+            if no_filtering:
+                cmd.append("--no-filtering")
+            if pdm_checkpoint:
+                cmd.extend(["--pdm-checkpoint", str(Path(pdm_checkpoint).expanduser().resolve())])
+            if pose_stats:
+                cmd.extend(["--pose-stats", str(Path(pose_stats).expanduser().resolve())])
         if affordance_checkpoint:
             cmd.extend(
                 ["--affordance-checkpoint", str(Path(affordance_checkpoint).expanduser().resolve())]
@@ -265,7 +291,8 @@ def run_candidate_batch_generation(
         env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
         log_f = log_path.open("w", encoding="utf-8")
         print(
-            f"[candidate-batch] worker {idx} gpu={gpu_id} tasks={len(chunk)} log={log_path}",
+            f"[candidate-batch] worker {idx} gpu={gpu_id} backend={candidate_backend} "
+            f"tasks={len(chunk)} log={log_path}",
             flush=True,
         )
         proc = subprocess.Popen(

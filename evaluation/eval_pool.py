@@ -18,6 +18,13 @@ if str(PROJ) not in sys.path:
     sys.path.insert(0, str(PROJ))
 
 from evaluation.affordance_ckpt import add_affordance_checkpoint_args, resolve_affordance_checkpoint
+from evaluation.random_candidate_backend import (
+    CANDIDATE_BACKEND_PDM,
+    add_candidate_backend_args,
+    is_random_candidate_backend,
+    resolve_hp_affordance_for_backend,
+    uses_v6_affordance_gate,
+)
 from evaluation.candidate_batch import build_candidate_tasks, run_candidate_batch_generation
 from evaluation.episode import discover_obj_ids
 from evaluation.placement import add_random_obj_xy_args
@@ -143,6 +150,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Pose normalization stats if not embedded in --pdm-checkpoint.",
     )
     add_affordance_checkpoint_args(p)
+    add_candidate_backend_args(p)
     p.add_argument(
         "--no-hard-gate",
         action="store_true",
@@ -161,7 +169,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--candidates-only",
         action="store_true",
-        help="Only run batch PDM candidate pools (requires --generate-candidate-each-trial). "
+        help="Only run candidate pools (requires --generate-candidate-each-trial). "
         "Skips solutions/*.json and Isaac. Use --trials-per-obj-yaw as pool size (e.g. 500).",
     )
     p.add_argument("--resume", action="store_true")
@@ -525,8 +533,12 @@ def main() -> None:
         raise SystemExit("Use only one of --log-only or --loud")
     maybe_reexec_with_xvfb(args)
 
+    hp_for_ckpt = resolve_hp_affordance_for_backend(
+        str(args.candidate_backend),
+        bool(args.hp_affordance),
+    )
     aff_ckpt = resolve_affordance_checkpoint(
-        hp_affordance=bool(args.hp_affordance),
+        hp_affordance=hp_for_ckpt,
         affordance_checkpoint=args.affordance_checkpoint,
     )
     args.affordance_checkpoint = str(aff_ckpt)
@@ -556,10 +568,15 @@ def main() -> None:
     if args.candidates_only:
         if args.dry_run:
             raise SystemExit("--candidates-only does not support --dry-run yet")
+        _aff_log = (
+            aff_ckpt.name
+            if uses_v6_affordance_gate(args.candidate_backend)
+            or (args.candidate_backend == CANDIDATE_BACKEND_PDM)
+            else "n/a"
+        )
         _important(
             args,
-            f"[pool] affordance checkpoint: {aff_ckpt}"
-            + (" (hp-affordance)" if args.hp_affordance else ""),
+            f"[pool] candidate-backend={args.candidate_backend} affordance_ckpt={_aff_log}",
         )
         pool_size = _trials_per_obj_yaw(args)
         yaw_values_by_obj = {
@@ -578,10 +595,17 @@ def main() -> None:
             f"[pool] candidates-only: {len(obj_ids)} object(s), "
             f"{pool_size} pose(s)/obj×yaw, {n_tasks} pool file(s)",
         )
-        if not args.no_hard_gate:
-            _important(args, "[pool] hard gate ON (pass --no-hard-gate to disable)")
-        if not args.no_filtering:
-            _important(args, "[pool] filtering ON (pass --no-filtering to disable)")
+        if not is_random_candidate_backend(args.candidate_backend):
+            if not args.no_hard_gate:
+                _important(args, "[pool] PDM hard gate ON (pass --no-hard-gate to disable)")
+            if not args.no_filtering:
+                _important(args, "[pool] PDM filtering ON (pass --no-filtering to disable)")
+        else:
+            _important(
+                args,
+                "[pool] random raycast gates: dual-contact, width 5–80mm, finger depth ≤4cm"
+                + (", v6 both-contact norm≥0.3" if args.candidate_backend != "random_pure" else ""),
+            )
         tasks = build_candidate_tasks(
             obj_ids=obj_ids,
             yaw_values_by_obj=yaw_values_by_obj,
@@ -600,6 +624,7 @@ def main() -> None:
             batch_multiplier=int(args.candidate_batch_multiplier),
             max_batches=int(args.candidate_max_batches),
             object_scale=float(args.object_scale),
+            candidate_backend=str(args.candidate_backend),
             no_hard_gate=bool(args.no_hard_gate),
             no_filtering=bool(args.no_filtering),
             pdm_checkpoint=args.pdm_checkpoint,
@@ -615,8 +640,7 @@ def main() -> None:
     _important(args, f"[pool] generating/loading solutions for {len(obj_ids)} object(s)")
     _important(
         args,
-        f"[pool] affordance checkpoint: {aff_ckpt}"
-        + (" (hp-affordance)" if args.hp_affordance else ""),
+        f"[pool] candidate-backend={args.candidate_backend} affordance_ckpt={aff_ckpt}",
     )
     manifest = generate_solutions(
         obj_ids=obj_ids,
@@ -642,6 +666,7 @@ def main() -> None:
         candidate_batch_multiplier=args.candidate_batch_multiplier,
         candidate_max_batches=args.candidate_max_batches,
         object_scale=args.object_scale,
+        candidate_backend=str(args.candidate_backend),
         no_hard_gate=bool(args.no_hard_gate),
         no_filtering=bool(args.no_filtering),
         pdm_checkpoint=args.pdm_checkpoint,

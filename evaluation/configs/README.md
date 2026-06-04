@@ -34,6 +34,31 @@ python tools/package_eval_ge30_usd_bundle.py
 # → output/eval_objects_ge30_sim_bundle/
 ```
 
+## Random-raycast eval ablations (`eval_pool`)
+
+Three extra candidate backends (still `--policy a2g_pdm`, read pool HDF5):
+
+| `--candidate-backend` | Affordance gate | Geometry hard gates |
+|-----------------------|-----------------|---------------------|
+| `random_rp` | Robot posterior v6, both contacts norm ≥ 0.3 | Dual-contact raycast, width 5–80 mm, finger depth ≤ 4 cm |
+| `random_hp` | HP v6, both contacts norm ≥ 0.3 | Same |
+| `random_pure` | None | Same |
+
+```bash
+python evaluation/eval_pool.py \
+  --obj-list evaluation/configs/eval_objects_merged_success_ge30.csv \
+  --generate-candidate-each-trial \
+  --candidate-backend random_rp \
+  --trials-per-obj-yaw 5 \
+  --z-yaw-deg 0 \
+  --selection sample \
+  --headless --sim-gpu-ids 0 \
+  --result-dir output/evaluation/random_rp_ge30_yaw0_t5 \
+  --save-hdf5
+```
+
+Use `random_hp` or `random_pure` instead of `random_rp`. Candidate generation runs `tools/batch_random_candidates.py` (not PDM).
+
 ## Multi-round ablation (`tools/run_round_eval.py`)
 
 Setups **1a–4b** × **10 rounds** (default): each run is full `eval_pool` (candidate gen + sim), 5 trials/object, results under `output/round_eval/{round}_{setup}/`, summary CSV at `output/round_eval/round_eval_summary.csv`.

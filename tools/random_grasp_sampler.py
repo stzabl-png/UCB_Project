@@ -80,10 +80,21 @@ STRUCTURED_NORMAL_INWARD_COS = 0.25  # n₁·chord ≤ -τ 且 n₂·chord ≥ �
 STRUCTURED_APPROACH_Z_MAX_COS = 0.3    # 与 sample_approach_dirs 一致：禁桌底穿入
 STRUCTURED_LOCAL_THICKNESS_MIN = 0.02  # c₁ 切向最大厚度 < 2cm → 跳过
 SAMPLING_METHOD_RAYCAST = 'raycast_scored_v2'
+SAMPLING_METHOD_EVAL_RAYCAST = 'eval_raycast_gated_v1'
 SAMPLING_METHOD_STRUCTURED = 'hp_contact_pair_v1'
 SAMPLING_METHOD_ANCHORED = 'anchored_contact_v2'
 SAMPLING_METHOD_MIXED = 'mixed_anchored_raycast_v1'
 MIXED_ANCHORED_FRACTION = 0.5
+
+
+def sample_approach_dirs_uniform(n: int) -> list:
+    """Uniform random unit approach directions (no tabletop z filter)."""
+    dirs = []
+    while len(dirs) < n:
+        v = np.random.randn(3).astype(np.float32)
+        v /= np.linalg.norm(v) + 1e-8
+        dirs.append(v)
+    return dirs
 
 
 def sample_approach_dirs(n: int, z_max_cos: float = 0.3) -> list:
@@ -724,6 +735,117 @@ def sample_points(mesh, hp_pc, hp_labels, n_total, has_hp, mesh_contains=None):
             points.append(p.astype(np.float32))
 
     return points
+
+
+def sample_points_pure_random(mesh, n_total, mesh_contains=None):
+    """100% uniform bbox interior samples (eval random_pure ablation)."""
+    m_in = mesh_contains if mesh_contains is not None else mesh
+    points = []
+    if n_total <= 0:
+        return points
+    bbox_min, bbox_max = mesh.bounds[0], mesh.bounds[1]
+    all_pts = np.random.uniform(bbox_min, bbox_max, size=(n_total * 20, 3))
+    inside = _points_inside(m_in, all_pts)
+    for p in all_pts[inside][:n_total]:
+        points.append(p.astype(np.float32))
+    return points
+
+
+def generate_one_batch_eval(
+    mesh,
+    points,
+    z_min,
+    z_max,
+    mesh_rc=None,
+    *,
+    affordance_gate=None,
+):
+    """Eval ablation raycast: dual-contact raycast, width bounds, optional affordance gate, finger depth."""
+    rc = mesh_rc if mesh_rc is not None else mesh
+    candidates = []
+    for pt in points:
+        for approach in sample_approach_dirs_uniform(N_APPROACH_PER_PT):
+            finger_dir = choose_finger_dir(approach)
+
+            hits_pos, _, _ = rc.ray.intersects_location([pt], [finger_dir])
+            hits_neg, _, _ = rc.ray.intersects_location([pt], [-finger_dir])
+
+            if len(hits_pos) == 0 or len(hits_neg) == 0:
+                continue
+
+            d_pos = np.linalg.norm(hits_pos - pt, axis=1)
+            d_neg = np.linalg.norm(hits_neg - pt, axis=1)
+            nearest_pos = hits_pos[np.argmin(d_pos)]
+            nearest_neg = hits_neg[np.argmin(d_neg)]
+
+            width = np.linalg.norm(nearest_pos - nearest_neg)
+            if width > MAX_GRIPPER_OPEN or width < MIN_GRIPPER_WIDTH:
+                continue
+
+            contact_l = nearest_neg.astype(np.float32)
+            contact_r = nearest_pos.astype(np.float32)
+            if affordance_gate is not None and not affordance_gate(contact_l, contact_r):
+                continue
+
+            grasp_center = ((nearest_pos + nearest_neg) / 2.0).astype(np.float32)
+            cand = _build_candidate_dict(
+                mesh,
+                z_min,
+                z_max,
+                grasp_center=grasp_center,
+                contact_L=contact_l,
+                contact_R=contact_r,
+                width=float(width),
+                approach=approach,
+                finger_dir=finger_dir,
+                mesh_rc=rc,
+            )
+            if cand is not None:
+                candidates.append(cand)
+    return candidates
+
+
+def generate_candidates_eval_pool(
+    mesh,
+    *,
+    mesh_rc=None,
+    target_n: int = 50,
+    affordance_gate=None,
+    max_batches: int | None = None,
+) -> tuple[list[dict], dict]:
+    """Iterative random pool for eval: G1–G3 (+ optional affordance gate); no object-size / score cutoffs."""
+    target_n = max(1, int(target_n))
+    max_batches = max_sampler_batches(target_n) if max_batches is None else max(1, int(max_batches))
+    rc = mesh_rc if mesh_rc is not None else mesh
+    z_min, z_max = mesh.bounds[0][2], mesh.bounds[1][2]
+    stats: dict = {
+        "n_batches_used": 0,
+        "n_candidates_generated": 0,
+        "n_final": 0,
+    }
+    all_candidates: list[dict] = []
+    for batch_idx in range(max_batches):
+        stats["n_batches_used"] = batch_idx + 1
+        pts = sample_points_pure_random(mesh, N_POINTS_PER_BATCH, mesh_contains=rc)
+        new_cands = generate_one_batch_eval(
+            mesh,
+            pts,
+            z_min,
+            z_max,
+            mesh_rc=rc,
+            affordance_gate=affordance_gate,
+        )
+        all_candidates.extend(new_cands)
+        stats["n_candidates_generated"] = len(all_candidates)
+        if len(all_candidates) >= target_n:
+            break
+
+    all_candidates.sort(key=lambda c: -float(c.get("score", 0.0)))
+    selected = all_candidates[:target_n]
+    for i, c in enumerate(selected):
+        c["name"] = f"eval_raycast_{i}"
+    stats["n_final"] = len(selected)
+    return selected, stats
 
 
 def choose_finger_dir(approach):
