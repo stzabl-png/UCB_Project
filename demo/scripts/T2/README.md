@@ -2,6 +2,17 @@
 
 Interactive single-frame object mask for Phase 2 sessions.
 
+## Lab workflow (Titan daemon — recommended)
+
+1. Titan: `python -m demo.pipeline.segment_daemon` (always on)
+2. Razor rsync `input/` + `python demo/razor/mark_upload_complete.py --session-dir …`
+3. Laptop: `ssh -L 7860:127.0.0.1:7860 user@titan` → http://127.0.0.1:7860
+4. **Save mask** → **Done** (daemon unblocks and runs T3–T7)
+
+Do **not** rely on `ssh 'python -m demo.pipeline.process_razor_session'` for SAM2 labeling.
+
+See [demo/SERVER_CLIENT_PLAN.md](../../SERVER_CLIENT_PLAN.md#56-titan-segment-daemon-recommended).
+
 ## Prerequisites (one-time)
 
 SAM2 lives in `third_party/sam2` (not under `demo/scripts`). Use **bundlesdf** for inference.

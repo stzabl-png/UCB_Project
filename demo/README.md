@@ -9,7 +9,7 @@ Phase 2 extends the [Phase 1](../phase1/README.md) pick-and-lift demo: **grasp p
 | **Razor** (lab laptop, Dexmate Vega + Sharpa HA4) | Capture RGB-D + robot/camera calibration → pack **input session** → rsync to Titan → receive **output session** → transform poses to `R_ee` → Phase 1 motion planning + grasp |
 | **Titan** (GPU server, UCB_Project + SAM3D + FoundationPose) | SAM2 mask → SAM3D mesh → depth scale → **FoundationPose** + base align → **PDM** (`run_pdm_grasp.py`) → pack **output session** → rsync back |
 
-**Transport (v0): manual `rsync`** — no automated client yet. See **[SERVER_CLIENT_PLAN.md](SERVER_CLIENT_PLAN.md)** for the **auto demo pipeline** spec (SSH keys, job flow, `python -m demo.pipeline` on Titan).
+**Transport:** rsync + **[Titan segment daemon](SERVER_CLIENT_PLAN.md#56-titan-segment-daemon-recommended)** (interactive T2 in browser via SSH tunnel). See **[SERVER_CLIENT_PLAN.md](SERVER_CLIENT_PLAN.md)** for Razor client (`run_server_client_pipeline.py` on [V2AP-demo](https://github.com/jiaka1chen/V2AP-demo)).
 
 **Upstream method code:** [UCB_Project `titan`](https://github.com/stzabl-png/UCB_Project/tree/titan) — especially `inference/grasp_pose.py`, `tools/batch_obj_pose_ego.py` / `run_fp()` (FoundationPose), scale patterns in `data/estimate_obj_scale_ego.py`.
 
@@ -30,7 +30,8 @@ Phase 2 extends the [Phase 1](../phase1/README.md) pick-and-lift demo: **grasp p
 | Auto grasp + OMPL + stall-close | ✅ | `run_auto_grasp.py` → Phase 1 `executor.py` |
 | Pre-grasp object collision box (Titan mesh AABB) | ✅ | `object_obstacle.py` |
 | EE retarget calib YAML | ✅ | `calib/ee_retarget.yaml`, `calibrate_ee_retarget.py` |
-| Titan **auto demo pipeline** (T1–T7) | ✅ | `python -m demo.pipeline` — [pipeline/README.md](pipeline/README.md) |
+| Titan **segment daemon** (T2 web + T3–T7) | ✅ | `python -m demo.pipeline.segment_daemon` — [pipeline/README.md](pipeline/README.md) |
+| Titan one-shot pipeline (batch T2 only) | ✅ | `python -m demo.pipeline.process_razor_session` (needs `prompt.json` or mask) |
 | Razor→Titan **auto demo pipeline** client | ✅ (Razor) | `run_server_client_pipeline.py` on V2AP-demo — see [SERVER_CLIENT_PLAN.md](SERVER_CLIENT_PLAN.md) |
 
 **Primary test session:** `sessions/20260602_192346_chips/` (chips on lab table).
@@ -43,20 +44,65 @@ Phase 2 extends the [Phase 1](../phase1/README.md) pick-and-lift demo: **grasp p
 Razor                                              Titan
 ─────                                              ─────
 
-1. Place object on table
-2. python demo/phase2/capture_session.py --object-name chips
-   → start pose → arm_j3 spread → RGB-D → arms back to start
-   → writes sessions/<id>/input/
-3. Human rsync input/ ──────────────────────────►  demo/sessions/<id>/input/
-                                                   4. auto demo pipeline: python -m demo.pipeline …
-                                                      (SAM → SAM3D → scale → FP+align → PDM)
-                                                   5. writes …/<id>/output/status.json + candidates.json
-6. Human rsync output/ ◄────────────────────────  …/<id>/output/
-7. python demo/phase2/run_auto_grasp.py --session-id <id>
-   (open-grip IK filter → retarget → OMPL → stall-close → lift)
+0. (once) Titan: python -m demo.pipeline.segment_daemon
+1. Place object; capture_session.py → sessions/<id>/input/
+2. rsync input/ ─────────────────────────────────► demo/sessions/<id>/input/
+3. mark input/.upload_complete (Razor script)     4. daemon: T2 SAM2 web (tunnel :7860)
+   poll status.json                                   Save mask → Done → T3–T7
+5. rsync output/ ◄────────────────────────────────  output/status.json success
+6. review_titan_vis.py (T3–T6 PNGs, blocking)
+7. run_auto_grasp.py (Open3D pose preview + Enter, blocking, then motion)
 ```
 
-**Future (v1):** Razor `run_server_client_pipeline.py` replaces steps 3–6 via SSH + rsync — see [SERVER_CLIENT_PLAN.md](SERVER_CLIENT_PLAN.md).
+Details: [Titan segment daemon (recommended)](#titan-segment-daemon-recommended) · [SERVER_CLIENT_PLAN.md](SERVER_CLIENT_PLAN.md).
+
+## Titan segment daemon (recommended)
+
+Interactive T2 does **not** work when Razor only runs `ssh … python -m demo.pipeline` — the SAM2 browser UI runs on Titan and must be opened via **SSH port forward**.
+
+### Titan (keep running)
+
+```bash
+cd /home/vision/Project/Affordance2Grasp
+conda activate bundlesdf
+export FP_ROOT="$PWD/third_party/FoundationPose"
+
+python -m demo.pipeline.segment_daemon
+# watches demo/sessions/*/input/.upload_complete
+```
+
+### Razor (per capture)
+
+```bash
+SESSION=20260602_192346_chips
+rsync -avz "${RAZOR_REPO}/demo/phase2/sessions/${SESSION}/input/" \
+  "${TITAN}:${UCB_ROOT}/demo/sessions/${SESSION}/input/"
+
+# On Titan (or from Razor if Affordance2Grasp on PATH):
+python demo/razor/mark_upload_complete.py --session-dir demo/sessions/${SESSION}
+```
+
+### Operator (SAM2 in browser)
+
+```bash
+ssh -L 7860:127.0.0.1:7860 vision@<titan-host>
+# open http://127.0.0.1:7860
+# click FG/BG points → Save mask → Done (closes server; daemon continues T3–T7)
+```
+
+**Blocking rule:** daemon waits until **`output/segment/mask.png`** exists and operator clicked **Done** (not merely closing the tab without save).
+
+**Skip web UI** if you rsync `input/segment/prompt.json` (batch SAM2) or pre-upload `output/segment/mask.png`.
+
+**Status polling (Razor):** read `output/status.json` — `state`: `waiting_segment` | `running` | `done` | `failed`; also `output/daemon_state.json`.
+
+### One-shot pipeline (no daemon)
+
+Only when T2 is non-interactive:
+
+```bash
+python -m demo.pipeline.process_razor_session --session-dir demo/sessions/<id>
+```
 
 ---
 
@@ -745,6 +791,25 @@ Razor **may** read HDF5 or prefer `candidates.json` only (no h5py dependency on 
 Implemented in V2AP-demo (`demo/phase2/run_auto_grasp.py`, not on Titan).  
 Titan output contract for Razor: **[TITAN_OUTPUT.md](TITAN_OUTPUT.md)**.
 
+### Step R0 — Review Titan output (blocking, after rsync)
+
+After `output/` is on Razor and `status.json` has `success: true`, show **T3→T6** vis PNGs **one at a time**. Each window **blocks** until closed; then show the next.
+
+| # | File |
+|---|------|
+| 1 | `output/vis/T3_sam3d_mesh_preview.png` |
+| 2 | `output/vis/T4_scale_scene_preview.png` |
+| 3 | `output/vis/T5_foundationpose_overlay.png` |
+| 4 | `output/vis/T6_grasp_vis.png` |
+
+Helper (Affordance2Grasp, callable from `run_server_client_pipeline.py`):
+
+```bash
+python demo/razor/review_titan_vis.py --session-dir demo/phase2/sessions/<session_id>
+```
+
+Use `--skip` only for headless runs.
+
 ### Step R1 — Load session output
 
 - Require `output/status.json` with `success: true`.
@@ -785,6 +850,15 @@ Defaults (`calib/ee_retarget.yaml`):
 
 After IK, `grasp_pose` (`R_ee`) is synced from FK for logging/OMPL seeds. Legacy `T_ee_pinch_closed` in yaml is kept for debug/calibration tools only.
 
+### Step R3b — Grasp pose preview (blocking, before motion)
+
+**Default** `run_auto_grasp.py` (V2AP-demo) — **yes, still pops up the selected pose**:
+
+1. **Open3D preview** (`visualize_grasp.py`) of the IK-selected candidate — window **blocks until closed**.
+2. **Enter / confirm** in terminal — **blocks** before OMPL + stall-close + lift.
+
+Skip only with `--no-visualize` (no Open3D) and/or `--debug` (no Enter prompts). Normal lab runs use neither flag.
+
 ### Step R4 — Candidate selection + Phase 1 executor
 
 **Candidate filter (no OMPL):** for each Titan rank (random try order by default):
@@ -809,8 +883,8 @@ python demo/phase2/run_auto_grasp.py --session-id 20260602_192346_chips --no-ran
 | `--object-obstacle` | Titan mesh AABB in pre-grasp OMPL only |
 | `--max-candidates N` | IK try pool size (default 10) |
 | `--random-candidate` / `--seed` | Shuffle try order each run (default on) |
-| `--no-visualize` | Skip Open3D grasp preview |
-| `--debug` | Verbose logs + no Enter prompts |
+| `--no-visualize` | Skip Open3D grasp preview (non-default; breaks blocking pose review) |
+| `--debug` | Verbose logs + **no Enter prompts** (non-default; motion starts right after IK) |
 
 Sequence: home/start → **pre_grasp** (OMPL + optional object box) → **grasp approach** (OMPL, no box) → **stall-close** (closed profile) → **lift**.
 

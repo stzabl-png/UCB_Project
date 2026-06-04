@@ -221,49 +221,109 @@ Razor **must** read this before grasp. Write **last** (`status.json.tmp` → ren
 
 Update `state`/`updated_at_iso` at each step start/end if implementing long jobs.
 
-### 5.4 Razor integration (V2AP-demo client)
+### 5.4 Razor operator UX (blocking review)
+
+After rsync download and `status.json` success, Razor should **pause the pipeline** for human review:
+
+1. **Titan vis sequence (T3→T6)** — open each PNG in order; **block until the window is closed** before the next. Files:
+   - `output/vis/T3_sam3d_mesh_preview.png`
+   - `output/vis/T4_scale_scene_preview.png`
+   - `output/vis/T5_foundationpose_overlay.png`
+   - `output/vis/T6_grasp_vis.png`  
+   Reference implementation: `Affordance2Grasp/demo/razor/review_titan_vis.py` (wire into `run_server_client_pipeline.py` after download).
+
+2. **Grasp execution** — `run_auto_grasp.py` **default** (no `--no-visualize`, no `--debug`):
+   - After IK picks a candidate → **Open3D grasp preview** of the selected pose — **block until closed**.
+   - **Enter / confirm** — block again before arm motion starts.
+
+Headless/automation only: `--skip` on vis review; `--no-visualize` and/or `--debug` on grasp.
+
+### 5.5 Razor integration (V2AP-demo client)
 
 | Item | Value |
 |------|--------|
 | Titan session root | `$UCB_ROOT/demo/sessions/<session_id>/` |
-| Rsync subdir (under UCB repo) | `demo/sessions` |
-| Razor orchestrator script | `run_server_client_pipeline.py` (V2AP-demo) |
-| Titan remote command | `python -m demo.pipeline.process_razor_session --session-dir demo/sessions/<id> --device cuda` |
+| Rsync subdir | `demo/sessions` |
+| Razor orchestrator | `run_server_client_pipeline.py` ([V2AP-demo](https://github.com/jiaka1chen/V2AP-demo)) |
+| Upload done marker | `input/.upload_complete` (see `demo/razor/mark_upload_complete.py`) |
+| Titan worker | **`segment_daemon` always on** — not one-shot SSH pipeline |
 
-**Suggested Razor env (map into client config):**
+**Suggested Razor env:**
 
 ```bash
-export UCB_ROOT=/home/vision/Project/Affordance2Grasp   # on Titan SSH session
+export UCB_ROOT=/home/vision/Project/Affordance2Grasp
 export PIPELINE_REMOTE_SESSIONS_SUBDIR=demo/sessions
-export PIPELINE_TITAN_CMD='python -m demo.pipeline.process_razor_session --session-dir {session_dir} --device cuda'
-# {session_dir} → e.g. demo/sessions/20260602_192346_chips (relative to UCB_ROOT on Titan)
+export PIPELINE_TITAN_UPLOAD_MARKER=input/.upload_complete
+export PIPELINE_TITAN_SEGMENT_TUNNEL_PORT=7860
+# Do NOT ssh-run process_razor_session for normal capture (T2 web won't show on Razor).
 ```
 
-**T2 before upload:** Either pack `input/segment/prompt.json` on Razor, or rsync a pre-made `output/segment/mask.png` and run Titan with `--skip-sam`. Without both, `demo.pipeline` **fails at T2** (no interactive SAM in batch mode).
+**Conda on Titan:** daemon uses `bundlesdf`; full pipeline still runs T3 in `sam3d-objects` automatically.
 
-**Conda on Titan:** Orchestrator runs T3 in `sam3d-objects` and T1/T2/T4/T5/T6/T7 in `bundlesdf` — Razor SSH only needs `bundlesdf` activated if invoking the module entrypoint (orchestrator re-invokes per-step interpreters).
+### 5.6 Titan segment daemon (recommended)
 
-### 5.5 Remote invocation from Razor (v1)
+**Problem:** `ssh titan 'python -m demo.pipeline …'` runs T2 without a display on your laptop. SAM2 must be reviewed in a **browser** via tunnel to Titan’s Flask UI (`demo/scripts/T2/segment_web.py`).
 
-`run_server_client_pipeline.py` runs **after** rsync upload:
+**Solution:** Start the daemon once on Titan; Razor only rsyncs + marks upload complete + polls status.
+
+#### Titan (long-running)
 
 ```bash
-ssh titan-demo-pipeline "cd ${UCB_ROOT} && \
-  export FP_ROOT=${UCB_ROOT}/third_party/FoundationPose && \
-  python -m demo.pipeline.process_razor_session \
-    --session-dir demo/sessions/${SESSION_ID} \
-    --device cuda"
+cd "$UCB_ROOT"
+conda activate bundlesdf
+export FP_ROOT="$UCB_ROOT/third_party/FoundationPose"
+
+python -m demo.pipeline.segment_daemon
+# --port 7860  --poll-interval 5
 ```
 
-(`demo.pipeline` selects `sam3d-objects` / `bundlesdf` per step; no manual conda switch required for full pipeline.)
+#### Razor (per session)
 
-Titan should:
+```bash
+# 1) upload input/
+rsync -avz .../input/ titan-demo-pipeline:${UCB_ROOT}/demo/sessions/${SESSION}/input/
 
-- Exit code **0** iff `success: true` in final `status.json`
-- Exit code **non-zero** on fatal error (Razor treats as failed job)
-- Log to `output/logs/process.log` (recommended)
+# 2) signal daemon (on Titan, or via ssh one-liner)
+ssh titan-demo-pipeline "cd ${UCB_ROOT} && python demo/razor/mark_upload_complete.py \
+  --session-dir demo/sessions/${SESSION}"
 
-### 5.6 Rsync commands (reference)
+# 3) operator opens SAM2 (separate terminal)
+ssh -L 7860:127.0.0.1:7860 titan-demo-pipeline
+# browser → http://127.0.0.1:7860 — Save mask → Done
+
+# 4) poll until output/status.json success=true, then rsync output/
+```
+
+#### Daemon behavior
+
+| Step | Action |
+|------|--------|
+| Queue | `input/.upload_complete` present, no `input/.upload_processed` |
+| T2 | If no `prompt.json` and no `mask.png` → start Flask on `127.0.0.1:7860`, **block until Done** |
+| T3–T7 | `run_pipeline` with `--skip-sam` if mask already saved |
+| Done | `mark_upload_processed`, `status.json` `success: true` |
+
+**Artifacts for Razor polling:**
+
+| File | `state` examples |
+|------|------------------|
+| `output/status.json` | `waiting_segment`, `running`, `done`, `failed` |
+| `output/daemon_state.json` | same + `segment_url` |
+
+**Non-interactive T2 (no browser):** rsync `input/segment/prompt.json` or pre-upload `output/segment/mask.png` — daemon skips web and runs batch/`--skip-sam`.
+
+**Manual replay:** `python -m demo.pipeline.segment_daemon --session-dir demo/sessions/<id> --redo`
+
+#### Do not use for interactive capture
+
+```bash
+# BAD for lab SAM2 labeling — UI stays on Titan, not your SSH session:
+ssh titan "python -m demo.pipeline.process_razor_session --session-dir ..."
+```
+
+Use `process_razor_session` only when T2 is already satisfied (`prompt.json` or `mask.png`).
+
+### 5.7 Rsync commands (reference)
 
 **Razor → Titan (upload input):**
 
@@ -291,11 +351,14 @@ States stored in Razor `sessions/<id>/orchestrator_state.json` (future) and Tita
 ```text
 CREATED          Razor: capture_session.py finished, input/ valid
 UPLOADING        rsync input/ → Titan
-QUEUED/RUNNING   Titan: auto demo pipeline (python -m demo.pipeline)
+UPLOAD_MARKED    input/.upload_complete written
+WAITING_SEGMENT  Titan daemon: T2 Flask (operator tunnel :7860, Save, Done)
+RUNNING          Titan: T3–T7 pipeline
 DONE             status.json success=true
 DOWNLOADING      rsync output/ ← Titan
-READY_FOR_GRASP  Razor: run_auto_grasp.py
-GRASP_DONE       optional terminal state
+REVIEW_VIS       Razor: blocking T3→T6 PNG popups
+READY_FOR_GRASP  Razor: run_auto_grasp.py (Open3D + Enter, then motion)
+GRASP_DONE       optional
 FAILED           any step; preserve logs
 ```
 
@@ -341,9 +404,9 @@ Razor reads **`grasp_point` + `rotation`** in mesh frame, **not** `position_pand
 
 | Phase | Titan work | Razor work | Acceptance |
 |-------|------------|------------|------------|
-| **A** | Accept rsync; manual `python -m demo.pipeline` | Manual rsync (today) | One session end-to-end |
-| **B** | Stable `status.json` + exit codes | Shell script: upload → ssh → download | No manual Titan login |
-| **C** | `state` polling + `process.log` | `run_server_client_pipeline.py` + `orchestrator_state.json` | Single command from Razor |
+| **A** | `segment_daemon` + `input/.upload_complete` | rsync + mark + tunnel SAM2 + poll | One session E2E (current) |
+| **B** | Stable `status.json` + daemon states | `run_server_client_pipeline.py` automates rsync/poll | No manual Titan shell |
+| **C** | queue / multi-GPU policy | orchestrator_state on Razor | Multi-session lab |
 | **D** (opt) | HTTP job API + queue | Client uses API + rsync for blobs | Multi-user / queue |
 
 **Titan minimum for phase B:** sections 5.1, 5.3, 5.4, 5.5 working reliably.
@@ -354,7 +417,8 @@ Razor reads **`grasp_point` + `rotation`** in mesh frame, **not** `position_pand
 
 - [x] Create `$UCB_ROOT/demo/sessions/`  
 - [ ] Add Razor SSH public key to `authorized_keys` (Razor team)  
-- [x] `python -m demo.pipeline.process_razor_session --session-dir ...` on Titan  
+- [x] `python -m demo.pipeline.process_razor_session --session-dir ...` (batch T2 only)  
+- [x] `python -m demo.pipeline.segment_daemon` (interactive T2 + T3–T7)  
 - [x] `output/status.json` + `output/logs/process.log`  
 - [x] Exit 0/1 based on `success`  
 - [x] T2 batch via `input/segment/prompt.json` → `segment_prompt.py`  
@@ -380,3 +444,4 @@ Razor reads **`grasp_point` + `rotation`** in mesh frame, **not** `position_pand
 |------|-------|
 | 2026-06-03 | Initial plan: SSH client on Razor, server on Titan, rsync v1 |
 | 2026-06-03 | Standardize naming: auto demo pipeline; paths under `demo/` |
+| 2026-06-03 | Add `segment_daemon` + `input/.upload_complete` for interactive T2 |

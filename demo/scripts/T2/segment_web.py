@@ -313,6 +313,68 @@ def create_app(sess: AnnotatorSession, port: int) -> Flask:
     return app
 
 
+def run_segment_web(
+    dirs,
+    *,
+    host: str = "127.0.0.1",
+    port: int = 7860,
+    redo: bool = False,
+) -> int:
+    """
+    Block until operator saves mask and clicks Done (Flask server exits).
+
+    Returns 0 if mask.png exists after shutdown, else 1.
+    """
+    err = check_sam2_installed()
+    if err:
+        print(err, file=sys.stderr)
+        return 2
+
+    rgb_path = dirs.input_rel("rgb", "left_rgb.png")
+    mask_out = dirs.output_rel("segment", "mask.png")
+
+    if not rgb_path.is_file():
+        print(f"Missing {rgb_path}", file=sys.stderr)
+        return 1
+    if mask_out.is_file() and not redo:
+        print(f"{mask_out} exists — use --redo to re-annotate")
+        return 0
+
+    print("Loading SAM2...")
+    engine = Sam2Predictor()
+    rgb = load_rgb_pil(rgb_path)
+    engine.set_image(rgb)
+
+    session_id = session_id_from_dirs(dirs.input_dir, dirs.session_id)
+    out_segment = dirs.output_rel("segment")
+    out_segment.mkdir(parents=True, exist_ok=True)
+
+    sess = AnnotatorSession(
+        rgb=rgb,
+        engine=engine,
+        out_segment=out_segment,
+        mask_path=out_segment / "mask.png",
+        session_id=session_id,
+    )
+
+    print(f"RGB {rgb.shape[1]}x{rgb.shape[0]}  session {session_id}")
+    print(f"T2 web UI: http://127.0.0.1:{port}  (server bind {host}:{port})")
+    print(f"  ssh -L {port}:127.0.0.1:{port} <user>@<titan-host>")
+    print("Save mask, then click Done to continue the Titan daemon.")
+
+    app = create_app(sess, port)
+    try:
+        app.run(host=host, port=port, threaded=True, debug=False)
+    except KeyboardInterrupt:
+        pass
+    print("T2 web server stopped.")
+
+    if mask_out.is_file() and (out_segment / "prompt_used.json").is_file():
+        return 0
+    print("T2 incomplete: save mask and click Done before closing.", file=sys.stderr)
+    return 1
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Phase 2 T2: SAM2 Flask web UI")
     g = ap.add_mutually_exclusive_group(required=True)
@@ -324,53 +386,17 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--redo", action="store_true")
     args = ap.parse_args(argv)
 
-    err = check_sam2_installed()
-    if err:
-        print(err, file=sys.stderr)
-        return 2
-
     dirs = resolve_session_dirs(
         session_dir=args.session_dir,
         input_dir=args.input_dir,
         output_dir=args.output_dir,
     )
-    rgb_path = dirs.input_rel("rgb", "left_rgb.png")
-    mask_out = dirs.output_rel("segment", "mask.png")
-
-    if not rgb_path.is_file():
-        print(f"Missing {rgb_path}", file=sys.stderr)
-        return 1
-    if mask_out.is_file() and not args.redo:
-        print(f"{mask_out} exists — use --redo", file=sys.stderr)
-        return 1
-
-    print("Loading SAM2...")
-    engine = Sam2Predictor()
-    rgb = load_rgb_pil(rgb_path)
-    engine.set_image(rgb)
-
-    session_id = session_id_from_dirs(dirs.input_dir, dirs.session_id)
-    out_segment = dirs.output_rel("segment")
-
-    sess = AnnotatorSession(
-        rgb=rgb,
-        engine=engine,
-        out_segment=out_segment,
-        mask_path=out_segment / "mask.png",
-        session_id=session_id,
+    return run_segment_web(
+        dirs,
+        host=args.host,
+        port=args.port,
+        redo=args.redo,
     )
-
-    print(f"RGB {rgb.shape[1]}x{rgb.shape[0]}  session {session_id}")
-    print(f"Open via tunnel: http://127.0.0.1:{args.port}")
-    print(f"  ssh -L {args.port}:127.0.0.1:{args.port} <user>@<titan-host>")
-
-    app = create_app(sess, args.port)
-    try:
-        app.run(host=args.host, port=args.port, threaded=True, debug=False)
-    except KeyboardInterrupt:
-        pass
-    print("T2 web server stopped.")
-    return 0
 
 
 if __name__ == "__main__":

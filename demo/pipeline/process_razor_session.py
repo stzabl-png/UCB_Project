@@ -2,6 +2,9 @@
 """
 Phase 2 pipeline entry — run T1–T7 for one Razor session.
 
+For interactive SAM2 in the browser, use the Titan daemon instead:
+  python -m demo.pipeline.segment_daemon
+
 Usage (from Affordance2Grasp repo root):
 
   export FP_ROOT=/path/to/third_party/FoundationPose
