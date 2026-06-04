@@ -12,7 +12,10 @@ Per-step debug scripts live under `T1/`, `T2/`, … Model weights stay in repo d
 | T5 | [T5/](T5/) | `register_foundationpose.py` → `T_cam_mesh`, overlay |
 | T6 | [T6/](T6/) | `run_pdm_grasp.py` — PDM → `candidates.json` |
 | T7 | [T7/](T7/) | `write_status.py` — finalize `output/status.json` for Razor |
+| T2 batch | [T2/segment_prompt.py](T2/segment_prompt.py) | SAM2 from `input/segment/prompt.json` |
 
-**Titan → Razor package doc:** [TITAN_OUTPUT.md](../TITAN_OUTPUT.md)
+**Orchestrator:** `python -m demo.pipeline` — [demo/pipeline/README.md](../pipeline/README.md)
+
+**Titan → Razor package doc:** [TITAN_OUTPUT.md](../TITAN_OUTPUT.md) · **Automation:** [SERVER_CLIENT_PLAN.md](../SERVER_CLIENT_PLAN.md)
 
 Spec: [demo/README.md](../README.md).

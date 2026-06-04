@@ -1,10 +1,12 @@
 # Titan `output/` package (for Razor)
 
-**Titan** writes this tree after Phase 2 perception (T2–T6). **Razor** ([V2AP-demo](https://github.com/jiaka1chen/V2AP-demo)) rsyncs `output/` and runs retarget + IK.
+**Titan** writes this tree after Phase 2 perception (T2–T6). **Razor** rsyncs `output/` and runs retarget + IK.
+
+**Automation (Titan team):** [SERVER_CLIENT_PLAN.md](SERVER_CLIENT_PLAN.md) — SSH/rsync, `process_razor_session`, `status.json`.
 
 This doc describes **what Titan produces**, coordinate frames, and how Razor consumes `candidates.json` (not files that Razor generates).
 
-Titan contract (full spec): [demo/README.md](README.md).
+Full input/output spec: [README.md](README.md).
 
 ---
 

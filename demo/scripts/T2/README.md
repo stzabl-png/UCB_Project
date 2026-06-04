@@ -102,3 +102,14 @@ output/segment/
 - RGB is loaded with **PIL** (correct for chips session); SAM2 server also uses PIL.
 - Default SAM2 subprocess uses `bundlesdf` python (`--python` to override).
 - Shared paths: `demo/scripts/_session_io.py` (`--session-dir` / `--input-dir`).
+
+### C. Batch from `input/segment/prompt.json` (S2R / Razor)
+
+When Razor saves click prompts in `input/segment/prompt.json` (see [demo/README.md](../../README.md)):
+
+```bash
+python demo/scripts/T2/segment_prompt.py \
+  --session-dir demo/sessions/<session_id>
+```
+
+Used automatically by `python -m demo.pipeline` when mask is missing but prompt exists.

@@ -9,11 +9,31 @@ Phase 2 extends the [Phase 1](../phase1/README.md) pick-and-lift demo: **grasp p
 | **Razor** (lab laptop, Dexmate Vega + Sharpa HA4) | Capture RGB-D + robot/camera calibration → pack **input session** → rsync to Titan → receive **output session** → transform poses to `R_ee` → Phase 1 motion planning + grasp |
 | **Titan** (GPU server, UCB_Project + SAM3D + FoundationPose) | Human SAM2/3 mask → SAM3D mesh → depth-based scale → **FoundationPose** 6D pose → `inference/grasp_pose.py` → pack **output session** → rsync back |
 
-**Transport (v0): manual `rsync` only** — no HTTP/gRPC server. A human runs rsync on Razor and on Titan. Folder layout is identical on both sides so paths mirror 1:1.
+**Transport (v0): manual `rsync`** — no automated server yet. See **[SERVER_CLIENT_PLAN.md](SERVER_CLIENT_PLAN.md)** for the Titan↔Razor automation spec (SSH keys, job flow, Titan-side scripts).
 
 **Upstream method code:** [UCB_Project `titan`](https://github.com/stzabl-png/UCB_Project/tree/titan) — especially `inference/grasp_pose.py`, `tools/batch_obj_pose_ego.py` / `run_fp()` (FoundationPose), scale patterns in `data/estimate_obj_scale_ego.py`.
 
 **Execution code (Razor):** this repo — reuse `demo/phase1/executor.py`, `grasp_geometry.py`, `hand_close.py`, `right_hand_profile.yaml`.
+
+---
+
+## Implementation status (Razor, 2026-06)
+
+| Component | Status | Entry point |
+|-----------|--------|-------------|
+| RGB-D capture + `input/` pack | ✅ | `capture_session.py` |
+| Capture robot pose (start → j3 spread → return) | ✅ | `capture_pose.py` |
+| Input validation | ✅ | `validate_input.py` / `pack_session.py` |
+| Load Titan `output/` | ✅ | `session_io.py`, `retarget.py` |
+| **Open-grip retarget IK** (thumb/index DP + thumb MC, hand **open**) | ✅ | `open_grip_retarget_geometry.py`, `pinch_ik.py` |
+| Candidate filter (pre_grasp + grasp IK, random try order) | ✅ | `run_auto_grasp.py` |
+| Auto grasp + OMPL + stall-close | ✅ | `run_auto_grasp.py` → Phase 1 `executor.py` |
+| Pre-grasp object collision box (Titan mesh AABB) | ✅ | `object_obstacle.py` |
+| EE retarget calib YAML | ✅ | `calib/ee_retarget.yaml`, `calibrate_ee_retarget.py` |
+| Titan pipeline orchestrator (T1–T7) | ✅ | `python -m demo.pipeline` — [pipeline/README.md](pipeline/README.md) |
+| Razor→Titan automation client | ✅ (Razor) | `run_s2r_pipeline.py` on V2AP-demo |
+
+**Primary test session:** `sessions/20260602_192346_chips/` (chips on lab table).
 
 ---
 
@@ -24,16 +44,19 @@ Razor                                              Titan
 ─────                                              ─────
 
 1. Place object on table
-2. python demo/phase2/capture_session.py …
+2. python demo/phase2/capture_session.py --object-name chips
+   → start pose → arm_j3 spread → RGB-D → arms back to start
    → writes sessions/<id>/input/
-3. Human rsync input/ ──────────────────────────►  s2r/razor_sessions/<id>/input/
-                                                   4. python -m s2r.process_razor_session …
+3. Human rsync input/ ──────────────────────────►  demo/sessions/<id>/input/
+                                                   4. python -m demo.pipeline.process_razor_session …
                                                       (SAM → SAM3D → scale → FoundationPose → grasp_pose)
-                                                   5. writes …/<id>/output/
+                                                   5. writes …/<id>/output/status.json + candidates.json
 6. Human rsync output/ ◄────────────────────────  …/<id>/output/
-7. python demo/phase2/run_auto_grasp.py --session <id>
-   (retarget → IK → executor.run_sequence)
+7. python demo/phase2/run_auto_grasp.py --session-id <id>
+   (open-grip IK filter → retarget → OMPL → stall-close → lift)
 ```
+
+**Future (v1):** Razor orchestrator replaces steps 3–6 via SSH + rsync — see [SERVER_CLIENT_PLAN.md](SERVER_CLIENT_PLAN.md).
 
 ---
 
@@ -55,7 +78,7 @@ Example: `20260601_143022_chips`
 | Side | Root |
 |------|------|
 | **Razor** (V2AP-demo repo) | `demo/phase2/sessions/<session_id>/` |
-| **Titan** (UCB_Project) | `$UCB_ROOT/s2r/razor_sessions/<session_id>/` |
+| **Titan** (UCB_Project) | `$UCB_ROOT/demo/sessions/<session_id>/` |
 
 Both sides use the same subtree:
 
@@ -68,7 +91,7 @@ Both sides use the same subtree:
 Create Titan root once:
 
 ```bash
-mkdir -p "$UCB_ROOT/s2r/razor_sessions"
+mkdir -p "$UCB_ROOT/demo/sessions"
 ```
 
 ---
@@ -90,14 +113,14 @@ Replace placeholders:
 ```bash
 rsync -avz --progress \
   "${RAZOR_REPO}/demo/phase2/sessions/${SESSION}/input/" \
-  "${TITAN_HOST}:${UCB_ROOT}/s2r/razor_sessions/${SESSION}/input/"
+  "${TITAN_HOST}:${UCB_ROOT}/demo/sessions/${SESSION}/input/"
 ```
 
 **Titan → Razor (after processing)**
 
 ```bash
 rsync -avz --progress \
-  "${TITAN_HOST}:${UCB_ROOT}/s2r/razor_sessions/${SESSION}/output/" \
+  "${TITAN_HOST}:${UCB_ROOT}/demo/sessions/${SESSION}/output/" \
   "${RAZOR_REPO}/demo/phase2/sessions/${SESSION}/output/"
 ```
 
@@ -134,7 +157,7 @@ All 4×4 matrices are **homogeneous transforms** `T_dst_src`: column-vector conv
 
 ## INPUT package (`input/`) — Razor → Titan
 
-Razor **`capture_session.py`** (to be implemented on Razor) must produce **all** of the following before rsync.
+Razor **`capture_session.py`** produces **all** of the following before rsync.
 
 ### File tree
 
@@ -306,7 +329,7 @@ Joint positions **at the same instant** as the RGB-D frame (radians unless noted
 }
 ```
 
-- Defaults match Phase 1 (`demo/phase1/constants.py`: `DEFAULT_TABLE_HEIGHT_M = 0.98`).
+- Defaults match Phase 1 (`demo/phase1/constants.py`: `DEFAULT_TABLE_HEIGHT_M = 0.85`).
 - Titan uses `table_height_m` for **sanity checks** after FoundationPose (mesh bottom vs table), not as the primary registration method.
 
 ### `input/segment/prompt.json` (optional)
@@ -335,8 +358,8 @@ Titan implements a single entry point (suggested):
 cd "$UCB_ROOT"
 conda activate bundlesdf   # FoundationPose + PointNet++ env on Titan
 
-python -m s2r.process_razor_session \
-  --session-dir s2r/razor_sessions/20260601_143022_chips \
+python -m demo.pipeline.process_razor_session \
+  --session-dir demo/sessions/20260601_143022_chips \
   [--skip-sam]            # if output/segment/mask.png already exists
   [--skip-sam3d]          # if mesh already exists
   [--skip-fp]             # if register/T_cam_mesh.json already exists
@@ -363,7 +386,7 @@ FoundationPose requires **mask + metric mesh + RGB-D + K**; it runs **after** sc
 **Notes**
 
 - SAM3 on Titan (if used for 2D mask) is fine; document `tool` in `prompt_used.json`.
-- Save SAM2 mask directly as `mask.png` (0/255, no morphological post-processing).
+- Morphological cleanup optional; save raw SAM output + cleaned version if both exist (`mask_raw.png`, `mask.png`).
 
 ### Step T3 — SAM3D mesh reconstruction
 
@@ -371,21 +394,21 @@ FoundationPose requires **mask + metric mesh + RGB-D + K**; it runs **after** sc
 
 **Output:**
 
-- `output/mesh/object_raw.glb` — SAM3D mesh **before metric scale** (arbitrary units / orientation; native GLB).
+- `output/mesh/object_raw.obj` — SAM3D mesh **before metric scale** (arbitrary units / orientation).
 - `output/mesh/sam3d_meta.json` — runtime, commit/hash if available, vertex/face counts.
 
-SAM3D runs on Titan only (not in UCB GitHub). Wrapper lives under `s2r/` on Titan.
+SAM3D runs on Titan only (not in UCB GitHub). Wrapper: `demo/scripts/T3/reconstruct.py`.
 
 ### Step T4 — Metric scale (RGB-D depth vs mesh)
 
 Align with UCB `estimate_obj_scale_ego.py` **logic**, but use **real Dexmate depth** from input instead of MegaSAM.
 
-**Input:** `depth.npy`, `mask.png`, `K`, `object_raw.glb` (coarse pose optional).
+**Input:** `depth.npy`, `mask.png`, `K`, `object_raw.obj` (coarse pose optional).
 
 **Output:**
 
 - `output/mesh/scale.json`
-- `output/mesh/object_scaled.glb` — **uniform scale** applied; units = meters.
+- `output/mesh/object_scaled.obj` — **uniform scale** applied; units = meters.
 
 **`output/mesh/scale.json` schema:**
 
@@ -404,7 +427,7 @@ Suggested algorithm (v0):
 1. Backproject masked valid depth → camera point cloud; take median `Z` → `Z_real_m`.
 2. Render or raycast mesh (pre-scale) into mask; median vertex `Z` in front-facing region → `Z_mesh_pre_scale`.
 3. `scale_factor = Z_real_m / Z_mesh_pre_scale`; multiply all vertex coordinates.
-4. Sanity: clamp `scale_factor` to `[0.05, 3.0]` (T4 v2; was 0.3–3.0 in v0); warn in `status.json` if clamped.
+4. Sanity: clamp `scale_factor` to `[0.3, 3.0]` (UCB guard band); warn in `status.json` if clamped.
 
 ### Step T5 — Mesh ↔ scene registration (FoundationPose)
 
@@ -511,22 +534,22 @@ Sanity (warn in `status.json`, do not fail unless gross error):
 - `output/register/ob_in_cam/000000.txt` — same 4×4 as `T_cam_mesh`, `.txt` format like UCB
 - `output/register/ob_in_cam/000000.npy` — optional `float64` (4,4) duplicate
 - `output/register/foundationpose_meta.json` — H/W, K used, mesh face count, timing, FP version
-- `output/vis/T5_foundationpose_overlay.png` — 2×4 comparison (or FP `track_vis` fallback)
+- `output/vis/foundationpose_overlay.png` — copy FP `track_vis/000000.png` (posed bbox on RGB)
 
 **Debug optional:** `output/register/fp_scene/` (keep with `--keep-fp-scene`).
 
 **Do not use ICP** in the default pipeline. If FP fails, set `success: false` and report in `status.json`; optional manual retry with adjusted mask/mesh is a human ops step, not a silent fallback.
 
-### Step T6 — Affordance + grasp candidates (PDM)
+### Step T6 — Affordance + grasp candidates
 
-Run PDM on **`object_base_aligned.glb`** (T5 base-aligned frame; same 3D pose as FP):
+Call existing UCB code on **`object_scaled.obj`**:
 
 ```bash
-python demo/scripts/T6/run_pdm_grasp.py \
-  --session-dir demo/sessions/<session_id>
+python -m inference.grasp_pose \
+  --mesh output/mesh/object_scaled.obj \
+  --output output/inference/affordance_grasp.hdf5 \
+  --device cuda
 ```
-
-Uses affordance v6 + PDM checkpoints (see `demo/scripts/T6/README.md`). Does **not** re-scale or +90°X-rotate the session mesh.
 
 **Output files:**
 
@@ -538,15 +561,12 @@ Uses affordance v6 + PDM checkpoints (see `demo/scripts/T6/README.md`). Does **n
 
 Always write status last (atomic: write to `status.json.tmp` then rename).
 
-**Script:** `demo/scripts/T7/write_status.py` — checks T2–T6 artifacts, aggregates warnings, writes `status.json`.  
-**Titan output package (for Razor):** [demo/TITAN_OUTPUT.md](TITAN_OUTPUT.md)
-
 ```json
 {
   "schema_version": "1.1",
   "session_id": "20260601_143022_chips",
   "success": true,
-  "pipeline_version": "s2r.process_razor_session 0.2.0",
+  "pipeline_version": "demo.pipeline.process_razor_session 0.1.0",
   "finished_at_iso": "2026-06-01T14:45:00-07:00",
   "steps": {
     "segment": "ok",
@@ -575,8 +595,8 @@ output/
 │   ├── mask.png
 │   └── prompt_used.json
 ├── mesh/
-│   ├── object_raw.glb
-│   ├── object_scaled.glb
+│   ├── object_raw.obj
+│   ├── object_scaled.obj
 │   ├── scale.json
 │   └── sam3d_meta.json
 ├── register/
@@ -592,10 +612,7 @@ output/
 │   ├── candidates.json             # required for Razor
 │   └── affordance_vis.png          # optional
 └── vis/
-    ├── T3_sam3d_mesh_preview.png
-    ├── T4_scale_scene_preview.png
-    ├── T5_foundationpose_overlay.png
-    └── T6_grasp_vis.png
+    └── foundationpose_overlay.png  # FP track_vis frame 0
 ```
 
 ---
@@ -694,115 +711,129 @@ Razor **may** read HDF5 or prefer `candidates.json` only (no h5py dependency on 
 
 ## Razor-side retarget and execution
 
-Implemented in V2AP-demo (`demo/phase2/run_auto_grasp.py`, not on Titan).
+Implemented in V2AP-demo (`demo/phase2/run_auto_grasp.py`, not on Titan).  
+Titan output contract for Razor: **[TITAN_OUTPUT.md](TITAN_OUTPUT.md)**.
 
 ### Step R1 — Load session output
 
 - Require `output/status.json` with `success: true`.
-- Load `candidates.json`, `T_base_mesh`, Phase 1 `start.yaml` if full demo sequence.
+- Load `inference/candidates.json`, registration (`T_base_mesh`), Phase 1 `start.yaml` for arm/home joints.
 
-### Step R2 — Mesh frame → base frame (pinch pose)
+### Step R2 — Mesh frame → base frame (`T_base_pinch`)
 
-For candidate `i`:
+For each candidate:
 
 ```python
-T_base_mesh = np.array(candidates_json["T_base_mesh"])  # 4x4
-R_mesh = np.array(c["rotation"])                       # 3x3
-t_mesh = np.array(c["grasp_point"])                     # (3,)
+T_base_mesh = np.array(candidates_json["T_base_mesh"])  # 4×4
+R_mesh = np.array(c["rotation"])                         # 3×3, columns = [finger_open, y_body, approach]
+t_mesh = np.array(c["grasp_point"])                      # (3,) virtual pinch origin in mesh frame
 
 T_mesh_pinch = np.eye(4)
 T_mesh_pinch[:3, :3] = R_mesh
 T_mesh_pinch[:3, 3] = t_mesh
 
-T_base_pinch = T_base_mesh @ T_mesh_pinch
+T_base_pinch = T_base_mesh @ T_mesh_pinch   # stored on GraspObjectConfig.titan_T_base_pinch
 ```
 
-### Step R3 — Pinch → `R_ee` (one-time calibration)
+Pre-grasp / lift offsets use **Titan `approach`** (column 2), not `R_ee` Z.
 
-UCB defines grasp at **pinch center**. Phase 1 IK targets **`R_ee`**.
+### Step R3 — Open-grip arm IK (replaces closed `T_ee_pinch` bridge)
 
-Calibrate once (`demo/phase2/calib/ee_retarget.yaml`):
+Arm IK uses **open-hand** FK on thumb/index (`right_thumb_DP`, `right_index_DP`, `right_thumb_MC`) with **right arm only** Gauss–Newton IK (`pinch_ik.py`):
 
-```yaml
-# T_ee_pinch: p_ee = T_ee_pinch @ p_pinch  (pinch frame → R_ee frame)
-# Equivalently: T_base_ee = T_base_pinch @ inv(T_ee_pinch)
-T_ee_pinch:
-  - [1, 0, 0, dx]
-  - [0, 1, 0, dy]
-  - [0, 0, 1, dz]
-  - [0, 0, 0, 1]
-calibrated_object: chips
-calibrated_at: "2026-06-01"
-notes: "From pose_tuner FK R_ee vs thumb/index midpoint FK"
+| Constraint | Role |
+|------------|------|
+| **Translation** | Tip-line point at **2/3** along thumb→index (from index: 1/3 segment inward) equals `p_titan + open_pinch_forward_offset_m × approach` |
+| **Parallel** | `(index_tip − thumb_tip) ∥ Titan finger_open` (column 0) |
+| **Plane (soft)** | Plane (thumb tip, thumb MC, index tip) contains `approach` |
+
+Defaults (`calib/ee_retarget.yaml`):
+
+- `open_pinch_forward_offset_m: 0.015` (1.5 cm along approach; open hand → stall-close closes the gap)
+- Override: `--open-pinch-forward-offset 0.02`
+
+After IK, `grasp_pose` (`R_ee`) is synced from FK for logging/OMPL seeds. Legacy `T_ee_pinch_closed` in yaml is kept for debug/calibration tools only.
+
+### Step R4 — Candidate selection + Phase 1 executor
+
+**Candidate filter (no OMPL):** for each Titan rank (random try order by default):
+
+1. **pre_grasp IK** — Titan pinch retreated along `−approach` by `pre_grasp_offset_m` (0.15 m); seed = `start.yaml` arms  
+2. **grasp IK** — full `T_base_pinch`; seed = pre_grasp solution  
+
+Both must converge (`mid_err ≤ 5 mm`). First passing candidate wins.
+
+**Execution:**
+
+```bash
+source setup.sh
+python demo/phase2/run_auto_grasp.py --session-id 20260602_192346_chips
+python demo/phase2/run_auto_grasp.py --session-id 20260602_192346_chips --debug
+python demo/phase2/run_auto_grasp.py --session-id 20260602_192346_chips --rank 3   # force rank
+python demo/phase2/run_auto_grasp.py --session-id 20260602_192346_chips --no-random-candidate
 ```
 
-Then:
+| Flag | Purpose |
+|------|---------|
+| `--object-obstacle` | Titan mesh AABB in pre-grasp OMPL only |
+| `--max-candidates N` | IK try pool size (default 10) |
+| `--random-candidate` / `--seed` | Shuffle try order each run (default on) |
+| `--no-visualize` | Skip Open3D grasp preview |
+| `--debug` | Verbose logs + no Enter prompts |
 
-```python
-T_base_ee = T_base_pinch @ np.linalg.inv(T_ee_pinch)
-grasp_pose = T_base_ee   # 4x4 → GraspObjectConfig.grasp_pose
-```
+Sequence: home/start → **pre_grasp** (OMPL + optional object box) → **grasp approach** (OMPL, no box) → **stall-close** (closed profile) → **lift**.
 
-### Step R4 — IK + Phase 1 executor
+Logs: Titan pinch in base, open-grip IK errors, live thumb/index vs Titan after close.
 
-- For each candidate in rank order: IK to `grasp_pose`, collision check (table only in v0), plan pre-grasp / grasp / lift.
-- First feasible candidate wins; else report failure.
-- Hand: `right_hand_profile.yaml` open → `hand_close.py` stall close → lift.
-
-**Scoring note:** UCB scores assume Franka faces +Y. Dexmate may differ — **always re-rank by IK feasibility on Razor**, not UCB score alone.
+**Scoring:** UCB rank is a hint only — Razor re-ranks by IK feasibility + random shuffle.
 
 ---
 
-## Suggested Titan repo layout (`UCB_Project/s2r/`)
+## Suggested Titan repo layout (`Affordance2Grasp/demo/`)
 
-Code Titan agent should add:
+Phase 2 code lives under **`demo/`** — **full automation spec:** [SERVER_CLIENT_PLAN.md](SERVER_CLIENT_PLAN.md).
 
 ```text
-s2r/
-├── README.md                      # pointer to this spec (copy of demo/phase2/README.md)
-├── process_razor_session.py       # CLI entry: full pipeline
-├── validate_input.py
-├── segment_sam.py                 # SAM2/3 interactive + auto from prompt.json
-├── reconstruct_sam3d.py           # wrapper around Titan SAM3D install
-├── scale_from_depth.py            # Dexmate depth scale
-├── register_foundationpose.py     # fp_scene build + run_fp → T_cam_mesh, T_base_mesh
-├── export_candidates.py           # HDF5 → candidates.json (includes registration block)
-└── razor_sessions/                # rsync target (gitignored)
-    └── <session_id>/
-        ├── input/
-        └── output/
+demo/
+├── pipeline/                      # python -m demo.pipeline (T1–T7 orchestrator)
+├── scripts/T1 … T7/               # per-step scripts
+├── sessions/                      # rsync target (gitignored)
+│   └── <session_id>/
+│       ├── input/                 # from Razor
+│       └── output/                # for Razor
+├── README.md                      # session schema (this file)
+├── TITAN_OUTPUT.md                # Razor consumer guide
+└── SERVER_CLIENT_PLAN.md          # SSH/rsync automation
 ```
-
-**Dependencies (Titan)**
-
-- UCB `inference/grasp_pose.py`, checkpoints.
-- **FoundationPose** (`FP_ROOT`, `bundlesdf` conda env, CUDA extensions — see UCB `setup_weights.py --tool fp`).
-- Reuse **`tools/batch_obj_pose_ego.py`** logic: `init_fp_models()`, `run_fp()` (single-frame register).
-- SAM2 or SAM3 (2D mask — **required before FP**).
-- SAM3D (external on Titan).
-- `trimesh`, `fast_simplification` (large meshes), `h5py`, `opencv-python`, `numpy`, `torch`.
-
-**Do not commit** session data or meshes under `razor_sessions/` (add to `.gitignore`).
 
 ---
 
-## Suggested Razor repo layout (`V2AP-demo/demo/phase2/`)
+## Razor repo layout (`V2AP-demo/demo/phase2/`)
 
 ```text
 demo/phase2/
-├── README.md                 # this file
-├── capture_session.py        # ✅ capture RGB-D + calib → input/
+├── README.md                      # this file
+├── SERVER_CLIENT_PLAN.md          # Titan↔Razor automation (give to Titan team)
+├── TITAN_OUTPUT.md                # Titan output package (Razor consumer doc)
+├── capture_session.py             # RGB-D capture → input/
+├── capture_pose.py                # start → j3 spread → return (robot motion)
+├── run_auto_grasp.py              # Titan output → open-grip IK → executor
+├── open_grip_retarget_geometry.py # thumb/index FK constraints
+├── pinch_ik.py                    # open-grip Gauss–Newton IK
+├── retarget.py                    # candidates.json → TitanGraspPoses
+├── hand_retarget_geometry.py      # legacy closed pinch / live fingertip FK
+├── ee_retarget_io.py
+├── calibrate_ee_retarget.py
+├── object_obstacle.py             # mesh AABB for pre-grasp OMPL
+├── session_output.py              # grasp_config_from_titan()
+├── pack_session.py / validate_input.py / session_io.py
+├── robot_capture.py / extrinsics.py / intrinsics.py
+├── visualize_grasp.py
 ├── constants.py
-├── intrinsics.py             # parse camera_info → K
-├── extrinsics.py             # URDF FK → T_base_cam
-├── pack_session.py           # write input/ tree
-├── robot_capture.py          # dexcontrol head camera grab
-├── validate_input.py         # schema + table height check
-├── run_auto_grasp.py         # (planned) load output/, retarget, executor
-├── retarget.py               # (planned)
 ├── calib/
-│   └── ee_retarget.yaml      # one-time T_ee_pinch
-└── sessions/                 # gitignored
+│   ├── ee_retarget.yaml
+│   └── head_zed_left_intrinsics.json
+└── sessions/                      # gitignored
     └── <session_id>/
         ├── input/
         └── output/
@@ -812,28 +843,35 @@ demo/phase2/
 
 ## Razor capture (`capture_session.py`)
 
-**Default capture pose = Phase 1 demo start** (`configs/start.yaml` + same head/hand rules as `run_grasp`):
+**Robot motion** (`capture_pose.py`) — default sequence:
 
-| Part | Value |
+| Step | Action |
 |------|--------|
-| **Head** | `head_j1` **−20° pitch** (`DEMO_HEAD_JOINT_POS` ≈ `[0.349, 0, 0]` rad); j2/j3 = 0 |
-| **Torso / arms** | From `demo/phase1/configs/start.yaml` |
-| **Right hand** | **Open** — `demo/right_hand_profile.yaml` (virtual gripper) |
-| **Left hand** | `start.yaml` → `left_hand_joint_pos` |
+| 1 | Torso / head / **both arms** → `start.yaml` (half nominal arm speed, `max_vel=0.25` rad/s) |
+| 2 | **Both hands** → start hand pose (left = `start.yaml`, right = open grip profile) — **once only** |
+| 3 | **arm_j3 ± 90°** (left −, right +) for camera clearance; hands **not** commanded |
+| 4 | Grab RGB-D + pack `input/` |
+| 5 | Arms/torso/head **back to start**; hands **unchanged** |
 
-By default the script **moves the robot** to that pose, then grabs one RGB-D frame. Workflow: move to start → **place object on table** → run capture (same camera view as Phase 1 before approach).
-
-**Prerequisite:** `python demo/phase1/pose_tuner.py --object-name start` once.
-
-On the robot laptop (after `source setup_local.sh`):
+Head: `head_j1` **−20° pitch** (`DEMO_HEAD_JOINT_POS`). Prerequisite: `pose_tuner.py --object-name start`.
 
 ```bash
+source setup.sh   # or setup_local.sh on dev laptop
 python demo/phase2/capture_session.py --object-name chips
 python demo/phase2/capture_session.py --object-name chips --preview
-python demo/phase2/capture_session.py --object-name chips --skip-move-to-start  # already at start
+python demo/phase2/capture_session.py --object-name chips --skip-move-to-start
 python demo/phase2/capture_session.py --validate-only --session-id 20260601_143022_chips
 python demo/phase2/capture_session.py --object-name chips --dry-run
 ```
+
+| Flag | Purpose |
+|------|---------|
+| `--capture-arm-j3-deg 90` | Outward j3 spread (default 90°) |
+| `--arm-wait-s 10` | Wait per arm move at half speed |
+| `--slow-capture-move` | Stepped arm motion (Ctrl+C abort) |
+| `--skip-return-to-start` | Do not move arms back after capture |
+| `--camera-source zed_stream` | TCP from dexmate-nano (default) |
+| `--camera-source zenoh` | dexsensor head_camera |
 
 **Head camera (default: `zed_stream` on dexmate-nano `.22:30000`):**
 
@@ -889,14 +927,14 @@ demo/phase2/sessions/
 
 ## Milestones
 
-| ID | Owner | Deliverable | Acceptance |
-|----|-------|-------------|------------|
-| **2.0** | Razor | `capture_session.py` + valid `input/` | ✅ script ready; on-robot: Titan can load; table height sanity check |
-| **2.1** | Titan | T2–T4: SAM + SAM3D + scale | `object_scaled.obj` size plausible vs ruler |
-| **2.2** | Titan | T5: FoundationPose | `T5_foundationpose_overlay.png` mesh bbox aligns object; `T_base_mesh` table Z sane |
-| **2.3** | Titan | T6: `grasp_pose` + `candidates.json` | Heatmap on reasonable grasp region |
-| **2.4** | Razor | `ee_retarget.yaml` + `run_auto_grasp.py` | One object auto lift using session output |
-| **2.5** | Both | End-to-end rsync loop | Place → rsync → Titan process → rsync → grasp |
+| ID | Owner | Deliverable | Status |
+|----|-------|-------------|--------|
+| **2.0** | Razor | `capture_session.py` + valid `input/` | ✅ |
+| **2.1** | Titan | T2–T4: SAM + SAM3D + scale | Titan |
+| **2.2** | Titan | T5: FoundationPose | Titan |
+| **2.3** | Titan | T6: `grasp_pose` + `candidates.json` | Titan |
+| **2.4** | Razor | Open-grip retarget + `run_auto_grasp.py` | ✅ |
+| **2.5** | Both | End-to-end rsync loop | 🔄 manual rsync works; automation in [SERVER_CLIENT_PLAN.md](SERVER_CLIENT_PLAN.md) |
 
 ---
 
@@ -917,10 +955,11 @@ demo/phase2/sessions/
 ## References
 
 - Phase 1 execution: [demo/phase1/README.md](../phase1/README.md)
+- Titan output (Razor): [TITAN_OUTPUT.md](TITAN_OUTPUT.md)
+- Titan↔Razor automation: [SERVER_CLIENT_PLAN.md](SERVER_CLIENT_PLAN.md)
 - UCB inference: `inference/grasp_pose.py`, `inference/predictor.py`
-- UCB FoundationPose: `tools/batch_obj_pose_ego.py`, `tools/batch_obj_pose.py`, `FP_ROOT` / NVlabs FoundationPose
-- UCB scale pattern: `data/estimate_obj_scale_ego.py`
-- Paper: *Learning Affordance Posteriors for Manipulation from Human Video Priors* — real robot uses RGB-D → mesh/point cloud → affordance → grasp → Dexmate + two-finger hand.
+- UCB FoundationPose: `tools/batch_obj_pose_ego.py`, `FP_ROOT`
+- UCB scale: `data/estimate_obj_scale_ego.py`
 
 ---
 
@@ -928,5 +967,6 @@ demo/phase2/sessions/
 
 | Version | Date | Notes |
 |---------|------|-------|
-| 1.1 | 2026-06-01 | **FoundationPose** registration (replaces ICP); `K.npy`, `T_cam_mesh`, `pipeline.foundationpose` in input; schema 1.1 |
-| 1.0 | 2026-06-01 | Initial Phase 2 spec: rsync sessions, ICP registration (deprecated) |
+| 1.2 | 2026-06-03 | Razor: open-grip retarget IK, capture j3 spread pose, `SERVER_CLIENT_PLAN.md`; README sync |
+| 1.1 | 2026-06-01 | **FoundationPose** registration (replaces ICP); schema 1.1 |
+| 1.0 | 2026-06-01 | Initial Phase 2 spec: rsync sessions |

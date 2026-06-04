@@ -281,18 +281,26 @@ def finalize_session(
 def build_status_payload(
     report: FinalizeReport,
     dirs: SessionDirs,
+    *,
+    pipeline_version: str | None = None,
+    state: str | None = None,
+    started_at_iso: str | None = None,
+    log_relpath: str | None = None,
 ) -> dict[str, Any]:
-    return {
+    import socket
+
+    payload: dict[str, Any] = {
         "schema_version": "1.1",
         "session_id": report.session_id,
         "success": report.ok,
-        "pipeline_version": PIPELINE_VERSION,
+        "pipeline_version": pipeline_version or PIPELINE_VERSION,
         "finished_at_iso": datetime.now(timezone.utc).astimezone().isoformat(),
         "steps": report.steps,
         "warnings": report.warnings,
         "errors": report.errors,
         "titan": {
             "session_root": str(dirs.session_root),
+            "hostname": socket.gethostname(),
             "object_slug": report.info.get("object_slug"),
             "n_candidates": report.info.get("n_candidates"),
             "mesh_frame": report.info.get("mesh_frame"),
@@ -311,6 +319,14 @@ def build_status_payload(
             ],
         },
     }
+    if state is not None:
+        payload["state"] = state
+        payload["updated_at_iso"] = payload["finished_at_iso"]
+    if started_at_iso is not None:
+        payload["started_at_iso"] = started_at_iso
+    if log_relpath is not None:
+        payload["log_file"] = log_relpath
+    return payload
 
 
 def write_status_atomic(dirs: SessionDirs, payload: dict[str, Any]) -> Path:
@@ -341,6 +357,12 @@ def main(argv: list[str] | None = None) -> int:
         help="Do not run T1 validation (only check output artifacts)",
     )
     ap.add_argument("--json", action="store_true", help="Print status payload to stdout")
+    ap.add_argument(
+        "--pipeline-version",
+        type=str,
+        default=None,
+        help="Override pipeline_version field (e.g. demo.pipeline.process_razor_session)",
+    )
     args = ap.parse_args(argv)
 
     dirs = resolve_session_dirs(
@@ -354,7 +376,12 @@ def main(argv: list[str] | None = None) -> int:
         allow_partial=args.allow_partial,
         skip_input_check=args.skip_input_check,
     )
-    payload = build_status_payload(report, dirs)
+    payload = build_status_payload(
+        report,
+        dirs,
+        pipeline_version=args.pipeline_version,
+        state="done" if report.ok else "failed",
+    )
     status_path = write_status_atomic(dirs, payload)
 
     if args.json:

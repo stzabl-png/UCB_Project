@@ -39,7 +39,8 @@ Local-only improvements we kept (not in `origin/main` yet):
 - `tools/batch_obj_pose.py`: **leak fix** — `shutil.rmtree(scene_dir)` in the per-seq `finally:` block (the 2026-05-13 disk-full incident; `/tmp/fp_scenes/` had accumulated ~243 GB across the DexYCB Step 3 run). Plus a `--keep-scene-dir` debug flag.
 - `data/batch_align_mano_fp.py`: **`--n-workers N`** for object-level parallelism via `multiprocessing.Pool(spawn)`. DexYCB Step 4 went from sequentially-extrapolated ~12-15 h to ~5 h on a 16-core/32-thread machine.
 - `Baseline1/`: **Human Retarget DP** baseline (route A on DexYCB subj 07-10), with v2 SAM3D↔YCB-CAD canonical alignment via ICP (`compute_sam3d_align.py` + `--align-mode sam3d`).
-- `s2r/PLAN.md`: sim-to-real implementation plan (Dexmate Vega + SharpaWave-as-virtual-2-finger).
+- `demo/S2R_SIM2REAL_PLAN.md`: sim-to-real implementation plan (Dexmate Vega + SharpaWave-as-virtual-2-finger).
+- `demo/pipeline/`: Phase 2 Titan orchestrator (`python -m demo.pipeline`).
 
 ---
 
