@@ -39,7 +39,7 @@ def _conda_python(env_name: str) -> Path | None:
 
 
 def bundlesdf_python() -> Path:
-    py = os.environ.get("S2R_BUNDLESDF_PYTHON")
+    py = os.environ.get("DEMO_PIPELINE_BUNDLESDF_PYTHON")
     if py and Path(py).is_file():
         return Path(py)
     found = _conda_python("bundlesdf")
@@ -49,19 +49,19 @@ def bundlesdf_python() -> Path:
     if sys_py:
         return Path(sys_py)
     raise RuntimeError(
-        "bundlesdf python not found. Set S2R_BUNDLESDF_PYTHON or install env 'bundlesdf'."
+        "bundlesdf python not found. Set DEMO_PIPELINE_BUNDLESDF_PYTHON or install env 'bundlesdf'."
     )
 
 
 def sam3d_python() -> Path:
-    py = os.environ.get("S2R_SAM3D_PYTHON")
+    py = os.environ.get("DEMO_PIPELINE_SAM3D_PYTHON")
     if py and Path(py).is_file():
         return Path(py)
     found = _conda_python("sam3d-objects")
     if found:
         return found
     raise RuntimeError(
-        "sam3d-objects python not found. Set S2R_SAM3D_PYTHON or install env 'sam3d-objects'."
+        "sam3d-objects python not found. Set DEMO_PIPELINE_SAM3D_PYTHON or install env 'sam3d-objects'."
     )
 
 

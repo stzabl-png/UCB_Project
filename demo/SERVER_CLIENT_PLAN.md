@@ -1,7 +1,7 @@
-# Titan ↔ Razor automation plan (S2R)
+# Titan ↔ Razor auto demo pipeline
 
 **Audience:** Titan team (UCB_Project / GPU server) — implement processing + accept Razor uploads.  
-**Razor team:** orchestrator client (future `run_s2r_pipeline.py`); capture + grasp already in V2AP-demo.
+**Razor team:** orchestrator client (future `run_auto_demo_pipeline.py`); capture + grasp already in V2AP-demo.
 
 **Related docs**
 
@@ -21,7 +21,7 @@ Automate the loop that is **manual rsync today**:
 [Human] place object
     → Razor capture (input/)
     → upload to Titan
-    → Titan T2–T7 pipeline (output/)
+    → Titan auto demo pipeline T1–T7 (output/)
     → download to Razor
     → Razor run_auto_grasp.py
 ```
@@ -35,8 +35,8 @@ Automate the loop that is **manual rsync today**:
 
 | Machine | Role | Network |
 |---------|------|---------|
-| **Razor** | Robot laptop; **orchestrator client**; initiates all connections | Often behind lab NAT — **does not need inbound SSH** |
-| **Titan** | GPU server; **SSH server**; stores sessions; runs `process_razor_session` | Stable hostname/IP or VPN |
+| **Razor** | Robot laptop; **auto demo pipeline client**; initiates all connections | Often behind lab NAT — **does not need inbound SSH** |
+| **Titan** | GPU server; **SSH server**; stores sessions; runs `python -m demo.pipeline` | Stable hostname/IP or VPN |
 
 **Connection direction:** Razor → Titan only.
 
@@ -54,23 +54,23 @@ Razor  ──ssh/rsync──►  Titan
 Create a dedicated key (do not overwrite personal default):
 
 ```bash
-ssh-keygen -t ed25519 -f ~/.ssh/s2r_razor_to_titan -C "razor-s2r" -N ""
+ssh-keygen -t ed25519 -f ~/.ssh/demo_razor_to_titan -C "razor-auto-demo-pipeline" -N ""
 ```
 
 `~/.ssh/config` on Razor:
 
 ```text
-Host titan-s2r
+Host titan-demo-pipeline
     HostName <TITAN_HOSTNAME_OR_IP>
-    User <TITAN_USER>          # e.g. vision or s2r
-    IdentityFile ~/.ssh/s2r_razor_to_titan
+    User <TITAN_USER>          # e.g. vision
+    IdentityFile ~/.ssh/demo_razor_to_titan
     IdentitiesOnly yes
 ```
 
 Test:
 
 ```bash
-ssh titan-s2r 'echo OK && hostname && nvidia-smi -L | head -1'
+ssh titan-demo-pipeline 'echo OK && hostname && nvidia-smi -L | head -1'
 ```
 
 ### 3.2 On Titan (server)
@@ -78,20 +78,20 @@ ssh titan-s2r 'echo OK && hostname && nvidia-smi -L | head -1'
 Append Razor **public** key to `~/.ssh/authorized_keys` for `<TITAN_USER>`:
 
 ```bash
-# paste contents of s2r_razor_to_titan.pub
+# paste contents of demo_razor_to_titan.pub
 ```
 
-Optional hardening (later): `from="<RAZOR_IP>"`, dedicated `s2r` Unix user, `ForceCommand` wrapper.
+Optional hardening (later): `from="<RAZOR_IP>"`, dedicated Unix user, `ForceCommand` wrapper.
 
 ### 3.3 Environment variables (both sides)
 
 | Variable | Example | Used on |
 |----------|---------|---------|
-| `TITAN_SSH_HOST` | `titan-s2r` | Razor (~/.ssh/config alias) |
+| `TITAN_SSH_HOST` | `titan-demo-pipeline` | Razor (~/.ssh/config alias) |
 | `UCB_ROOT` | `/home/vision/Project/Affordance2Grasp` | Titan (repo root) |
-| `S2R_SESSIONS_ROOT` | `$UCB_ROOT/demo/sessions` | Titan |
+| `DEMO_SESSIONS_ROOT` | `$UCB_ROOT/demo/sessions` | Titan |
 | `RAZOR_REPO` | `/home/.../V2AP-demo` | Razor |
-| `S2R_CONDA_ENV` | `bundlesdf` | Titan (FoundationPose) |
+| `DEMO_PIPELINE_CONDA_ENV` | `bundlesdf` | Titan (FoundationPose) |
 
 ---
 
@@ -129,7 +129,7 @@ mkdir -p "$UCB_ROOT/demo/sessions"
 
 ```bash
 cd "$UCB_ROOT"
-conda activate "$S2R_CONDA_ENV"
+conda activate "$DEMO_PIPELINE_CONDA_ENV"
 
 python -m demo.pipeline.process_razor_session \
   --session-dir demo/sessions/<session_id> \
@@ -219,12 +219,12 @@ Update `state`/`updated_at_iso` at each step start/end if implementing long jobs
 
 ### 5.4 Remote invocation from Razor (v1)
 
-Razor orchestrator will run **after** rsync upload:
+Razor `run_auto_demo_pipeline.py` will run **after** rsync upload:
 
 ```bash
-ssh titan-s2r "cd ${UCB_ROOT} && \
+ssh titan-demo-pipeline "cd ${UCB_ROOT} && \
   source \$(conda info --base)/etc/profile.d/conda.sh && \
-  conda activate ${S2R_CONDA_ENV} && \
+  conda activate ${DEMO_PIPELINE_CONDA_ENV} && \
   python -m demo.pipeline.process_razor_session \
     --session-dir demo/sessions/${SESSION_ID} \
     --device cuda"
@@ -244,14 +244,14 @@ Titan script should:
 SESSION=20260602_192346_chips
 rsync -avz --progress \
   "${RAZOR_REPO}/demo/phase2/sessions/${SESSION}/input/" \
-  "titan-s2r:${UCB_ROOT}/demo/sessions/${SESSION}/input/"
+  "titan-demo-pipeline:${UCB_ROOT}/demo/sessions/${SESSION}/input/"
 ```
 
 **Titan → Razor (download output):**
 
 ```bash
 rsync -avz --progress \
-  "titan-s2r:${UCB_ROOT}/demo/sessions/${SESSION}/output/" \
+  "titan-demo-pipeline:${UCB_ROOT}/demo/sessions/${SESSION}/output/" \
   "${RAZOR_REPO}/demo/phase2/sessions/${SESSION}/output/"
 ```
 
@@ -264,7 +264,7 @@ States stored in Razor `sessions/<id>/orchestrator_state.json` (future) and Tita
 ```text
 CREATED          Razor: capture_session.py finished, input/ valid
 UPLOADING        rsync input/ → Titan
-QUEUED/RUNNING   Titan: process_razor_session
+QUEUED/RUNNING   Titan: auto demo pipeline (python -m demo.pipeline)
 DONE             status.json success=true
 DOWNLOADING      rsync output/ ← Titan
 READY_FOR_GRASP  Razor: run_auto_grasp.py
@@ -314,9 +314,9 @@ Razor reads **`grasp_point` + `rotation`** in mesh frame, **not** `position_pand
 
 | Phase | Titan work | Razor work | Acceptance |
 |-------|------------|------------|------------|
-| **A** | Accept rsync; manual `process_razor_session` | Manual rsync (today) | One session end-to-end |
+| **A** | Accept rsync; manual `python -m demo.pipeline` | Manual rsync (today) | One session end-to-end |
 | **B** | Stable `status.json` + exit codes | Shell script: upload → ssh → download | No manual Titan login |
-| **C** | `state` polling + `process.log` | Python orchestrator + `orchestrator_state.json` | Single command from Razor |
+| **C** | `state` polling + `process.log` | `run_auto_demo_pipeline.py` + `orchestrator_state.json` | Single command from Razor |
 | **D** (opt) | HTTP job API + queue | Client uses API + rsync for blobs | Multi-user / queue |
 
 **Titan minimum for phase B:** sections 5.1, 5.3, 5.4, 5.5 working reliably.
@@ -331,7 +331,7 @@ Razor reads **`grasp_point` + `rotation`** in mesh frame, **not** `position_pand
 - [x] `output/status.json` + `output/logs/process.log`  
 - [x] Exit 0/1 based on `success`  
 - [x] T2 batch via `input/segment/prompt.json` → `segment_prompt.py`  
-- [ ] E2E: rsync chips input → full pipeline → Razor grasp (Razor client)  
+- [ ] E2E: rsync chips input → full auto demo pipeline → Razor grasp (Razor client)  
 
 ---
 
@@ -352,3 +352,4 @@ Razor reads **`grasp_point` + `rotation`** in mesh frame, **not** `position_pand
 | Date | Notes |
 |------|-------|
 | 2026-06-03 | Initial plan: SSH client on Razor, server on Titan, rsync v1 |
+| 2026-06-03 | Standardize naming: auto demo pipeline; paths under `demo/` |

@@ -113,7 +113,7 @@ def run_pipeline(opts: PipelineOptions) -> PipelineResult:
 
     with log_path.open("w", encoding="utf-8") as log_f:
         opts.log = log_f
-        _log(opts, f"S2R pipeline {PIPELINE_VERSION}")
+        _log(opts, f"Auto demo pipeline {PIPELINE_VERSION}")
         _log(opts, f"Session: {dirs.session_id}")
         _log(opts, f"Root: {session_dir}")
 

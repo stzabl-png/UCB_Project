@@ -103,7 +103,7 @@ output/segment/
 - Default SAM2 subprocess uses `bundlesdf` python (`--python` to override).
 - Shared paths: `demo/scripts/_session_io.py` (`--session-dir` / `--input-dir`).
 
-### C. Batch from `input/segment/prompt.json` (S2R / Razor)
+### C. Batch from `input/segment/prompt.json` (auto demo pipeline / Razor)
 
 When Razor saves click prompts in `input/segment/prompt.json` (see [demo/README.md](../../README.md)):
 

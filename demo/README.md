@@ -9,7 +9,7 @@ Phase 2 extends the [Phase 1](../phase1/README.md) pick-and-lift demo: **grasp p
 | **Razor** (lab laptop, Dexmate Vega + Sharpa HA4) | Capture RGB-D + robot/camera calibration → pack **input session** → rsync to Titan → receive **output session** → transform poses to `R_ee` → Phase 1 motion planning + grasp |
 | **Titan** (GPU server, UCB_Project + SAM3D + FoundationPose) | Human SAM2/3 mask → SAM3D mesh → depth-based scale → **FoundationPose** 6D pose → `inference/grasp_pose.py` → pack **output session** → rsync back |
 
-**Transport (v0): manual `rsync`** — no automated server yet. See **[SERVER_CLIENT_PLAN.md](SERVER_CLIENT_PLAN.md)** for the Titan↔Razor automation spec (SSH keys, job flow, Titan-side scripts).
+**Transport (v0): manual `rsync`** — no automated client yet. See **[SERVER_CLIENT_PLAN.md](SERVER_CLIENT_PLAN.md)** for the **auto demo pipeline** spec (SSH keys, job flow, `python -m demo.pipeline` on Titan).
 
 **Upstream method code:** [UCB_Project `titan`](https://github.com/stzabl-png/UCB_Project/tree/titan) — especially `inference/grasp_pose.py`, `tools/batch_obj_pose_ego.py` / `run_fp()` (FoundationPose), scale patterns in `data/estimate_obj_scale_ego.py`.
 
@@ -30,8 +30,8 @@ Phase 2 extends the [Phase 1](../phase1/README.md) pick-and-lift demo: **grasp p
 | Auto grasp + OMPL + stall-close | ✅ | `run_auto_grasp.py` → Phase 1 `executor.py` |
 | Pre-grasp object collision box (Titan mesh AABB) | ✅ | `object_obstacle.py` |
 | EE retarget calib YAML | ✅ | `calib/ee_retarget.yaml`, `calibrate_ee_retarget.py` |
-| Titan pipeline orchestrator (T1–T7) | ✅ | `python -m demo.pipeline` — [pipeline/README.md](pipeline/README.md) |
-| Razor→Titan automation client | ✅ (Razor) | `run_s2r_pipeline.py` on V2AP-demo |
+| Titan **auto demo pipeline** (T1–T7) | ✅ | `python -m demo.pipeline` — [pipeline/README.md](pipeline/README.md) |
+| Razor→Titan **auto demo pipeline** client | ✅ (Razor) | `run_auto_demo_pipeline.py` on V2AP-demo — see [SERVER_CLIENT_PLAN.md](SERVER_CLIENT_PLAN.md) |
 
 **Primary test session:** `sessions/20260602_192346_chips/` (chips on lab table).
 
@@ -48,7 +48,7 @@ Razor                                              Titan
    → start pose → arm_j3 spread → RGB-D → arms back to start
    → writes sessions/<id>/input/
 3. Human rsync input/ ──────────────────────────►  demo/sessions/<id>/input/
-                                                   4. python -m demo.pipeline.process_razor_session …
+                                                   4. auto demo pipeline: python -m demo.pipeline …
                                                       (SAM → SAM3D → scale → FoundationPose → grasp_pose)
                                                    5. writes …/<id>/output/status.json + candidates.json
 6. Human rsync output/ ◄────────────────────────  …/<id>/output/
@@ -56,7 +56,7 @@ Razor                                              Titan
    (open-grip IK filter → retarget → OMPL → stall-close → lift)
 ```
 
-**Future (v1):** Razor orchestrator replaces steps 3–6 via SSH + rsync — see [SERVER_CLIENT_PLAN.md](SERVER_CLIENT_PLAN.md).
+**Future (v1):** Razor `run_auto_demo_pipeline.py` replaces steps 3–6 via SSH + rsync — see [SERVER_CLIENT_PLAN.md](SERVER_CLIENT_PLAN.md).
 
 ---
 

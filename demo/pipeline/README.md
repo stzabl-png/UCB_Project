@@ -1,6 +1,6 @@
-# Phase 2 pipeline orchestrator
+# Auto demo pipeline orchestrator
 
-Razor uploads `input/` via rsync; Titan runs T1–T7 and writes `output/` + `status.json`.
+Razor uploads `input/` via rsync; Titan runs the **auto demo pipeline** (T1–T7) and writes `output/` + `status.json`.
 
 ## Layout
 

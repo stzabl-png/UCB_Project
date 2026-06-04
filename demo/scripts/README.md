@@ -16,6 +16,6 @@ Per-step debug scripts live under `T1/`, `T2/`, … Model weights stay in repo d
 
 **Orchestrator:** `python -m demo.pipeline` — [demo/pipeline/README.md](../pipeline/README.md)
 
-**Titan → Razor package doc:** [TITAN_OUTPUT.md](../TITAN_OUTPUT.md) · **Automation:** [SERVER_CLIENT_PLAN.md](../SERVER_CLIENT_PLAN.md)
+**Titan → Razor package doc:** [TITAN_OUTPUT.md](../TITAN_OUTPUT.md) · **Auto demo pipeline (SSH/rsync):** [SERVER_CLIENT_PLAN.md](../SERVER_CLIENT_PLAN.md)
 
 Spec: [demo/README.md](../README.md).

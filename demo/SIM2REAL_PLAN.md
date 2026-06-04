@@ -64,14 +64,14 @@ PointNet++（主方法网络）  →  每点接触概率
 - **思路**：部署时其实你**只需要可见那一面的接触点**（你也只能从可见那面去抓），完整点云是个**训练时的便利，不是部署时的必需**。所以：用主方法的训练 mesh 从随机视角渲出"可见面部分点云"+ 加传感器噪声 + 加 SE(3) 随机旋转/平移增广 → finetune PointNet++ → 得到一个"部署版" checkpoint。部署时：单帧 RGB-D → 分割出物体 → 反投影出部分点云 → 减质心居中 → 喂网络 → 可见面上的接触概率 → 采抓取。
 - **优点**：闭掉了"完整 vs 部分""mesh 干净 vs 传感器噪""固定朝向 vs 任意朝向"三个域差，是**最干净的长期方案**；部署链路最短（一帧就够）。
 - **缺点**：要做一轮 finetune（不贵，几小时；用已有的 SAM3D mesh 当渲染源）；下游抓取采样器里有些打分项（离物体质心、对踵性）在只有部分点云时会偏向可见面 —— 影响可接受，必要时配合方案 A2 的部分融合。
-- **新脚本**：`s2r/finetune_affordance_on_partial.py`（渲染部分点云 + 增广 + 训练）；改一下 `model/train.py` 的数据增广（加 SE(3) + 渲染噪声）。
+- **新脚本**：`demo/sim2real/finetune_affordance_on_partial.py`（渲染部分点云 + 增广 + 训练）；改一下 `model/train.py` 的数据增广（加 SE(3) + 渲染噪声）。
 
 ### 方案 A2（推荐做"完整点云"那一档，或当 A1 的补充）：机器人**多视角融合**（自主，不需要人手）
 
 - **思路**：Vega 碰到一个物体时：① 头部 RGB-D 里检测+分割出它；② 机器人自己**移动头/底盘**采 3~6 帧不同角度的 RGB-D（约 30~60° 一档）；③ 用机器人运动学（臂 FK）+ 底盘里程计知道每帧相机位姿 → 把每帧 mask 内的物体点都变换到一个共同坐标系拼起来 → 体素降采样、去噪、降到 4096 → 得到**接近完整**（顶+侧；桌面挡住的底面拿不到，通常无所谓）的点云。④ 减质心居中 → 喂网络。
 - **优点**：自主（不需要人），对新物体也能用；完整点云让抓取采样器的 COM/对踵性打分更准。
 - **缺点**：物体要能从多个角度看到；依赖准确的相机位姿（Vega 的臂 FK + 底盘里程计够用）；每物体多花 ~10-30s。
-- **新脚本**：`s2r/perceive_object.py` 里实现"采多帧 + 用位姿融合"分支。
+- **新脚本**：`demo/sim2real/perceive_object.py` 里实现"采多帧 + 用位姿融合"分支。
 
 ### 方案 A3：物体有 CAD 模型就直接查表（最干净，但只对已知物体）
 
@@ -114,7 +114,7 @@ PointNet++（主方法网络）  →  每点接触概率
 - 输入：一个抓取候选（grasp_point 在物体表面、approach 方向、width）。
 - 输出：① 手臂腕部 6D 目标位姿（让"虚拟二指"的中点落在 grasp_point、闭合轴垂直于 approach、手掌沿 approach 方向）；② SharpaWave 的关节目标（先张到比 width 略大，到位后闭到比 width 略小施加预紧力 —— 用指尖触觉的力读数停在目标力上，比纯位置控制稳得多）。
 - 这本质就是我给 Baseline1 写的 "MANO→Franka 二指" retarget 的镜像版，只是目标换成 "SharpaWave 当二指"。
-- **新脚本**：`s2r/grasp_from_contacts.py`（接触概率 → 采候选[复用 `inference/grasp_pose.py` + `tools/random_grasp_sampler.py`]→ retarget 成 SharpaWave 配置 + 腕部位姿）。
+- **新脚本**：`demo/sim2real/grasp_from_contacts.py`（接触概率 → 采候选[复用 `inference/grasp_pose.py` + `tools/random_grasp_sampler.py`]→ retarget 成 SharpaWave 配置 + 腕部位姿）。
 
 ### 3.3 一个建议：先在仿真里验证桥 B
 
@@ -127,7 +127,7 @@ Dexmate 提供 Vega 的 URDF/USD，Sharpa 提供 SharpaWave 的高保真仿真�
 - **手臂规划**：把原 pipeline 里的 "cuRobo-for-Franka" 换成 (a) cuRobo **重新配置成 Vega 的 7-DOF 臂**（cuRobo 是机器人无关的，加载 Vega 的臂 URDF + 碰撞世界即可 —— 这条最省事，因为 pipeline 已经会说 cuRobo），或 (b) 直接用 Vega SDK 自带的规划器（如果有）。规划序列：home → pre-grasp（沿 approach 往后退 ~15cm）→ grasp → 闭手 → 抬起 ~15cm。
 - **底盘 + 躯干**：桌面抓取要先把全向底盘开到合适站位、把可折叠躯干摆到合适高度，再做臂动作 —— 这部分用 Vega SDK。
 - **跳过 Isaac Sim 物理校验**：原 pipeline 用 Isaac Sim 在执行前筛候选 —— 真机上不需要，直接试最高分且可达的候选；失败了（触觉/F-T 告诉你抓空或打滑、或物体没被抬起）就退而试下一个候选。
-- **新脚本**：`s2r/plan_and_execute.py`（给定选中的抓取[腕部位姿 + 手配置]：摆底盘/躯干 → 规划臂动作 → 执行 home→pre-grasp→grasp→闭手→抬起 → 触觉/F-T 判成败 → 重试）。
+- **新脚本**：`demo/sim2real/plan_and_execute.py`（给定选中的抓取[腕部位姿 + 手配置]：摆底盘/躯干 → 规划臂动作 → 执行 home→pre-grasp→grasp→闭手→抬起 → 触觉/F-T 判成败 → 重试）。
 
 ---
 
@@ -145,16 +145,16 @@ Dexmate 提供 Vega 的 URDF/USD，Sharpa 提供 SharpaWave 的高保真仿真�
 
 ---
 
-## 6. 需要新写的衔接脚本清单（放 `s2r/` 下）
+## 6. 需要新写的衔接脚本清单（放 `demo/sim2real/` 下）
 
-1. **`s2r/perceive_object.py`** —— 头部 RGB-D（+ 可选多视角）→ 检测+分割物体 → 反投影/融合 → 体素降采样到 4096 + 估法向 → 减质心居中 → 输出物体点云（在机器人 base 系）+ 质心/PCA 帧。
-2. **`s2r/predict_affordance.py`** —— 包一层 `inference/predictor.AffordancePredictor`，直接吃点云数组（`predict_from_points` 已存在），返回接触概率 + force_center；处理居中/通道选择（默认 6 通道）。
-3. **`s2r/grasp_from_contacts.py`** —— 接触概率 + 物体点云 → 采抓取候选（复用 `inference/grasp_pose.py` + `tools/random_grasp_sampler.py`）→ 每个候选 retarget 成 SharpaWave-当二指 的关节配置 + 手臂腕部 6D 位姿 → 按分数 + 可达性排序。
-4. **`s2r/plan_and_execute.py`** —— 给定选中抓取：摆底盘/躯干 → cuRobo-用-Vega-URDF（或 Vega SDK）规划臂动作 → 执行 home→pre-grasp→grasp→闭手→抬起 → 触觉/F-T 判成败 → 失败重试下一候选。
-5. **`s2r/calib/`** —— 相机↔base 外参、SharpaWave↔臂法兰变换、（如需）相机内参标定脚本（一次性）。
-6. **`s2r/finetune_affordance_on_partial.py`**（强烈建议）—— 用 SAM3D mesh 从随机视角渲部分点云 + SE(3) 增广 + 传感器噪声 → finetune PointNet++ → 部署版 checkpoint。配套改 `model/train.py` 的增广。
-7. **`s2r/run_grasp.py`** —— 编排 1→2→3→4 的总入口（真机版的 `run.py`）。
-8. **`s2r/BRINGUP.md`** —— Vega/SharpaWave 上线文档：装 SDK、拿 URDF、cuRobo 配 Vega 臂、验证 RGB-D 流、SharpaPilot/SDK 控手、各项标定。
+1. **`demo/sim2real/perceive_object.py`** —— 头部 RGB-D（+ 可选多视角）→ 检测+分割物体 → 反投影/融合 → 体素降采样到 4096 + 估法向 → 减质心居中 → 输出物体点云（在机器人 base 系）+ 质心/PCA 帧。
+2. **`demo/sim2real/predict_affordance.py`** —— 包一层 `inference/predictor.AffordancePredictor`，直接吃点云数组（`predict_from_points` 已存在），返回接触概率 + force_center；处理居中/通道选择（默认 6 通道）。
+3. **`demo/sim2real/grasp_from_contacts.py`** —— 接触概率 + 物体点云 → 采抓取候选（复用 `inference/grasp_pose.py` + `tools/random_grasp_sampler.py`）→ 每个候选 retarget 成 SharpaWave-当二指 的关节配置 + 手臂腕部 6D 位姿 → 按分数 + 可达性排序。
+4. **`demo/sim2real/plan_and_execute.py`** —— 给定选中抓取：摆底盘/躯干 → cuRobo-用-Vega-URDF（或 Vega SDK）规划臂动作 → 执行 home→pre-grasp→grasp→闭手→抬起 → 触觉/F-T 判成败 → 失败重试下一候选。
+5. **`demo/sim2real/calib/`** —— 相机↔base 外参、SharpaWave↔臂法兰变换、（如需）相机内参标定脚本（一次性）。
+6. **`demo/sim2real/finetune_affordance_on_partial.py`**（强烈建议）—— 用 SAM3D mesh 从随机视角渲部分点云 + SE(3) 增广 + 传感器噪声 → finetune PointNet++ → 部署版 checkpoint。配套改 `model/train.py` 的增广。
+7. **`demo/sim2real/run_grasp.py`** —— 编排 1→2→3→4 的总入口（真机版的 `run.py`）。
+8. **`demo/sim2real/BRINGUP.md`** —— Vega/SharpaWave 上线文档：装 SDK、拿 URDF、cuRobo 配 Vega 臂、验证 RGB-D 流、SharpaPilot/SDK 控手、各项标定。
 
 ---
 
@@ -188,4 +188,4 @@ Dexmate 提供 Vega 的 URDF/USD，Sharpa 提供 SharpaWave 的高保真仿真�
 1. 你认可"主路 = A1（finetune-on-partial）+ 单帧部署，已知物体走 A3，A2 多视角融合作备选"这个组合吗？还是更想先用人手转动录视频（A4）建物体库？
 2. SharpaWave / Vega 的 SDK 文档你那边能拿到吗？（Phase 0 的前置）
 3. Phase 顺序、验收阈值有要调的吗？
-4. 定下来后，我先写哪个脚本？（建议从 `s2r/perceive_object.py` + `s2r/predict_affordance.py` 起 —— 这两个能最快让你在真机上看到"物体点云 + 接触热图"，是整条链路的地基）
+4. 定下来后，我先写哪个脚本？（建议从 `demo/sim2real/perceive_object.py` + `demo/sim2real/predict_affordance.py` 起 —— 这两个能最快让你在真机上看到"物体点云 + 接触热图"，是整条链路的地基）
