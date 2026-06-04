@@ -19,21 +19,35 @@ def sessions_root() -> Path:
     return repo_root() / "demo" / "sessions"
 
 
+def _conda_install_root() -> Path | None:
+    """Miniconda/anaconda root (parent of ``envs/``), even when another env is active."""
+    prefix = os.environ.get("CONDA_PREFIX")
+    if prefix:
+        p = Path(prefix)
+        if p.name in ("bin", "lib"):
+            p = p.parent
+        if p.parent.name == "envs":
+            return p.parent.parent
+        if (p / "envs").is_dir():
+            return p
+    exe = os.environ.get("CONDA_EXE")
+    if exe:
+        # .../bin/conda -> install root
+        return Path(exe).resolve().parent.parent
+    for candidate in (
+        Path.home() / "miniconda3",
+        Path.home() / "anaconda3",
+        Path("/home/vision/miniconda3"),
+    ):
+        if (candidate / "envs").is_dir():
+            return candidate
+    return None
+
+
 def _conda_python(env_name: str) -> Path | None:
-    base = os.environ.get("CONDA_PREFIX")
-    if base:
-        root = Path(base).parents[1] if Path(base).name in ("bin", "lib") else Path(base)
-    else:
-        for candidate in (
-            Path.home() / "miniconda3",
-            Path.home() / "anaconda3",
-            Path("/home/vision/miniconda3"),
-        ):
-            if (candidate / "envs").is_dir():
-                root = candidate
-                break
-        else:
-            return None
+    root = _conda_install_root()
+    if root is None:
+        return None
     py = root / "envs" / env_name / "bin" / "python"
     return py if py.is_file() else None
 

@@ -96,6 +96,14 @@ ssh -L 7860:127.0.0.1:7860 vision@<titan-host>
 
 **Status polling (Razor):** read `output/status.json` — `state`: `waiting_segment` | `running` | `done` | `failed`; also `output/daemon_state.json`.
 
+**Daemon 重启会 resume 吗？** 只要还有 `input/.upload_complete` 且没有 `input/.upload_processed`，重启后会**自动接着跑**（失败到一半也会重试；有 mask 则跳过 T2 网页）。要**整段重来**：
+
+```bash
+python -m demo.pipeline.reset_session --session-dir demo/sessions/<id> --requeue
+```
+
+见 [pipeline/README.md](pipeline/README.md#resume-vs-从头开始)。
+
 ### One-shot pipeline (no daemon)
 
 Only when T2 is non-interactive:

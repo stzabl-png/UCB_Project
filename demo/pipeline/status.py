@@ -53,3 +53,55 @@ def write_progress(
     if current_step:
         payload["current_step"] = current_step
     return write_status_atomic(output_dir, payload)
+
+
+def patch_status_state(
+    output_dir: Path,
+    *,
+    session_id: str,
+    session_root: str,
+    state: str,
+    current_step: str | None = None,
+    message: str | None = None,
+) -> Path:
+    """
+    Update ``status.json`` progress fields without clobbering T7 ``success`` / ``steps``.
+
+    Used by segment_daemon between T2 and T7. Terminal pipeline results must come
+    from ``write_status.py`` (T7), not from ``write_progress``.
+    """
+    out = output_dir / "status.json"
+    if out.is_file():
+        data = json.loads(out.read_text(encoding="utf-8"))
+    else:
+        data = {
+            "schema_version": "1.1",
+            "session_id": session_id,
+            "success": False,
+            "pipeline_version": PIPELINE_VERSION,
+            "steps": {
+                "segment": "pending",
+                "sam3d": "pending",
+                "scale": "pending",
+                "foundationpose": "pending",
+                "grasp_pose": "pending",
+            },
+            "warnings": [],
+            "errors": [],
+            "titan": {"session_root": session_root},
+            "package": {"output_package_doc": "demo/TITAN_OUTPUT.md"},
+        }
+    data["state"] = state
+    data["updated_at_iso"] = _now_iso()
+    if current_step is not None:
+        data["current_step"] = current_step
+    elif "current_step" in data and state in ("done", "failed"):
+        data.pop("current_step", None)
+    if message:
+        titan = data.setdefault("titan", {})
+        if isinstance(titan, dict):
+            titan["daemon_message"] = message
+    # Do not downgrade success after T7
+    if data.get("success") is not True:
+        data["success"] = False
+    return write_status_atomic(output_dir, data)

@@ -71,6 +71,38 @@ ssh -L 7860:127.0.0.1:7860 vision@<titan-host>
 
 Poll: `output/status.json` (`state`: `waiting_segment` → `running` → `done`) and `output/daemon_state.json`.
 
+**Only one `segment_daemon` process.** After SAM2 web saves the mask, logs show `T2 ok (mask already saved via SAM2 web UI …)` — that is expected (orchestrator does not run SAM2 twice). While T3–T7 run, `input/.upload_complete` becomes `.upload_processing` so the daemon will not start the same session again.
+
+## Resume vs 从头开始
+
+| 情况 | daemon 重启后 |
+|------|----------------|
+| `input/.upload_complete` 还在，且**没有** `input/.upload_processed` | **会自动继续**（失败中断也会重试） |
+| T2 已有 `mask.png` | 跳过 SAM2 网页，从 T3 起跑（已有产物会 skip，除非 `--redo`） |
+| 上次 pipeline **成功**（已 `.upload_processed`） | **不会**再处理，除非重新 `mark_upload_complete` |
+
+**整 session 重来（含重新点 SAM2）：**
+
+```bash
+python -m demo.pipeline.reset_session \
+  --session-dir demo/sessions/<session_id> \
+  --requeue
+# daemon 在跑会自动接单；或：
+python -m demo.pipeline.segment_daemon --session-dir demo/sessions/<id> --redo
+```
+
+**只清 output、保留 mask（重做 T3–T7）：**
+
+```bash
+python -m demo.pipeline.reset_session --session-dir demo/sessions/<id> --requeue --keep-mask
+```
+
+**从队列移除（不再自动 resume）：**
+
+```bash
+python -m demo.pipeline.reset_session --session-dir demo/sessions/<id> --mark-processed
+```
+
 ## Conda
 
 | Steps | Env |

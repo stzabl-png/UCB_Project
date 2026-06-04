@@ -148,8 +148,11 @@ def run_pipeline(opts: PipelineOptions) -> PipelineResult:
         mask_rel = "output/segment/mask.png"
         prompt_path = dirs.input_rel("segment", "prompt.json")
         if opts.skip_sam and _artifact_exists(session_dir, mask_rel):
-            steps["segment"] = "skipped"
-            _log(opts, "T2 skipped (--skip-sam, mask exists)")
+            steps["segment"] = "ok"
+            _log(
+                opts,
+                "T2 ok (mask already saved via SAM2 web UI or Razor — not re-running segment_prompt)",
+            )
         elif _artifact_exists(session_dir, mask_rel) and not opts.redo:
             steps["segment"] = "ok"
             _log(opts, f"T2 skipped (exists): {mask_rel}")

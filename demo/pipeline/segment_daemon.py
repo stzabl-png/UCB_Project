@@ -36,17 +36,19 @@ from demo.pipeline.env import (
     PIPELINE_VERSION,
     bundlesdf_python,
     repo_root,
-    sessions_root,
+    sessions_root as default_sessions_root,
 )
 from demo.pipeline.run_pipeline import PipelineOptions, run_pipeline
 from demo.pipeline.session_markers import (
+    claim_upload_for_processing,
     daemon_lock_path,
     is_upload_pending,
     mark_upload_processed,
+    release_upload_for_retry,
     upload_complete_path,
     write_upload_complete,
 )
-from demo.pipeline.status import write_progress
+from demo.pipeline.status import patch_status_state
 
 
 def _now_iso() -> str:
@@ -135,20 +137,31 @@ def _write_daemon_state(
         json.dumps(payload, indent=2) + "\n",
         encoding="utf-8",
     )
-    steps = {
-        "segment": "pending",
-        "sam3d": "pending",
-        "scale": "pending",
-        "foundationpose": "pending",
-        "grasp_pose": "pending",
-    }
-    write_progress(
+    # Do not call write_progress here — it forces success=false and resets steps.
+    # After T7, only touch state/message; preserve success and step results.
+    if state in ("done", "failed"):
+        if (out / "status.json").is_file():
+            patch_status_state(
+                out,
+                session_id=session_id,
+                session_root=str(session_root),
+                state=state,
+                message=message or None,
+            )
+        return
+    patch_status_state(
         out,
         session_id=session_id,
         session_root=str(session_root),
-        steps=steps,
         state=state,
-        current_step="segment" if state == "waiting_segment" else None,
+        message=message or None,
+        current_step=(
+            "segment"
+            if state == "waiting_segment"
+            else "pipeline"
+            if state == "running"
+            else None
+        ),
     )
 
 
@@ -218,6 +231,17 @@ def process_session(
         print(f"[daemon] locked (another worker?): {session_root.name}", flush=True)
         return False
 
+    if not force:
+        claimed = claim_upload_for_processing(session_root)
+        if claimed is None:
+            print(
+                f"[daemon] skip (not queued or already processing): {session_root.name}",
+                flush=True,
+            )
+            _release_lock(session_root)
+            return False
+        print(f"[daemon] claimed {claimed.name} for {session_root.name}", flush=True)
+
     dirs = _resolve_dirs(session_root)
     ok = False
     try:
@@ -279,6 +303,7 @@ def process_session(
                 message="Pipeline complete; Razor may rsync output/",
             )
         else:
+            release_upload_for_retry(session_root)
             _write_daemon_state(
                 session_root,
                 session_id=dirs.session_id,
@@ -286,6 +311,9 @@ def process_session(
                 message="; ".join(result.errors) or "pipeline failed",
             )
         return ok
+    except Exception as exc:
+        release_upload_for_retry(session_root)
+        raise exc
     finally:
         _release_lock(session_root)
 
@@ -305,7 +333,7 @@ def discover_pending(sessions_root: Path) -> list[Path]:
 
 def run_daemon(
     *,
-    sessions_root: Path | None = None,
+    watch_root: Path | None = None,
     poll_interval: float = 5.0,
     host: str = "127.0.0.1",
     port: int = 7860,
@@ -313,7 +341,9 @@ def run_daemon(
     once: bool = False,
     redo: bool = False,
 ) -> int:
-    root = _resolve_session(sessions_root if sessions_root is not None else sessions_root())
+    root = _resolve_session(
+        watch_root if watch_root is not None else default_sessions_root()
+    )
     print(f"Titan segment daemon — {PIPELINE_VERSION}")
     print(f"Watching: {root}")
     print(f"T2 bind {host}:{port}  (tunnel: ssh -L {port}:127.0.0.1:{port} user@titan)")
@@ -349,7 +379,7 @@ def main(argv: list[str] | None = None) -> int:
         "--sessions-root",
         type=Path,
         default=None,
-        help=f"Default: {sessions_root()}",
+        help=f"Default: {default_sessions_root()}",
     )
     ap.add_argument("--session-dir", type=Path, help="Process one session and exit")
     ap.add_argument("--poll-interval", type=float, default=5.0)
@@ -386,7 +416,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         return run_daemon(
-            sessions_root=args.sessions_root,
+            watch_root=args.sessions_root,
             poll_interval=args.poll_interval,
             host=args.host,
             port=args.port,
