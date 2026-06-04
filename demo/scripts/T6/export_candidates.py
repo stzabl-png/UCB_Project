@@ -19,14 +19,22 @@ def _load_json_matrix(path: Path, key: str) -> np.ndarray:
     return np.asarray(data[key], dtype=np.float64).reshape(4, 4)
 
 
-def _mesh_span_m(mesh_path: Path) -> list[float]:
+def _mesh_vertices(mesh_path: Path) -> np.ndarray:
     mesh = trimesh.load(str(mesh_path), force="mesh")
     if isinstance(mesh, trimesh.Scene):
         mesh = mesh.dump(concatenate=True)
-    ext = np.asarray(mesh.vertices, dtype=np.float64).max(axis=0) - np.asarray(
-        mesh.vertices, dtype=np.float64
-    ).min(axis=0)
+    return np.asarray(mesh.vertices, dtype=np.float64)
+
+
+def _mesh_span_m(verts: np.ndarray) -> list[float]:
+    ext = verts.max(axis=0) - verts.min(axis=0)
     return [float(x) for x in ext.tolist()]
+
+
+def _mesh_aabb_m(verts: np.ndarray) -> tuple[list[float], list[float]]:
+    vmin = verts.min(axis=0)
+    vmax = verts.max(axis=0)
+    return [float(x) for x in vmin.tolist()], [float(x) for x in vmax.tolist()]
 
 
 def _affordance_summary(
@@ -114,6 +122,8 @@ def export_candidates_json(
 
     T_cam_mesh = np.asarray(T_cam_mesh, dtype=np.float64).reshape(4, 4)
     T_base_mesh = np.asarray(T_base_mesh, dtype=np.float64).reshape(4, 4)
+    verts = _mesh_vertices(mesh_path)
+    aabb_min, aabb_max = _mesh_aabb_m(verts)
 
     payload: dict[str, Any] = {
         "schema_version": "1.1",
@@ -138,7 +148,9 @@ def export_candidates_json(
             "lift_height_m": 0.15,
             "pdm_command_frame": "mesh_tcp_center",
         },
-        "mesh_span_m": _mesh_span_m(mesh_path),
+        "mesh_span_m": _mesh_span_m(verts),
+        "mesh_aabb_min_m": aabb_min,
+        "mesh_aabb_max_m": aabb_max,
         "mesh_file": "output/mesh/object_base_aligned.glb",
         "n_candidates": len(candidates),
         "candidates": candidates,

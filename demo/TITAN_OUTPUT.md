@@ -65,7 +65,8 @@ assert status["success"] is True
 | `steps` | Per-step: `segment`, `sam3d`, `scale`, `foundationpose`, `grasp_pose` → `"ok"` / `"fail"` |
 | `warnings` | Non-fatal (e.g. table height vs mesh Z, scale clamp, distortion) |
 | `errors` | Fatal — do not grasp |
-| `package.required_for_grasp` | Minimal file list |
+| `package.required_for_grasp` | Includes `object_base_aligned.glb` + `candidates.json` + `T_base_mesh.json` |
+| `pipeline_version` | `demo.pipeline.process_razor_session 0.1.0` after full orchestrator; `demo.scripts.T7.write_status 0.1.0` if T7 run alone |
 | `titan.n_candidates` | Number of exported candidates |
 
 ---
@@ -159,6 +160,7 @@ Top-level fields:
 | `mesh_frame` | `"base_aligned"` — use with `object_base_aligned.glb` |
 | `registration` | `T_cam_mesh`, `T_base_mesh`, method `foundationpose` |
 | `conventions` | `rotation_columns`, `ucb_tcp_offset_m` (0.105), `pre_grasp_offset_m` (0.15) |
+| `mesh_aabb_min_m` / `mesh_aabb_max_m` | Optional AABB of `object_base_aligned.glb` (Razor obstacle; can recompute from GLB) |
 | `candidates[]` | Sorted by `rank` (0 = best score) |
 
 ### `output/register/T_base_mesh.json`

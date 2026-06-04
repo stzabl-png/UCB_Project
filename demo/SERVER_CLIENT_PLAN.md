@@ -1,7 +1,7 @@
 # Titan ↔ Razor auto demo pipeline
 
 **Audience:** Titan team (UCB_Project / GPU server) — implement processing + accept Razor uploads.  
-**Razor team:** orchestrator client (future `run_auto_demo_pipeline.py`); capture + grasp already in V2AP-demo.
+**Razor team:** orchestrator client `run_server_client_pipeline.py`; capture + grasp already in V2AP-demo.
 
 **Related docs**
 
@@ -144,11 +144,11 @@ python -m demo.pipeline.process_razor_session \
 | Step | ID | Output (minimum) |
 |------|-----|------------------|
 | Validate input | T1 | fail → `output/status.json` `success: false` |
-| SAM mask | T2 | `output/segment/mask.png` (+ `prompt_used.json`); batch: `input/segment/prompt.json` |
+| SAM mask | T2 | `output/segment/mask.png`; **unattended:** `input/segment/prompt.json` **or** pre-uploaded mask |
 | SAM3D mesh | T3 | `output/mesh/object_raw.glb` (`sam3d-objects` env) |
-| Metric scale | T4 | `output/mesh/object_scaled.glb`, `scale.json` |
-| FoundationPose | T5 | `output/register/T_cam_mesh.json`, `T_base_mesh.json`, `object_base_aligned.glb` |
-| Grasp (PDM) | T6 | `output/inference/candidates.json` (+ optional HDF5) |
+| Metric scale | T4 | `output/mesh/object_scaled.glb`, `scale.json` (`bundlesdf`) |
+| FoundationPose + align | T5 | `T_cam_mesh_fp.json`, `mesh_frame_align.json`, `T_cam_mesh.json`, `T_base_mesh.json`, `object_base_aligned.glb` |
+| Grasp (PDM) | T6 | `output/inference/candidates.json` (`mesh_frame: base_aligned`) |
 | Status | T7 | `output/status.json` (**write last**, atomic rename) |
 
 Full step specs: [README.md § TITAN processing pipeline](README.md#titan-processing-pipeline).
@@ -182,7 +182,6 @@ Razor **must** read this before grasp. Write **last** (`status.json.tmp` → ren
   "pipeline_version": "demo.pipeline.process_razor_session 0.1.0",
   "finished_at_iso": "2026-06-03T12:00:00+00:00",
   "steps": {
-    "validate_input": "ok",
     "segment": "ok",
     "sam3d": "ok",
     "scale": "ok",
@@ -195,7 +194,8 @@ Razor **must** read this before grasp. Write **last** (`status.json.tmp` → ren
     "required_for_grasp": [
       "output/status.json",
       "output/inference/candidates.json",
-      "output/register/T_base_mesh.json"
+      "output/register/T_base_mesh.json",
+      "output/mesh/object_base_aligned.glb"
     ]
   },
   "titan": {
@@ -207,6 +207,10 @@ Razor **must** read this before grasp. Write **last** (`status.json.tmp` → ren
 
 **Failure:** `success: false`, non-empty `errors[]`. Partial `output/` is OK; Razor must **not** run grasp.
 
+**`pipeline_version`:** After `python -m demo.pipeline.process_razor_session`, expect **`demo.pipeline.process_razor_session 0.1.0`**. Running T7 alone (`write_status.py`) sets `demo.scripts.T7.write_status 0.1.0` — Razor automation should require the orchestrator string.
+
+**`steps`:** Only T2–T6 artifact keys above (T1 validation is not listed in `status.json`).
+
 **Optional progress field (v1.1):** for Razor polling while job runs:
 
 ```json
@@ -217,26 +221,49 @@ Razor **must** read this before grasp. Write **last** (`status.json.tmp` → ren
 
 Update `state`/`updated_at_iso` at each step start/end if implementing long jobs.
 
-### 5.4 Remote invocation from Razor (v1)
+### 5.4 Razor integration (V2AP-demo client)
 
-Razor `run_auto_demo_pipeline.py` will run **after** rsync upload:
+| Item | Value |
+|------|--------|
+| Titan session root | `$UCB_ROOT/demo/sessions/<session_id>/` |
+| Rsync subdir (under UCB repo) | `demo/sessions` |
+| Razor orchestrator script | `run_server_client_pipeline.py` (V2AP-demo) |
+| Titan remote command | `python -m demo.pipeline.process_razor_session --session-dir demo/sessions/<id> --device cuda` |
+
+**Suggested Razor env (map into client config):**
+
+```bash
+export UCB_ROOT=/home/vision/Project/Affordance2Grasp   # on Titan SSH session
+export PIPELINE_REMOTE_SESSIONS_SUBDIR=demo/sessions
+export PIPELINE_TITAN_CMD='python -m demo.pipeline.process_razor_session --session-dir {session_dir} --device cuda'
+# {session_dir} → e.g. demo/sessions/20260602_192346_chips (relative to UCB_ROOT on Titan)
+```
+
+**T2 before upload:** Either pack `input/segment/prompt.json` on Razor, or rsync a pre-made `output/segment/mask.png` and run Titan with `--skip-sam`. Without both, `demo.pipeline` **fails at T2** (no interactive SAM in batch mode).
+
+**Conda on Titan:** Orchestrator runs T3 in `sam3d-objects` and T1/T2/T4/T5/T6/T7 in `bundlesdf` — Razor SSH only needs `bundlesdf` activated if invoking the module entrypoint (orchestrator re-invokes per-step interpreters).
+
+### 5.5 Remote invocation from Razor (v1)
+
+`run_server_client_pipeline.py` runs **after** rsync upload:
 
 ```bash
 ssh titan-demo-pipeline "cd ${UCB_ROOT} && \
-  source \$(conda info --base)/etc/profile.d/conda.sh && \
-  conda activate ${DEMO_PIPELINE_CONDA_ENV} && \
+  export FP_ROOT=${UCB_ROOT}/third_party/FoundationPose && \
   python -m demo.pipeline.process_razor_session \
     --session-dir demo/sessions/${SESSION_ID} \
     --device cuda"
 ```
 
-Titan script should:
+(`demo.pipeline` selects `sam3d-objects` / `bundlesdf` per step; no manual conda switch required for full pipeline.)
+
+Titan should:
 
 - Exit code **0** iff `success: true` in final `status.json`
 - Exit code **non-zero** on fatal error (Razor treats as failed job)
 - Log to `output/logs/process.log` (recommended)
 
-### 5.5 Rsync commands (reference)
+### 5.6 Rsync commands (reference)
 
 **Razor → Titan (upload input):**
 
@@ -316,7 +343,7 @@ Razor reads **`grasp_point` + `rotation`** in mesh frame, **not** `position_pand
 |-------|------------|------------|------------|
 | **A** | Accept rsync; manual `python -m demo.pipeline` | Manual rsync (today) | One session end-to-end |
 | **B** | Stable `status.json` + exit codes | Shell script: upload → ssh → download | No manual Titan login |
-| **C** | `state` polling + `process.log` | `run_auto_demo_pipeline.py` + `orchestrator_state.json` | Single command from Razor |
+| **C** | `state` polling + `process.log` | `run_server_client_pipeline.py` + `orchestrator_state.json` | Single command from Razor |
 | **D** (opt) | HTTP job API + queue | Client uses API + rsync for blobs | Multi-user / queue |
 
 **Titan minimum for phase B:** sections 5.1, 5.3, 5.4, 5.5 working reliably.
