@@ -42,6 +42,35 @@ def sample_pc_G(mesh: trimesh.Trimesh, num_points: int, seed: int) -> np.ndarray
     return np.asarray(pts, dtype=np.float32)
 
 
+def measure_table_height_from_session(root: pathlib.Path) -> float | None:
+    """Measured table top z in base — MIRRORS partner V2AP-demo
+    table_height.estimate_table_height_m_from_depth (lower-center depth ROI median,
+    backprojected to base). Returns None if input/depth too sparse. We use this (NOT
+    scene/table.json, which partner only treats as a fallback) so the DP3 session's
+    table height matches partner's pipeline exactly."""
+    inp = root / "input"
+    try:
+        depth = np.load(inp / "depth" / "depth.npy").astype(np.float64)
+        K = np.load(inp / "calib" / "K.npy").astype(np.float64)
+        T_base_cam = np.asarray(
+            json.loads((inp / "calib" / "extrinsics.json").read_text())["T_base_cam"], dtype=np.float64)
+    except Exception:
+        return None
+    h, w = depth.shape
+    v0, v1, u0, u1 = int(h * 0.55), h, int(w * 0.25), int(w * 0.75)
+    patch = depth[v0:v1, u0:u1]
+    valid = np.isfinite(patch) & (patch > 0.05) & (patch < 3.0)
+    if int(valid.sum()) < 20:
+        return None
+    zs = patch[valid]
+    us = np.broadcast_to(np.arange(u0, u1), patch.shape)[valid]
+    vs = np.broadcast_to(np.arange(v0, v1)[:, None], patch.shape)[valid]
+    fx, fy, cx, cy = K[0, 0], K[1, 1], K[0, 2], K[1, 2]
+    p_cam = np.stack([(us - cx) * zs / fx, (vs - cy) * zs / fy, zs, np.ones_like(zs)], axis=1)
+    p_base = (T_base_cam @ p_cam.T).T[:, :3]
+    return float(np.median(p_base[:, 2]))
+
+
 def read_T_base_mesh(path: pathlib.Path) -> np.ndarray:
     """Read register/T_base_mesh.json → 4x4. Accepts {'T_base_mesh': 4x4} or a raw 4x4."""
     obj = json.loads(path.read_text())
@@ -89,8 +118,10 @@ def build_session(mesh_path, t_base_mesh_json, out_dir, *, num_points=4096, seed
         "seed": int(seed),
         "mesh_file": str(mesh_path),
         "pc_extent_m": (pc_G.max(0) - pc_G.min(0)).round(4).tolist(),
+        "table_height_m": (round(float(table_height_m), 4) if table_height_m is not None else None),
         "snap_to_table": snap_info,
-        "note": "pc_G = base-aligned mesh surface sample (G frame); home_right_arm is razer-side",
+        "note": "pc_G = base-aligned mesh surface sample (G frame); home_right_arm is razer-side; "
+                "table_height_m = partner-measured (depth ROI median), used by razer for Z-clamp + collision",
     }
     (out_dir / "meta.json").write_text(json.dumps(meta, indent=2))
     return out_dir, pc_G, meta
@@ -122,12 +153,14 @@ def main():
             ap.error("without --session-dir, give --mesh, --t-base-mesh-json, and --out")
         mesh, tbm, out = args.mesh, args.t_base_mesh_json, args.out
 
+    # table height = partner-measured (depth ROI median), NOT scene/table.json (0.85, fallback only).
     table_height = args.table_height
+    if table_height is None and root is not None:
+        table_height = measure_table_height_from_session(root)
+        if table_height is not None:
+            print(f"  measured table_height (partner depth-ROI) = {table_height:.4f} m")
     if args.snap_to_table and table_height is None:
-        if root is None:
-            ap.error("--snap-to-table needs --table-height (or --session-dir to read table.json)")
-        tj = root / "input" / "scene" / "table.json"
-        table_height = float(json.loads(tj.read_text())["table_height_m"])
+        ap.error("--snap-to-table: could not measure table height; pass --table-height explicitly")
 
     out_dir, pc_G, meta = build_session(mesh, tbm, out,
                                         num_points=args.num_points, seed=args.seed, n_obs=args.n_obs,
