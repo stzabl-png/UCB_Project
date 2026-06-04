@@ -24,7 +24,8 @@ demo/
 ├── pipeline/
 │   ├── segment_daemon.py       # python -m demo.pipeline.segment_daemon
 │   ├── process_razor_session.py
-│   └── run_pipeline.py
+│   ├── run_pipeline.py
+│   └── titan_options.py          # pipeline.titan.max_candidates → T6 n_samples
 ├── razor/
 │   ├── mark_upload_complete.py
 │   └── review_titan_vis.py

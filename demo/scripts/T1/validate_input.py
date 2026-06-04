@@ -24,9 +24,12 @@ from typing import Any
 import numpy as np
 
 _SCRIPTS_ROOT = Path(__file__).resolve().parents[1]
-if str(_SCRIPTS_ROOT) not in sys.path:
-    sys.path.insert(0, str(_SCRIPTS_ROOT))
+_REPO = _SCRIPTS_ROOT.parent.parent
+for _p in (_SCRIPTS_ROOT, _REPO):
+    if str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
 from _session_io import SessionDirs, resolve_session_dirs  # noqa: E402
+from demo.pipeline.titan_options import read_titan_max_candidates  # noqa: E402
 
 REQUIRED_INPUT_FILES = (
     "session.json",
@@ -112,6 +115,14 @@ def _validate_session_json(
         )
     if sv.startswith("1.1") and not pipe.get("foundationpose"):
         report.warnings.append("pipeline.foundationpose block missing (recommended for 1.1)")
+
+    try:
+        max_cand = read_titan_max_candidates(sess)
+    except ValueError as exc:
+        report.errors.append(str(exc))
+        max_cand = None
+    if max_cand is not None:
+        report.info["titan_max_candidates"] = max_cand
 
     for key in ("rgb_file", "depth_file"):
         rel = cap.get(key)

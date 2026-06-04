@@ -67,7 +67,9 @@ assert status["success"] is True
 | `errors` | Fatal — do not grasp |
 | `package.required_for_grasp` | Includes `object_base_aligned.glb` + `candidates.json` + `T_base_mesh.json` |
 | `pipeline_version` | `demo.pipeline.process_razor_session 0.1.0` after full orchestrator; `demo.scripts.T7.write_status 0.1.0` if T7 run alone |
-| `titan.n_candidates` | Number of exported candidates |
+| `titan.max_candidates_requested` | From `input/session.json` `pipeline.titan.max_candidates` (Razor upload hint) |
+| `titan.pdm_n_samples_requested` | PDM draw count used in T6 (`pdm_meta.json` `n_samples_requested`) |
+| `titan.n_candidates` | Number of exported candidates after filters (≤ requested) |
 
 ---
 

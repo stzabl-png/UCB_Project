@@ -26,10 +26,13 @@ from typing import Any
 import numpy as np
 
 _SCRIPTS_ROOT = Path(__file__).resolve().parents[1]
-if str(_SCRIPTS_ROOT) not in sys.path:
-    sys.path.insert(0, str(_SCRIPTS_ROOT))
+_REPO = _SCRIPTS_ROOT.parent.parent
+for _p in (_SCRIPTS_ROOT, _REPO):
+    if str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
 
 from _session_io import SessionDirs, resolve_session_dirs  # noqa: E402
+from demo.pipeline.titan_options import read_titan_max_candidates  # noqa: E402
 
 PIPELINE_VERSION = "demo.scripts.T7.write_status 0.1.0"
 
@@ -226,6 +229,17 @@ def finalize_session(
         sess = _load_json(sess_json)
         info["object_slug"] = sess.get("object_slug")
         info["schema_version"] = sess.get("schema_version")
+        try:
+            mc = read_titan_max_candidates(sess)
+            if mc is not None:
+                info["titan_max_candidates_requested"] = mc
+        except ValueError:
+            pass
+
+    pdm_meta = dirs.output_rel("inference", "pdm_meta.json")
+    if pdm_meta.is_file():
+        pm = _load_json(pdm_meta)
+        info["pdm_n_samples_requested"] = pm.get("n_samples_requested")
 
     if skip_input_check:
         v_state, v_msgs = "skip", []
@@ -302,7 +316,9 @@ def build_status_payload(
             "session_root": str(dirs.session_root),
             "hostname": socket.gethostname(),
             "object_slug": report.info.get("object_slug"),
+            "max_candidates_requested": report.info.get("titan_max_candidates_requested"),
             "n_candidates": report.info.get("n_candidates"),
+            "pdm_n_samples_requested": report.info.get("pdm_n_samples_requested"),
             "mesh_frame": report.info.get("mesh_frame"),
             "inference_method": report.info.get("inference_method"),
             "grasp_conventions": report.info.get("grasp_conventions"),

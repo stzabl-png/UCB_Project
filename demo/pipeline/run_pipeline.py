@@ -21,6 +21,7 @@ from demo.pipeline.env import (
     sam3d_python,
 )
 from demo.pipeline.status import write_progress
+from demo.pipeline.titan_options import resolve_pdm_n_samples
 
 
 @dataclass
@@ -31,6 +32,7 @@ class PipelineOptions:
     skip_fp: bool = False
     redo: bool = False
     device: str | None = None
+    n_samples: int | None = None
     log: TextIO | None = None
 
 
@@ -296,7 +298,16 @@ def run_pipeline(opts: PipelineOptions) -> PipelineResult:
                 started_at_iso=started_iso,
                 current_step="grasp_pose",
             )
-            cmd = [py_b, str(scripts / "T6" / "run_pdm_grasp.py"), "--session-dir", sd]
+            n_samples = resolve_pdm_n_samples(session_dir, cli_n_samples=opts.n_samples)
+            _log(opts, f"T6 PDM n_samples={n_samples}")
+            cmd = [
+                py_b,
+                str(scripts / "T6" / "run_pdm_grasp.py"),
+                "--session-dir",
+                sd,
+                "--n-samples",
+                str(n_samples),
+            ]
             if opts.redo:
                 cmd.append("--redo")
             if opts.device:

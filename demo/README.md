@@ -267,6 +267,9 @@ input/
   },
   "pipeline": {
     "registration_method": "foundationpose",
+    "titan": {
+      "max_candidates": 50
+    },
     "foundationpose": {
       "fp_scene_layout": "ycbineoat_reader",
       "frame_index": "000000",
@@ -289,6 +292,7 @@ input/
 - If RGB and depth resolutions differ, Razor must **resize depth to RGB** (nearest-neighbor) before save, and set `depth_aligned_to_rgb: true`.
 - `schema_version` must be **`"1.1"`** for FoundationPose pipeline. Titan rejects unknown major versions.
 - Legacy `1.0` sessions (ICP-era) may still validate on Razor but must be re-captured for FP metadata.
+- **`pipeline.titan.max_candidates`** (optional): PDM draw count for T6. Razor [V2AP-demo](https://github.com/jiaka1chen/V2AP-demo) sets this via `patch_input_titan_options()` before upload (`--titan-max-candidates`, default 50). Titan reads it in `run_pdm_grasp.py` / `demo.pipeline.titan_options`. Use **`max_candidates` ≥ `--grasp-attempts`** on Razor when running multiple real grasps (rank 0, 1, …).
 
 ### `input/rgb/left_rgb.png`
 

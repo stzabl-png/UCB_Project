@@ -52,6 +52,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--skip-fp", action="store_true")
     ap.add_argument("--redo", action="store_true", help="Overwrite existing step outputs")
     ap.add_argument("--device", type=str, default=None, help="T6 CUDA device")
+    ap.add_argument(
+        "--n-samples",
+        type=int,
+        default=None,
+        help="Override PDM sample count (default: input/session.json pipeline.titan.max_candidates or 50)",
+    )
     args = ap.parse_args(argv)
 
     session_dir = _resolve_session_arg(args.session_dir)
@@ -70,6 +76,7 @@ def main(argv: list[str] | None = None) -> int:
             skip_fp=args.skip_fp,
             redo=args.redo,
             device=args.device,
+            n_samples=args.n_samples,
         )
     )
 

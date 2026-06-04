@@ -26,6 +26,7 @@ for p in (_T6_DIR, _SCRIPTS_ROOT, _REPO):
         sys.path.insert(0, str(p))
 
 from _session_io import resolve_session_dirs  # noqa: E402
+from demo.pipeline.titan_options import resolve_pdm_n_samples  # noqa: E402
 from pdm_session import run_pdm_for_session  # noqa: E402
 from rebuild_vis import rebuild_t6_vis  # noqa: E402
 
@@ -40,7 +41,12 @@ def main() -> int:
         action="store_true",
         help="Only rebuild output/vis/T6_grasp_vis.png from HDF5 + affordance NPZ",
     )
-    ap.add_argument("--n-samples", type=int, default=50)
+    ap.add_argument(
+        "--n-samples",
+        type=int,
+        default=None,
+        help="PDM sample count (default: input/session.json pipeline.titan.max_candidates, else 50)",
+    )
     ap.add_argument("--ddim-steps", type=int, default=50)
     ap.add_argument("--num-points", type=int, default=4096)
     ap.add_argument("--seed", type=int, default=42)
@@ -100,11 +106,13 @@ def main() -> int:
         return 0
 
     device = "cpu" if args.cpu else args.device
+    n_samples = resolve_pdm_n_samples(dirs.session_root, cli_n_samples=args.n_samples)
+    print(f"T6 PDM n_samples={n_samples}")
     result = run_pdm_for_session(
         dirs,
         aff_ckpt=args.affordance_ckpt,
         pdm_ckpt=args.pdm_checkpoint,
-        n_samples=args.n_samples,
+        n_samples=n_samples,
         ddim_steps=args.ddim_steps,
         num_points=args.num_points,
         seed=args.seed,

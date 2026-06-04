@@ -208,6 +208,7 @@ def process_session(
     host: str = "127.0.0.1",
     port: int = 7860,
     device: str | None = None,
+    n_samples: int | None = None,
     redo: bool = False,
     force: bool = False,
 ) -> bool:
@@ -291,6 +292,7 @@ def process_session(
                 skip_sam=skip_sam,
                 redo=redo,
                 device=device,
+                n_samples=n_samples,
             )
         )
         ok = result.ok
@@ -338,6 +340,7 @@ def run_daemon(
     host: str = "127.0.0.1",
     port: int = 7860,
     device: str | None = None,
+    n_samples: int | None = None,
     once: bool = False,
     redo: bool = False,
 ) -> int:
@@ -360,6 +363,7 @@ def run_daemon(
                     host=host,
                     port=port,
                     device=device,
+                    n_samples=n_samples,
                     redo=redo,
                     force=False,
                 )
@@ -386,6 +390,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--host", type=str, default="127.0.0.1")
     ap.add_argument("--port", type=int, default=7860)
     ap.add_argument("--device", type=str, default=None, help="T6 CUDA device")
+    ap.add_argument(
+        "--n-samples",
+        type=int,
+        default=None,
+        help="Override PDM sample count (default: input/session.json pipeline.titan.max_candidates or 50)",
+    )
     ap.add_argument("--once", action="store_true", help="Process queue once then exit")
     ap.add_argument("--redo", action="store_true", help="Re-run T2 web / pipeline")
     ap.add_argument(
@@ -409,6 +419,7 @@ def main(argv: list[str] | None = None) -> int:
             host=args.host,
             port=args.port,
             device=args.device,
+            n_samples=args.n_samples,
             redo=args.redo,
             force=True,
         )
@@ -421,6 +432,7 @@ def main(argv: list[str] | None = None) -> int:
             host=args.host,
             port=args.port,
             device=args.device,
+            n_samples=args.n_samples,
             once=args.once,
             redo=args.redo,
         )

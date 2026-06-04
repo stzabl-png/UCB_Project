@@ -248,6 +248,10 @@ Headless/automation only: `--skip` on vis review; `--no-visualize` and/or `--deb
 | Upload done marker | `input/.upload_complete` (see `demo/razor/mark_upload_complete.py`) |
 | Titan worker | **`segment_daemon` always on** — not one-shot SSH pipeline |
 
+**Candidate count (Titan T6):** Before upload, Razor writes `input/session.json` → `pipeline.titan.max_candidates` (`--titan-max-candidates`, default 50). Titan T6 uses this as PDM `--n-samples`. CLI override on Titan: `process_razor_session` / `segment_daemon` / `run_pdm_grasp.py --n-samples`.
+
+**Multi-grasp on Razor (one Titan run):** `run_server_client_pipeline.py --grasp-attempts N` runs `run_auto_grasp.py` N times with `--attempt-index 0 … N-1` (sorted candidate ranks). Set **`--titan-max-candidates` ≥ `--grasp-attempts`** so enough candidates exist after filtering.
+
 **Suggested Razor env:**
 
 ```bash
