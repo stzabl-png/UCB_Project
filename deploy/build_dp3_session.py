@@ -139,7 +139,8 @@ def main():
     ap.add_argument("--snap-to-table", action="store_true",
                     help="Override FP depth-Z: shift object so its bottom rests on the table")
     ap.add_argument("--table-height", type=float, default=None,
-                    help="Table top Z in base (m); default = input/scene/table.json table_height_m")
+                    help="Table top Z in base (m); default = partner-measured depth-ROI median "
+                         "(measure_table_height_from_session), NOT scene/table.json")
     args = ap.parse_args()
 
     root = None
