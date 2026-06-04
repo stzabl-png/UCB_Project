@@ -110,7 +110,8 @@ def _emit_mapping_logs(mapping: dict[tuple[str, float], str], manifest_rows: lis
                 "[candidate-batch] done "
                 f"obj={row['obj_id']} yaw={float(row['z_yaw_deg']):.0f} "
                 f"backend={backend} selected={row.get('n_selected', '?')} "
-                f"batches={row.get('n_batches_used', '?')}",
+                f"gated_batches={row.get('n_batches_gated', '?')} "
+                f"aff_drop={row.get('affordance_gate_dropped', False)}",
                 flush=True,
             )
         else:

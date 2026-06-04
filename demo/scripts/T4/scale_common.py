@@ -12,6 +12,8 @@ import numpy as np
 
 SCALE_CLAMP = (0.05, 3.0)
 MIN_DEPTH_PTS = 30
+# After depth-based scale (and clamp), shrink mesh slightly for sim2real margin.
+POST_METRIC_SCALE_MULTIPLIER = 0.95
 
 
 @dataclass
@@ -303,6 +305,11 @@ def compute_scale_factor(
     return raw, False, ""
 
 
+def apply_post_metric_scale(scale_factor: float) -> float:
+    """Apply fixed post-scale shrink (used by T4 and daemon pipeline)."""
+    return float(scale_factor) * POST_METRIC_SCALE_MULTIPLIER
+
+
 def apply_uniform_scale(mesh, scale_factor: float):
     import trimesh
 
@@ -347,6 +354,7 @@ def build_scale_payload(
     *,
     session_id: str,
     scale_factor: float,
+    scale_factor_depth: float | None = None,
     est: RealSizeEstimate,
     d_mesh_raw: float,
     d_mesh_method: str,
@@ -377,8 +385,11 @@ def build_scale_payload(
             "(stray regions removed)"
         )
 
+    sf_depth = float(scale_factor_depth if scale_factor_depth is not None else scale_factor)
     payload: dict[str, Any] = {
         "scale_factor": round(float(scale_factor), 6),
+        "scale_factor_depth": round(sf_depth, 6),
+        "post_metric_scale_multiplier": POST_METRIC_SCALE_MULTIPLIER,
         "method": "depth_mask_adaptive_v3",
         "fusion_method": est.fusion_method,
         "fusion_cues_used": est.fusion_cues_used,

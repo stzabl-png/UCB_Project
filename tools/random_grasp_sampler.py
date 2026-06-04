@@ -759,8 +759,13 @@ def generate_one_batch_eval(
     mesh_rc=None,
     *,
     affordance_gate=None,
+    geometry_gates: bool = True,
 ):
-    """Eval ablation raycast: dual-contact raycast, width bounds, optional affordance gate, finger depth."""
+    """Eval ablation raycast.
+
+    geometry_gates=True: width 5–80mm + finger depth <= 4cm (_build_candidate_dict).
+    affordance_gate: optional v6 bilateral filter on contacts.
+    """
     rc = mesh_rc if mesh_rc is not None else mesh
     candidates = []
     for pt in points:
@@ -779,7 +784,9 @@ def generate_one_batch_eval(
             nearest_neg = hits_neg[np.argmin(d_neg)]
 
             width = np.linalg.norm(nearest_pos - nearest_neg)
-            if width > MAX_GRIPPER_OPEN or width < MIN_GRIPPER_WIDTH:
+            if geometry_gates and (
+                width > MAX_GRIPPER_OPEN or width < MIN_GRIPPER_WIDTH
+            ):
                 continue
 
             contact_l = nearest_neg.astype(np.float32)
@@ -788,21 +795,87 @@ def generate_one_batch_eval(
                 continue
 
             grasp_center = ((nearest_pos + nearest_neg) / 2.0).astype(np.float32)
-            cand = _build_candidate_dict(
+            if geometry_gates:
+                cand = _build_candidate_dict(
+                    mesh,
+                    z_min,
+                    z_max,
+                    grasp_center=grasp_center,
+                    contact_L=contact_l,
+                    contact_R=contact_r,
+                    width=float(width),
+                    approach=approach,
+                    finger_dir=finger_dir,
+                    mesh_rc=rc,
+                )
+                if cand is not None:
+                    candidates.append(cand)
+            else:
+                R = make_rotation_matrix(approach, finger_dir)
+                gripper_width = float(np.clip(width + 0.005, 0.01, MAX_GRIPPER_OPEN))
+                score = score_candidate(
+                    mesh,
+                    width,
+                    approach,
+                    finger_dir,
+                    grasp_center,
+                    contact_l,
+                    contact_r,
+                    z_min,
+                    z_max,
+                    mesh_rc=rc,
+                )
+                candidates.append(
+                    {
+                        "name": "",
+                        "position": grasp_center,
+                        "grasp_point": grasp_center,
+                        "rotation": R,
+                        "gripper_width": gripper_width,
+                        "approach": approach.copy(),
+                        "finger_dir": finger_dir.copy(),
+                        "contact_L": contact_l,
+                        "contact_R": contact_r,
+                        "score": score,
+                        "cross_section_width": float(width),
+                        "d_near": -1.0,
+                    }
+                )
+    return candidates
+
+
+def _eval_pool_extend_candidates(
+    mesh,
+    *,
+    mesh_rc,
+    z_min: float,
+    z_max: float,
+    all_candidates: list[dict],
+    target_n: int,
+    n_batches: int,
+    affordance_gate,
+    geometry_gates: bool,
+) -> int:
+    """Run up to n_batches; return number of batches actually run."""
+    rc = mesh_rc if mesh_rc is not None else mesh
+    ran = 0
+    for _ in range(max(0, int(n_batches))):
+        if len(all_candidates) >= target_n:
+            break
+        ran += 1
+        pts = sample_points_pure_random(mesh, N_POINTS_PER_BATCH, mesh_contains=rc)
+        all_candidates.extend(
+            generate_one_batch_eval(
                 mesh,
+                pts,
                 z_min,
                 z_max,
-                grasp_center=grasp_center,
-                contact_L=contact_l,
-                contact_R=contact_r,
-                width=float(width),
-                approach=approach,
-                finger_dir=finger_dir,
                 mesh_rc=rc,
+                affordance_gate=affordance_gate,
+                geometry_gates=geometry_gates,
             )
-            if cand is not None:
-                candidates.append(cand)
-    return candidates
+        )
+    return ran
 
 
 def generate_candidates_eval_pool(
@@ -813,38 +886,76 @@ def generate_candidates_eval_pool(
     affordance_gate=None,
     max_batches: int | None = None,
 ) -> tuple[list[dict], dict]:
-    """Iterative random pool for eval: G1–G3 (+ optional affordance gate); no object-size / score cutoffs."""
+    """Iterative eval pool.
+
+    Phase 1 (max_batches): all active gates (G1–G3 + optional affordance).
+    If still short of target_n: drop affordance gate and keep sampling until full.
+    If still short (e.g. random_pure): drop geometry gates too and fill.
+    """
     target_n = max(1, int(target_n))
     max_batches = max_sampler_batches(target_n) if max_batches is None else max(1, int(max_batches))
     rc = mesh_rc if mesh_rc is not None else mesh
     z_min, z_max = mesh.bounds[0][2], mesh.bounds[1][2]
-    stats: dict = {
-        "n_batches_used": 0,
-        "n_candidates_generated": 0,
-        "n_final": 0,
-    }
     all_candidates: list[dict] = []
-    for batch_idx in range(max_batches):
-        stats["n_batches_used"] = batch_idx + 1
-        pts = sample_points_pure_random(mesh, N_POINTS_PER_BATCH, mesh_contains=rc)
-        new_cands = generate_one_batch_eval(
+    n_gated_batches = _eval_pool_extend_candidates(
+        mesh,
+        mesh_rc=rc,
+        z_min=z_min,
+        z_max=z_max,
+        all_candidates=all_candidates,
+        target_n=target_n,
+        n_batches=max_batches,
+        affordance_gate=affordance_gate,
+        geometry_gates=True,
+    )
+    n_gated = len(all_candidates)
+    affordance_gate_dropped = False
+    n_fill_batches = 0
+    if len(all_candidates) < target_n and affordance_gate is not None:
+        affordance_gate_dropped = True
+        n_fill_batches = _eval_pool_extend_candidates(
             mesh,
-            pts,
-            z_min,
-            z_max,
             mesh_rc=rc,
-            affordance_gate=affordance_gate,
+            z_min=z_min,
+            z_max=z_max,
+            all_candidates=all_candidates,
+            target_n=target_n,
+            n_batches=max_batches * 5,
+            affordance_gate=None,
+            geometry_gates=True,
         )
-        all_candidates.extend(new_cands)
-        stats["n_candidates_generated"] = len(all_candidates)
-        if len(all_candidates) >= target_n:
-            break
+    geometry_gates_dropped = False
+    n_fill_geom_batches = 0
+    if len(all_candidates) < target_n:
+        geometry_gates_dropped = True
+        n_fill_geom_batches = _eval_pool_extend_candidates(
+            mesh,
+            mesh_rc=rc,
+            z_min=z_min,
+            z_max=z_max,
+            all_candidates=all_candidates,
+            target_n=target_n,
+            n_batches=max_batches * 5,
+            affordance_gate=None,
+            geometry_gates=False,
+        )
 
     all_candidates.sort(key=lambda c: -float(c.get("score", 0.0)))
     selected = all_candidates[:target_n]
     for i, c in enumerate(selected):
         c["name"] = f"eval_raycast_{i}"
-    stats["n_final"] = len(selected)
+    stats = {
+        "n_batches_gated": n_gated_batches,
+        "n_candidates_after_gated": n_gated,
+        "n_batches_fill_no_affordance": n_fill_batches,
+        "n_batches_fill_no_geometry": n_fill_geom_batches,
+        "affordance_gate_dropped": affordance_gate_dropped,
+        "geometry_gates_dropped": geometry_gates_dropped,
+        "n_candidates_generated": len(all_candidates),
+        "n_final": len(selected),
+        "n_target": target_n,
+        "pool_shortfall": max(0, target_n - len(selected)),
+    }
     return selected, stats
 
 
@@ -1250,9 +1361,14 @@ def save_candidates_hdf5(
     hp_path: str | None = None,
     sampling_method: str = SAMPLING_METHOD_RAYCAST,
     extra_metadata: dict | None = None,
+    output_hdf5: str | None = None,
 ):
     os.makedirs(output_dir, exist_ok=True)
-    path = os.path.join(output_dir, f'{obj_id}_grasp.hdf5')
+    if output_hdf5:
+        path = os.path.abspath(output_hdf5)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+    else:
+        path = os.path.join(output_dir, f'{obj_id}_grasp.hdf5')
 
     _tools_dir = os.path.dirname(os.path.abspath(__file__))
     if _tools_dir not in sys.path:

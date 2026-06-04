@@ -34,7 +34,9 @@ if str(_T4_DIR) not in sys.path:
     sys.path.insert(0, str(_T4_DIR))
 
 from scale_common import (  # noqa: E402
+    POST_METRIC_SCALE_MULTIPLIER,
     apply_uniform_scale,
+    apply_post_metric_scale,
     build_scale_payload,
     coarse_align_mesh_to_depth,
     compute_scale_factor,
@@ -168,7 +170,8 @@ def main(argv: list[str] | None = None) -> int:
         print("Degenerate mesh diameter", file=sys.stderr)
         return 1
 
-    scale_factor, clamped, clamp_note = compute_scale_factor(est.d_real_m, d_mesh)
+    scale_factor_depth, clamped, clamp_note = compute_scale_factor(est.d_real_m, d_mesh)
+    scale_factor = apply_post_metric_scale(scale_factor_depth)
 
     mesh_scaled = apply_uniform_scale(mesh_raw, scale_factor)
     mesh_scaled.export(str(scaled_glb), file_type="glb")
@@ -181,6 +184,7 @@ def main(argv: list[str] | None = None) -> int:
     payload = build_scale_payload(
         session_id=session_id,
         scale_factor=scale_factor,
+        scale_factor_depth=scale_factor_depth,
         est=est,
         d_mesh_raw=d_mesh,
         d_mesh_method="pca_max_span_primary",
@@ -222,7 +226,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     print(
         f"d_mesh={d_mesh:.4f} (pca={d_mesh_pca:.4f} aabb={d_mesh_aabb:.4f})  "
-        f"scale={scale_factor:.6f}  clamped={clamped}"
+        f"scale_depth={scale_factor_depth:.6f}  scale={scale_factor:.6f}  "
+        f"(post ×{POST_METRIC_SCALE_MULTIPLIER})  clamped={clamped}"
     )
     print(f"Scaled bbox extent (m): [{ext[0]:.3f}, {ext[1]:.3f}, {ext[2]:.3f}]")
     print(f"Saved: {scaled_glb}")

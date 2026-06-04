@@ -46,6 +46,6 @@ python demo/scripts/T4/scale_from_depth.py \
 3. Cues: `pca_max`, `core`, `lateral` (if within 0.65–1.35× median of 3D cues).
 4. `d_real` = trimmed median of cues.
 5. `d_mesh` = PCA max span on mesh vertices (fallback AABB).
-6. `scale_factor = d_real / d_mesh`, clamp `[0.05, 3.0]`, uniform on vertices.
+6. `scale_factor_depth = d_real / d_mesh`, clamp `[0.05, 3.0]`; then `scale_factor = scale_factor_depth × 0.95` (post shrink); uniform on vertices.
 
 Spec: [demo/README.md](../../README.md) (Step T4).

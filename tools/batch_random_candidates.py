@@ -181,18 +181,31 @@ def _generate_one(
         f"target={target} pool_start",
         flush=True,
     )
+    max_batches = int(args.max_batches)
     candidates, pool_stats = rgs.generate_candidates_eval_pool(
         mesh,
         mesh_rc=mesh_rc,
         target_n=target,
         affordance_gate=affordance_gate,
-        max_batches=int(args.max_batches),
+        max_batches=max_batches,
     )
     elapsed_s = time.perf_counter() - t0
+    affordance_fallback = bool(pool_stats.get("affordance_gate_dropped"))
+    geometry_fallback = bool(pool_stats.get("geometry_gates_dropped"))
+    shortfall = int(pool_stats.get("pool_shortfall", 0))
     if not candidates:
         raise RuntimeError(
             f"no random candidates for {obj_id} yaw={yaw} backend={backend} "
-            f"(gates={_hard_gates_metadata()}{gate_suffix})"
+            f"(gates={_hard_gates_metadata()}{gate_suffix}; fill phases exhausted)"
+        )
+    if affordance_fallback or shortfall > 0:
+        print(
+            f"[batch-random] obj={obj_id} yaw={yaw:.0f} "
+            f"selected={len(candidates)}/{target} "
+            f"gated={pool_stats.get('n_candidates_after_gated', '?')} "
+            f"aff_drop={affordance_fallback} geom_drop={geometry_fallback} "
+            f"shortfall={shortfall}",
+            flush=True,
         )
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -208,32 +221,34 @@ def _generate_one(
         **pool_stats,
         **{f"aff_{k}": v for k, v in aff_meta.items()},
     }
-    if affordance_gate is not None:
+    if affordance_gate is not None and not affordance_fallback:
         extra["affordance_threshold_norm"] = 0.3
         extra["affordance_knn_max_m"] = 0.015
-    saved = Path(
-        rgs.save_candidates_hdf5(
-            candidates,
-            obj_id,
-            str(mesh_path),
-            str(out_path.parent),
-            no_rotation=True,
-            dataset=metric_ds,
-            scale_factor=1.0,
-            apply_scale_to_mesh=False,
-            sampling_method=rgs.SAMPLING_METHOD_EVAL_RAYCAST,
-            extra_metadata=extra,
-        )
+    if affordance_fallback:
+        extra["affordance_gate_dropped_for_fill"] = True
+    if geometry_fallback:
+        extra["geometry_gates_dropped_for_fill"] = True
+    if shortfall > 0:
+        extra["pool_shortfall"] = shortfall
+    rgs.save_candidates_hdf5(
+        candidates,
+        obj_id,
+        str(mesh_path),
+        str(out_path.parent),
+        no_rotation=True,
+        dataset=metric_ds,
+        scale_factor=1.0,
+        apply_scale_to_mesh=False,
+        sampling_method=rgs.SAMPLING_METHOD_EVAL_RAYCAST,
+        extra_metadata=extra,
+        output_hdf5=str(out_path),
     )
-    if saved.resolve() != out_path.resolve():
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        if out_path.is_file():
-            out_path.unlink()
-        saved.rename(out_path)
 
     print(
         f"[batch-random] obj={obj_id} yaw={yaw:.0f} backend={backend} "
-        f"selected={len(candidates)}/{target} batches={pool_stats.get('n_batches_used')} "
+        f"selected={len(candidates)}/{target} "
+        f"gated_batches={pool_stats.get('n_batches_gated')} "
+        f"fill_batches={pool_stats.get('n_batches_fill_no_affordance', 0)} "
         f"elapsed_s={elapsed_s:.1f} -> {out_path}",
         flush=True,
     )
@@ -244,7 +259,9 @@ def _generate_one(
         "candidate_backend": backend,
         "n_selected": len(candidates),
         "n_target": target,
-        "n_batches_used": pool_stats.get("n_batches_used"),
+        "n_batches_gated": pool_stats.get("n_batches_gated"),
+        "n_batches_fill_no_affordance": pool_stats.get("n_batches_fill_no_affordance", 0),
+        "affordance_gate_dropped": affordance_fallback,
         "reject_counts": {},
     }
 
