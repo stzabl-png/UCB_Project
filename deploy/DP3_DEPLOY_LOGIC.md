@@ -117,7 +117,7 @@ DP3 吐 `action [8,8]`,每帧 = `[pos_G(3), quat_G_wxyz(4), gripper(1)]`(**绝�
 1. **物体系 → base**:`T_base_ee_dp3 = T_base_mesh @ T_G_ee`(`T_G_ee` 由 action 的 pos+quat 组装)。
 2. **DP3 EE → pinch**:`T_base_pinch = T_base_ee_dp3`,原点 `+= 0.10·approach`(approach=列2),朝向不变。**(§5 步骤2 的逆)**
 3. **pinch → R_ee**:`T_base_Ree = base_ee_from_virtual_pinch_closed(T_base_pinch, T_ee_pinch_closed)`（`hand_retarget_geometry.py:139`,**复用**;`T_ee_pinch_closed` 来自 `ee_retarget.yaml`,不重标)。
-4. **IK**:`PinkLocalIK.solve_ik(T_base_Ree)`（`teleop/ik_utils.py:58`,**复用**),局部解、用当前 q 作种子 → 帧间关节连续(避免肘翻)。返回右臂 7-DOF。
+4. **IK**:`PinkLocalIK.solve_ik(T_base_Ree)`（`teleop/ik_utils.py:58`,**复用**），用当前 q 作种子 → 帧间关节连续(避免肘翻)。per-waypoint 因连续性近目标,**单次调用即可**(run1 已 8/8);但 **go_home 远跳需链式**(见 §9.2)。返回右臂 7-DOF。**可达性 gate 查位置 AND 朝向**(`IK_POS_TOL_M=0.03` + `IK_ORI_TOL_DEG=15°`):Pink 位置权重 50× 朝向,只查位置会放过腕部朝向错的解 → 故加朝向 gate(我们自己的 driver 代码,非 partner)。
 5. **gripper**:二值;策略首次吐 `gripper≥0.5` → 触发 Sharpa `close_hand_until_stall`（`demo/hand_close.py:56`,复用);否则保持张开 `right_hand_profile.yaml`。
 6. **驱动(平滑见 §7)**:把 `{left_arm(保持HOME), right_arm(IK解), left_hand, right_hand}` 写入 `action_buffer`,300Hz 线程负责限速平滑流给真机。
 7. **闭环/终止**:每 8 个 waypoint 执行完 → 回 §5 重算 proprio → 下一 chunk。`object dz>0.03m` 且已闭手 → 成功早停;`max_chunks` 或策略始终不闭手 → 停。
@@ -173,7 +173,11 @@ DP3 输出"一段段轨迹",chunk 间关节会跳;**不能直接发给真机**�
      - 全食指版:train/deploy 约定零偏移、最干净,但 OakInk 训练数据少、覆盖弱。
      - 选哪版看"想 demo 哪些物体 + 哪版 SR 更好",真机试或对比 eval 后再定。
    - retarget-mode(thumb_index vs rigid_body):两模式 EE pos 都是 `pinch−0.10·approach`、approach=列2,pinch 回退一致;仅朝向参数化不同,部署端 FK 给出物理 pinch 朝向即可,不需区分。
-2. **HOME 关节(已定方向)**:先用 partner `DEFAULT_JOINT_POS` / start 位姿 → FK 得 state0;**真机效果不好再调**(潜在调参方向,记下)。
+2. **HOME = DP3 state[0](已定 ✅,2026-06-04 定论 —— 不再用 DEFAULT_JOINT_POS)**:`go_home` **IK 到训练首帧观测** `state[0]=[0.20,-0.293,0.59]+quat[0,1,0,0]`(物体系),使闭环第一帧 proprio 与训练一致。
+   - **θ=0,不做 Rz(-90°)**:对称 chips 下 G 帧 yaw 自由(策略只看 (proprio,点云) 对,圆柱点云 yaw 不变),θ=0 与 world 对齐的 θ=-90 对策略等价、且**唯一可达**(θ=-90 腕部 yaw 差 ~60° 够不到)。`build_dp3_session` 保留 FP 的 `R≈I` 即 θ=0,无需改。
+   - **物体放 base x≈0.40**:`state[0]` 仅在物体 ≈10cm 近处精确可达(x≤0.40:9.6mm/5.9°;x=0.50:够不到)。G 帧物体相对 → 挪物体保 `proprio=state[0]` 不变。
+   - **链式 IK**:`PinkLocalIK.solve_ik` 只是 5 步微分 tracker(近目标用),go_home 是远跳 → 必须**链式调用**(输出回灌种子 ~60 次)。⚠️ 昨晚一次性调用 → 假报不可达,被 `ik_reach_local.py`(对照真机 8/8 自校准的链式版)推翻;旧 `check_home_reachable.py` 已弃用。
+   - 够不到 → `go_home` **直接 raise**(不乱开)。详见 V2AP `demo/phase2/dp3/README.md` 顶部 "razer alignment" + `ik_reach_local.py`。
 3. **base 重力对齐(已确认 ✅)**:Dexmate base Z = 垂直向上 = 与重力反向 = world up。G 系 = base 对齐 mesh 系成立,base↔G 纯平移。
 4. **EE_OFFSET=0.10(已定 ✅)**:DP3 路径全程用训练值 0.10,不混主方法 panda_hand TCP 0.105。
 5. **传输(已定)**:Razor SSH 公钥加入 server;proprio 每 chunk 走 HTTP `/predict`(Razor 直连 server),mesh/点云走一次性 session rsync。Server 选型见 §10。
